@@ -28,6 +28,9 @@ where
     let listener = TcpListener::bind(addr).await?;
     loop {
         let (stream, _) = listener.accept().await?;
+        // Disable Nagle's algorithm so small response frames are sent immediately
+        // rather than being held for up to 200 ms waiting for more data to coalesce.
+        let _ = stream.set_nodelay(true);
         let server = server.clone();
         tokio::spawn(async move {
             let _ = server.serve_io(stream).await;

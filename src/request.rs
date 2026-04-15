@@ -1,12 +1,13 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use futures_core::Stream;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc;
 
 use crate::error::CascadeError;
 
@@ -97,29 +98,34 @@ impl Stream for RequestBody {
 pub(crate) type SinkFuture<'a> = Pin<Box<dyn Future<Output = Result<(), CascadeError>> + Send + 'a>>;
 
 pub(crate) trait ResponseSink: Send {
-    fn write_bytes<'a>(&'a mut self, chunk: Bytes) -> SinkFuture<'a>;
+    /// Encode `chunk` into the response buffer. Must not perform I/O — callers rely on this
+    /// being synchronous and allocation-free on the hot path.
+    fn write_bytes(&mut self, chunk: Bytes) -> Result<(), CascadeError>;
+    /// Flush all buffered chunks to the underlying writer. Called exactly once per response.
     fn finish<'a>(&'a mut self) -> SinkFuture<'a>;
 }
 
-struct ResponseState {
-    sink: Box<dyn ResponseSink>,
-    finished: bool,
+struct ResponseWriterInner {
+    // Holds the sink until finish() takes it out. Using std::sync::Mutex because the
+    // critical section is purely synchronous — no .await inside the lock.
+    sink: Mutex<Option<Box<dyn ResponseSink>>>,
+    finished: AtomicBool,
+    wrote: AtomicBool,
 }
 
 #[derive(Clone)]
 pub struct ResponseWriter {
-    state: Arc<Mutex<ResponseState>>,
-    wrote: Arc<AtomicBool>,
+    inner: Arc<ResponseWriterInner>,
 }
 
 impl ResponseWriter {
     pub(crate) fn new(sink: Box<dyn ResponseSink>) -> Self {
         Self {
-            state: Arc::new(Mutex::new(ResponseState {
-                sink,
-                finished: false,
-            })),
-            wrote: Arc::new(AtomicBool::new(false)),
+            inner: Arc::new(ResponseWriterInner {
+                sink: Mutex::new(Some(sink)),
+                finished: AtomicBool::new(false),
+                wrote: AtomicBool::new(false),
+            }),
         }
     }
 
@@ -129,28 +135,40 @@ impl ResponseWriter {
             return Ok(());
         }
 
-        let mut state = self.state.lock().await;
-        if state.finished {
+        if self.inner.finished.load(Ordering::Acquire) {
             return Err(CascadeError::ConnectionClosed);
         }
 
-        state.sink.write_bytes(chunk).await?;
-        self.wrote.store(true, Ordering::Release);
+        // Lock is held only for the synchronous write_bytes call — no await inside.
+        let mut guard = self.inner.sink.lock().unwrap();
+        if self.inner.finished.load(Ordering::Acquire) {
+            return Err(CascadeError::ConnectionClosed);
+        }
+        guard.as_mut().ok_or(CascadeError::ConnectionClosed)?.write_bytes(chunk)?;
+        drop(guard);
+
+        self.inner.wrote.store(true, Ordering::Release);
         Ok(())
     }
 
     pub async fn finish(&self) -> Result<(), CascadeError> {
-        let mut state = self.state.lock().await;
-        if state.finished {
+        if self.inner.finished.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
 
-        state.sink.finish().await?;
-        state.finished = true;
+        // Take the sink out while holding the lock only briefly (no await under lock).
+        let mut sink = {
+            let mut guard = self.inner.sink.lock().unwrap();
+            guard.take()
+        };
+
+        if let Some(ref mut s) = sink {
+            s.finish().await?;
+        }
         Ok(())
     }
 
     pub fn has_written(&self) -> bool {
-        self.wrote.load(Ordering::Acquire)
+        self.inner.wrote.load(Ordering::Acquire)
     }
 }

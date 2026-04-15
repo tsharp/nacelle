@@ -32,31 +32,27 @@ where
     P: Protocol<Req> + Send + Sync + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    fn write_bytes<'a>(&'a mut self, chunk: Bytes) -> crate::request::SinkFuture<'a> {
-        Box::pin(async move {
-            let Some(pending_chunk) = self.pending_chunk.replace(chunk) else {
-                return Ok(());
-            };
-            self.encode_buffer.clear();
-            self.encode_buffer.reserve(pending_chunk.len() + 32);
+    fn write_bytes(&mut self, chunk: Bytes) -> Result<(), CascadeError> {
+        // Encode the previous pending chunk as a non-terminal frame into the accumulation
+        // buffer. The incoming chunk is held in reserve so we always know which frame is
+        // terminal (needed to set the correct END flag). No I/O or locking here.
+        if let Some(prev) = self.pending_chunk.replace(chunk) {
+            self.encode_buffer.reserve(prev.len() + 32);
             self.protocol
-                .encode_response_chunk(&mut self.context, pending_chunk, &mut self.encode_buffer)?;
-            if !self.encode_buffer.is_empty() {
-                let mut writer = self.writer.lock().await;
-                writer.write_all(&self.encode_buffer).await?;
-            }
-            Ok(())
-        })
+                .encode_response_chunk(&mut self.context, prev, &mut self.encode_buffer)?;
+        }
+        Ok(())
     }
 
     fn finish<'a>(&'a mut self) -> crate::request::SinkFuture<'a> {
         Box::pin(async move {
-            self.encode_buffer.clear();
-            if let Some(pending_chunk) = self.pending_chunk.take() {
-                self.encode_buffer.reserve(pending_chunk.len() + 32);
+            // Encode the last pending chunk as a terminal frame (chunk + END flag in one
+            // frame), or write a bare END frame if the handler wrote no data.
+            if let Some(last) = self.pending_chunk.take() {
+                self.encode_buffer.reserve(last.len() + 32);
                 self.protocol.encode_response_terminal_chunk(
                     &mut self.context,
-                    pending_chunk,
+                    last,
                     &mut self.encode_buffer,
                 )?;
             } else {
@@ -64,8 +60,9 @@ where
                 self.protocol
                     .encode_response_end(&mut self.context, &mut self.encode_buffer)?;
             }
-            let mut writer = self.writer.lock().await;
+            // Single mutex acquisition and single write_all for the entire response.
             if !self.encode_buffer.is_empty() {
+                let mut writer = self.writer.lock().await;
                 writer.write_all(&self.encode_buffer).await?;
             }
             Ok(())
@@ -105,7 +102,7 @@ where
 
         let opcode = decoded.request.opcode();
         let error_context = protocol.error_context(&decoded.request);
-        let Some(handler) = registry.resolve(opcode).cloned() else {
+        let Some(handler) = registry.resolve(opcode) else {
             if can_buffer_request_body(decoded.body_len, &config) {
                 ensure_body_buffered(&mut reader, &mut read_buf, decoded.body_len).await?;
                 drop(buffered_request_body(
@@ -136,7 +133,7 @@ where
                 shared_writer.clone(),
                 service.clone(),
                 protocol.clone(),
-                handler,
+                handler.clone(),
                 request,
                 body,
                 error_context,
@@ -177,7 +174,7 @@ async fn run_request<Svc, Req, P, R, W>(
     writer: Arc<Mutex<W>>,
     service: Arc<Svc>,
     protocol: Arc<P>,
-    handler: BoxedHandler<Svc, Req>,
+    handler: &BoxedHandler<Svc, Req>,
     decoded: DecodedRequest<Req>,
     error_context: P::ErrorContext,
     config: &CascadeConfig,
@@ -209,13 +206,11 @@ where
         let response_probe = response.clone();
         let (body_tx, body_rx) = mpsc::channel(config.request_body_channel_capacity);
         let body = RequestBody::new(body_rx, decoded.body_len);
-        let handler_task = tokio::spawn(execute_handler(
-            handler,
-            service,
-            request,
-            body,
-            response_probe.clone(),
-        ));
+        // Clone only for the spawn path (streaming body — uncommon).
+        let h = handler.clone();
+        let handler_task = tokio::spawn(async move {
+            execute_handler(&h, service, request, body, response_probe.clone()).await
+        });
 
         let pump_result =
             pump_request_body(reader, read_buf, decoded.body_len, &body_tx, config).await;
@@ -263,7 +258,7 @@ where
         &request,
         response_buffer_capacity,
     );
-    let outcome = execute_handler(handler, service, request, body, response).await?;
+    let outcome = execute_handler(&handler, service, request, body, response).await?;
     if let Some(error) = outcome.error {
         if !outcome.wrote_response {
             write_error::<Req, P, W>(
@@ -280,7 +275,7 @@ where
 }
 
 async fn execute_handler<Svc, Req>(
-    handler: BoxedHandler<Svc, Req>,
+    handler: &BoxedHandler<Svc, Req>,
     service: Arc<Svc>,
     request: Req,
     body: RequestBody,
@@ -445,10 +440,13 @@ where
     P: Protocol<Req> + Send + Sync + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    // Call response_context first (borrows protocol), then move protocol into the
+    // struct — avoids a redundant Arc clone.
+    let context = protocol.response_context(req);
     ResponseWriter::new(Box::new(ProtocolResponseSink::<Req, P, W> {
-        protocol: protocol.clone(),
+        protocol,
         writer,
-        context: protocol.response_context(req),
+        context,
         encode_buffer: BytesMut::with_capacity(buffer_capacity.max(32)),
         pending_chunk: None,
         _req: PhantomData,
