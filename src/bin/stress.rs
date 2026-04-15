@@ -1,3 +1,6 @@
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -89,8 +92,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let server = build_server(&config)?;
     let listener = TcpListener::bind(config.bind).await?;
     let listen_addr = listener.local_addr()?;
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let server_task = tokio::spawn(run_server(listener, server, shutdown_rx));
 
     println!(
         "stress target={} connections={} pipeline={} payload={}B response={}B duration={}s",
@@ -101,6 +102,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config.response_bytes,
         config.duration.as_secs_f64()
     );
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let server_task = tokio::spawn(run_server(listener, server, shutdown_rx));
 
     let barrier = Arc::new(Barrier::new(config.connections + 1));
     let mut workers = Vec::with_capacity(config.connections);
@@ -340,7 +344,7 @@ impl WorkerResult {
         self.response_wire_bytes += response_wire_bytes;
         self.latency_total_ns += latency_ns as u128;
         self.max_latency_ns = self.max_latency_ns.max(latency_ns);
-        if self.completed_requests % LATENCY_SAMPLE_STRIDE == 0 {
+        if self.completed_requests.is_multiple_of(LATENCY_SAMPLE_STRIDE) {
             self.latency_samples_ns.push(latency_ns);
         }
     }
