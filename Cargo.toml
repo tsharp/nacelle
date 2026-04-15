@@ -1,0 +1,31 @@
+[package]
+name = "cascade"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["tcp", "runtime"]
+tcp = []
+runtime = []
+metrics = []
+tracing = ["dep:tracing"]
+tls = ["dep:rustls"]
+auth = []
+compression = []
+bench = []
+fuzzing = []
+
+[dependencies]
+bytes = "1.10.1"
+futures-core = "0.3.31"
+rustls = { version = "0.23.28", optional = true }
+tokio = { version = "1.47.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tracing = { version = "0.1.41", optional = true }
+
+[dev-dependencies]
+criterion = "0.5.1"
+
+[[bench]]
+name = "critical_paths"
+harness = false
+required-features = ["bench"]

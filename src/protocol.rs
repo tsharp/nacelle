@@ -1,0 +1,48 @@
+use bytes::{Bytes, BytesMut};
+
+use crate::error::CascadeError;
+use crate::request::RequestMetadata;
+
+#[derive(Debug)]
+pub struct DecodedRequest<Req> {
+    pub request: Req,
+    pub body_len: usize,
+}
+
+pub trait Protocol<Req>: Send + Sync + 'static
+where
+    Req: RequestMetadata,
+{
+    type ResponseContext: Send + 'static;
+    type ErrorContext: Send + 'static;
+
+    fn decode_head(
+        &self,
+        src: &mut BytesMut,
+        max_frame_len: usize,
+    ) -> Result<Option<DecodedRequest<Req>>, CascadeError>;
+
+    fn response_context(&self, req: &Req) -> Self::ResponseContext;
+
+    fn error_context(&self, req: &Req) -> Self::ErrorContext;
+
+    fn encode_response_chunk(
+        &self,
+        context: &mut Self::ResponseContext,
+        chunk: Bytes,
+        dst: &mut BytesMut,
+    ) -> Result<(), CascadeError>;
+
+    fn encode_response_end(
+        &self,
+        context: &mut Self::ResponseContext,
+        dst: &mut BytesMut,
+    ) -> Result<(), CascadeError>;
+
+    fn encode_error(
+        &self,
+        context: Option<&Self::ErrorContext>,
+        error: &CascadeError,
+        dst: &mut BytesMut,
+    ) -> Result<(), CascadeError>;
+}
