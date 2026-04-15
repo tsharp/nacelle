@@ -1,7 +1,7 @@
+use std::cell::UnsafeCell;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
@@ -106,12 +106,25 @@ pub(crate) trait ResponseSink: Send {
 }
 
 struct ResponseWriterInner {
-    // Holds the sink until finish() takes it out. Using std::sync::Mutex because the
-    // critical section is purely synchronous — no .await inside the lock.
-    sink: Mutex<Option<Box<dyn ResponseSink>>>,
+    // Access discipline (upheld by the framework, not the type system):
+    //   • write_bytes — only called from within the handler future; calls are sequential
+    //     within that single task, never concurrent with finish or each other.
+    //   • finish / has_written — only called after the handler future has completed
+    //     (either directly awaited in the same task, or after join on the spawned task).
+    //
+    // Because these two phases never overlap, UnsafeCell access is sound even though
+    // ResponseWriter is Clone + Send + Sync.  The AtomicBools provide the memory-ordering
+    // fence needed when the handler runs in a spawned task (tokio task-join implies
+    // happens-before, so Relaxed ordering is sufficient for `wrote`; AcqRel on `finished`
+    // guards the sink take in finish()).
+    sink: UnsafeCell<Option<Box<dyn ResponseSink>>>,
     finished: AtomicBool,
     wrote: AtomicBool,
 }
+
+// Safety: see access discipline comment on ResponseWriterInner.
+unsafe impl Send for ResponseWriterInner {}
+unsafe impl Sync for ResponseWriterInner {}
 
 #[derive(Clone)]
 pub struct ResponseWriter {
@@ -122,7 +135,7 @@ impl ResponseWriter {
     pub(crate) fn new(sink: Box<dyn ResponseSink>) -> Self {
         Self {
             inner: Arc::new(ResponseWriterInner {
-                sink: Mutex::new(Some(sink)),
+                sink: UnsafeCell::new(Some(sink)),
                 finished: AtomicBool::new(false),
                 wrote: AtomicBool::new(false),
             }),
@@ -135,40 +148,39 @@ impl ResponseWriter {
             return Ok(());
         }
 
-        if self.inner.finished.load(Ordering::Acquire) {
+        if self.inner.finished.load(Ordering::Relaxed) {
             return Err(CascadeError::ConnectionClosed);
         }
 
-        // Lock is held only for the synchronous write_bytes call — no await inside.
-        let mut guard = self.inner.sink.lock().unwrap();
-        if self.inner.finished.load(Ordering::Acquire) {
-            return Err(CascadeError::ConnectionClosed);
-        }
-        guard.as_mut().ok_or(CascadeError::ConnectionClosed)?.write_bytes(chunk)?;
-        drop(guard);
+        // Safety: write_bytes is only called from within the handler future, which is
+        // sequential (no concurrent write_bytes calls).  finish() only accesses sink
+        // after the handler future has completed.  These phases never overlap.
+        let sink = unsafe { &mut *self.inner.sink.get() };
+        sink.as_mut()
+            .ok_or(CascadeError::ConnectionClosed)?
+            .write_bytes(chunk)?;
 
-        self.inner.wrote.store(true, Ordering::Release);
+        self.inner.wrote.store(true, Ordering::Relaxed);
         Ok(())
     }
 
     pub async fn finish(&self) -> Result<(), CascadeError> {
+        // AcqRel: Acquire sees all preceding write_bytes stores; Release makes the
+        // finished state visible to any other caller of finish (idempotency guard).
         if self.inner.finished.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
 
-        // Take the sink out while holding the lock only briefly (no await under lock).
-        let mut sink = {
-            let mut guard = self.inner.sink.lock().unwrap();
-            guard.take()
-        };
-
-        if let Some(ref mut s) = sink {
+        // Safety: finished swap above guarantees this block runs at most once, and it
+        // only runs after the handler future has completed (no concurrent write_bytes).
+        let sink = unsafe { &mut *self.inner.sink.get() }.take();
+        if let Some(mut s) = sink {
             s.finish().await?;
         }
         Ok(())
     }
 
     pub fn has_written(&self) -> bool {
-        self.inner.wrote.load(Ordering::Acquire)
+        self.inner.wrote.load(Ordering::Relaxed)
     }
 }

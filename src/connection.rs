@@ -291,7 +291,7 @@ where
         // Clone only for the spawn path (streaming body — uncommon).
         let h = handler.clone();
         let handler_task = tokio::spawn(async move {
-            execute_handler(&h, service, request, body, response_probe.clone()).await
+            execute_handler(&h, service, request, body, response_probe).await
         });
 
         let pump_result =
