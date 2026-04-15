@@ -133,7 +133,9 @@ where
     // Per-connection accumulation buffer: responses are appended here synchronously
     // during request processing, then flushed in one write syscall before the next
     // blocking socket read.  Starts empty; capacity grows on first use.
-    let mut write_buf = BytesMut::with_capacity(64 * 1024);
+    // Pre-allocate to match the configured response buffer size so that a full
+    // 64 KB flush fits without reallocation on the first write cycle.
+    let mut write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
 
     let result: Result<(), NacelleError> = async {
         'conn: loop {

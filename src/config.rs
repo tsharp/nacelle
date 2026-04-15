@@ -12,10 +12,16 @@ pub struct NacelleConfig {
 impl Default for NacelleConfig {
     fn default() -> Self {
         Self {
-            read_buffer_capacity: 8 * 1024,
-            response_buffer_capacity: 8 * 1024,
-            max_frame_len: 8 * 1024 * 1024,
-            request_body_chunk_size: 8 * 1024,
+            // 64 KB read/write buffers match typical network MTU aggregation and
+            // saturate a socket receive buffer in one syscall for payloads up to 64 KB.
+            read_buffer_capacity: 64 * 1024,
+            response_buffer_capacity: 64 * 1024,
+            // 16 MB is the practical upper bound for a single frame; payloads of
+            // 1–10 KB are fastest, but streaming splits anything larger into chunks.
+            max_frame_len: 16 * 1024 * 1024,
+            // 64 KB chunks align with OS socket buffer granularity, minimising the
+            // number of send(2) syscalls for large streaming responses.
+            request_body_chunk_size: 64 * 1024,
             request_body_channel_capacity: 4,
             max_concurrent_requests_per_connection: 1,
             max_buffered_request_body_per_request: 64 * 1024,
