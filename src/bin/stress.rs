@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -32,6 +32,7 @@ struct StressConfig {
     duration: Duration,
     payload_bytes: usize,
     response_bytes: usize,
+    max_concurrent_requests_per_connection: usize,
     read_buffer_capacity: usize,
     response_buffer_capacity: usize,
     request_body_chunk_size: usize,
@@ -47,6 +48,7 @@ impl Default for StressConfig {
             duration: Duration::from_secs(10),
             payload_bytes: 256,
             response_bytes: 64,
+            max_concurrent_requests_per_connection: 8,
             read_buffer_capacity: 64 * 1024,
             response_buffer_capacity: 16 * 1024,
             request_body_chunk_size: 16 * 1024,
@@ -73,6 +75,11 @@ struct WorkerResult {
 #[derive(Debug)]
 struct ResponseSummary {
     request_id: u64,
+    wire_bytes: usize,
+}
+
+#[derive(Debug, Default)]
+struct PartialResponse {
     wire_bytes: usize,
 }
 
@@ -134,7 +141,11 @@ fn build_server(
                 .with_read_buffer_capacity(config.read_buffer_capacity)
                 .with_response_buffer_capacity(config.response_buffer_capacity)
                 .with_request_body_chunk_size(config.request_body_chunk_size)
-                .with_request_body_channel_capacity(config.request_body_channel_capacity),
+                .with_request_body_channel_capacity(config.request_body_channel_capacity)
+                .with_max_concurrent_requests_per_connection(
+                    config.max_concurrent_requests_per_connection,
+                )
+                .with_max_buffered_request_body_per_request(config.payload_bytes.max(1)),
         )
         .register_handler(
             STRESS_OPCODE,
@@ -193,7 +204,8 @@ async fn run_worker(
     let (mut reader, mut writer) = stream.into_split();
     let payload = vec![worker_id as u8; config.payload_bytes];
     let mut scratch = Vec::with_capacity(config.response_bytes.max(1024));
-    let mut inflight = VecDeque::with_capacity(config.pipeline);
+    let mut inflight = HashMap::with_capacity(config.pipeline);
+    let mut partial_responses = HashMap::<u64, PartialResponse>::with_capacity(config.pipeline);
     let mut result = WorkerResult::default();
     let mut next_request_id = (worker_id as u64) << 48;
 
@@ -208,14 +220,16 @@ async fn run_worker(
         next_request_id += 1;
         result.request_wire_bytes +=
             write_request_frame(&mut writer, request_id, STRESS_OPCODE, &payload).await? as u64;
-        inflight.push_back((request_id, Instant::now()));
+        inflight.insert(request_id, Instant::now());
     }
 
-    while let Some((request_id, started_at)) = inflight.pop_front() {
-        let response = read_response(&mut reader, &mut scratch).await?;
-        if response.request_id != request_id {
-            return Err(CascadeError::InvalidFrame("response ordering changed during stress run"));
-        }
+    while !inflight.is_empty() {
+        let response = read_response(&mut reader, &mut scratch, &mut partial_responses).await?;
+        let started_at = inflight
+            .remove(&response.request_id)
+            .ok_or(CascadeError::InvalidFrame(
+                "response request id was not in the in-flight map",
+            ))?;
 
         let latency_ns = started_at.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         result.record_completion(latency_ns, response.wire_bytes as u64);
@@ -225,7 +239,7 @@ async fn run_worker(
             next_request_id += 1;
             result.request_wire_bytes +=
                 write_request_frame(&mut writer, request_id, STRESS_OPCODE, &payload).await? as u64;
-            inflight.push_back((request_id, Instant::now()));
+            inflight.insert(request_id, Instant::now());
         }
     }
 
@@ -265,32 +279,26 @@ where
 async fn read_response<R>(
     reader: &mut R,
     scratch: &mut Vec<u8>,
+    partial_responses: &mut HashMap<u64, PartialResponse>,
 ) -> Result<ResponseSummary, CascadeError>
 where
     R: AsyncRead + Unpin,
 {
-    let mut request_id = None;
-    let mut wire_bytes = 0_usize;
-
     loop {
         let (frame_request_id, flags, frame_wire_bytes) = read_frame(reader, scratch).await?;
         if flags & FRAME_FLAG_ERROR != 0 {
             return Err(CascadeError::InvalidFrame("stress target returned an error frame"));
         }
 
-        match request_id {
-            Some(existing) if existing != frame_request_id => {
-                return Err(CascadeError::InvalidFrame("response frames changed request id mid-stream"));
-            }
-            None => request_id = Some(frame_request_id),
-            _ => {}
-        }
-
-        wire_bytes += frame_wire_bytes;
+        let partial = partial_responses.entry(frame_request_id).or_default();
+        partial.wire_bytes += frame_wire_bytes;
         if flags & FRAME_FLAG_END != 0 {
+            let partial = partial_responses.remove(&frame_request_id).ok_or(
+                CascadeError::InvalidFrame("response completed without partial response state"),
+            )?;
             return Ok(ResponseSummary {
-                request_id: request_id.expect("response must include at least one frame"),
-                wire_bytes,
+                request_id: frame_request_id,
+                wire_bytes: partial.wire_bytes,
             });
         }
     }
@@ -378,6 +386,9 @@ fn parse_args(
             "--response-bytes" => {
                 config.response_bytes = parse_value(&arg, args.next())?;
             }
+            "--max-concurrent-requests-per-connection" => {
+                config.max_concurrent_requests_per_connection = parse_value(&arg, args.next())?;
+            }
             "--read-buffer" => {
                 config.read_buffer_capacity = parse_value(&arg, args.next())?;
             }
@@ -401,6 +412,9 @@ fn parse_args(
     }
     if config.pipeline == 0 {
         return Err("pipeline must be greater than zero".into());
+    }
+    if config.max_concurrent_requests_per_connection == 0 {
+        return Err("max-concurrent-requests-per-connection must be greater than zero".into());
     }
 
     Ok(config)
@@ -432,10 +446,17 @@ fn print_help() {
            --duration-secs <seconds>                Active load duration (default 10)\n\
            --payload-bytes <bytes>                  Request payload bytes (default 256)\n\
            --response-bytes <bytes>                 Response payload bytes (default 64)\n\
+           --max-concurrent-requests-per-connection <count>\n\
+                                                    Server-side overlap per connection for fully buffered request bodies (default 8)\n\
            --read-buffer <bytes>                    Server read buffer capacity (default 65536)\n\
            --response-buffer <bytes>                Server response encode buffer capacity (default 16384)\n\
            --request-body-chunk-size <bytes>        Request body chunk size (default 16384)\n\
            --request-body-channel-capacity <count>  Request body channel capacity (default 8)\n\
+         \n\
+         Notes:\n\
+           - Connections are established once per worker and reused for the whole run.\n\
+           - High pipeline values measure saturation throughput and queueing under load, not just base RTT.\n\
+           - For established-connection RTT, start with --pipeline 1.\n\
         "
     );
 }
@@ -444,11 +465,18 @@ fn print_summary(config: &StressConfig, result: &WorkerResult, elapsed: Duration
     let elapsed_secs = elapsed.as_secs_f64().max(f64::EPSILON);
     let requests_per_sec = result.completed_requests as f64 / elapsed_secs;
     let total_wire_bytes = result.request_wire_bytes + result.response_wire_bytes;
+    let configured_inflight = config.connections.saturating_mul(config.pipeline) as f64;
     let avg_latency_us = if result.completed_requests == 0 {
         0.0
     } else {
         result.latency_total_ns as f64 / result.completed_requests as f64 / 1_000.0
     };
+    let little_law_latency_us = if requests_per_sec > 0.0 {
+        configured_inflight / requests_per_sec * 1_000_000.0
+    } else {
+        0.0
+    };
+    let implied_inflight = requests_per_sec * (avg_latency_us / 1_000_000.0);
     let mut samples = result.latency_samples_ns.clone();
     samples.sort_unstable();
 
@@ -474,6 +502,12 @@ fn print_summary(config: &StressConfig, result: &WorkerResult, elapsed: Duration
         println!("p50_latency          {:.2} us", percentile(&samples, 0.50) as f64 / 1_000.0);
         println!("p95_latency          {:.2} us", percentile(&samples, 0.95) as f64 / 1_000.0);
         println!("p99_latency          {:.2} us", percentile(&samples, 0.99) as f64 / 1_000.0);
+    }
+    println!("configured_inflight  {}", config.connections * config.pipeline);
+    println!("implied_inflight     {:.1}", implied_inflight);
+    println!("queue_floor_latency  {:.2} us", little_law_latency_us);
+    if config.pipeline > 1 {
+        println!("latency_note         saturation mode; use --pipeline 1 for established-connection RTT");
     }
     println!();
     println!(

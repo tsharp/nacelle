@@ -14,15 +14,35 @@ pub trait RequestMetadata: Send + 'static {
     fn opcode(&self) -> u64;
 }
 
+enum RequestBodySource {
+    Buffered {
+        chunks: Box<[Bytes]>,
+        next_index: usize,
+    },
+    Streaming {
+        receiver: mpsc::Receiver<Result<Bytes, CascadeError>>,
+    },
+}
+
 pub struct RequestBody {
-    receiver: mpsc::Receiver<Result<Bytes, CascadeError>>,
+    source: RequestBodySource,
     remaining_bytes: usize,
 }
 
 impl RequestBody {
     pub(crate) fn new(receiver: mpsc::Receiver<Result<Bytes, CascadeError>>, remaining_bytes: usize) -> Self {
         Self {
-            receiver,
+            source: RequestBodySource::Streaming { receiver },
+            remaining_bytes,
+        }
+    }
+
+    pub(crate) fn from_buffered(chunks: Vec<Bytes>, remaining_bytes: usize) -> Self {
+        Self {
+            source: RequestBodySource::Buffered {
+                chunks: chunks.into_boxed_slice(),
+                next_index: 0,
+            },
             remaining_bytes,
         }
     }
@@ -32,12 +52,20 @@ impl RequestBody {
     }
 
     pub async fn next_chunk(&mut self) -> Option<Result<Bytes, CascadeError>> {
-        match self.receiver.recv().await {
-            Some(Ok(chunk)) => {
+        match &mut self.source {
+            RequestBodySource::Buffered { chunks, next_index } => {
+                let chunk = chunks.get(*next_index)?.clone();
+                *next_index += 1;
                 self.remaining_bytes = self.remaining_bytes.saturating_sub(chunk.len());
                 Some(Ok(chunk))
             }
-            other => other,
+            RequestBodySource::Streaming { receiver } => match receiver.recv().await {
+                Some(Ok(chunk)) => {
+                    self.remaining_bytes = self.remaining_bytes.saturating_sub(chunk.len());
+                    Some(Ok(chunk))
+                }
+                other => other,
+            },
         }
     }
 }
@@ -46,12 +74,22 @@ impl Stream for RequestBody {
     type Item = Result<Bytes, CascadeError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match self.receiver.poll_recv(cx) {
-            Poll::Ready(Some(Ok(chunk))) => {
+        match &mut self.source {
+            RequestBodySource::Buffered { chunks, next_index } => {
+                let Some(chunk) = chunks.get(*next_index).cloned() else {
+                    return Poll::Ready(None);
+                };
+                *next_index += 1;
                 self.remaining_bytes = self.remaining_bytes.saturating_sub(chunk.len());
                 Poll::Ready(Some(Ok(chunk)))
             }
-            other => other,
+            RequestBodySource::Streaming { receiver } => match receiver.poll_recv(cx) {
+                Poll::Ready(Some(Ok(chunk))) => {
+                    self.remaining_bytes = self.remaining_bytes.saturating_sub(chunk.len());
+                    Poll::Ready(Some(Ok(chunk)))
+                }
+                other => other,
+            },
         }
     }
 }

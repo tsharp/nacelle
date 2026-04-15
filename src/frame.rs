@@ -146,6 +146,21 @@ impl Protocol<FrameRequest> for LengthDelimitedProtocol {
         encode_frame(context.request_id, context.opcode, flags, &[], dst)
     }
 
+    fn encode_response_terminal_chunk(
+        &self,
+        context: &mut Self::ResponseContext,
+        chunk: Bytes,
+        dst: &mut BytesMut,
+    ) -> Result<(), CascadeError> {
+        let mut flags = FRAME_FLAG_END;
+        if !context.started {
+            flags |= FRAME_FLAG_START;
+            context.started = true;
+        }
+
+        encode_frame(context.request_id, context.opcode, flags, &chunk, dst)
+    }
+
     fn encode_error(
         &self,
         context: Option<&Self::ErrorContext>,

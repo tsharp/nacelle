@@ -33,6 +33,16 @@ where
         dst: &mut BytesMut,
     ) -> Result<(), CascadeError>;
 
+    fn encode_response_terminal_chunk(
+        &self,
+        context: &mut Self::ResponseContext,
+        chunk: Bytes,
+        dst: &mut BytesMut,
+    ) -> Result<(), CascadeError> {
+        self.encode_response_chunk(context, chunk, dst)?;
+        self.encode_response_end(context, dst)
+    }
+
     fn encode_response_end(
         &self,
         context: &mut Self::ResponseContext,
