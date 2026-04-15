@@ -222,7 +222,7 @@ mod tests {
                      response: ResponseWriter| async move {
                         while let Some(chunk) = body.next_chunk().await {
                             tokio::time::sleep(Duration::from_millis(5)).await;
-                            response.write_bytes(chunk?).await?;
+                            response.write_bytes(chunk?)?;
                         }
                         Ok(())
                     },

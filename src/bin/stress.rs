@@ -158,7 +158,7 @@ fn build_server(
                         let _ = chunk?;
                     }
                     if !svc.response_payload.is_empty() {
-                        response.write_bytes(svc.response_payload.clone()).await?;
+                        response.write_bytes(svc.response_payload.clone())?;
                     }
                     Ok(())
                 },
