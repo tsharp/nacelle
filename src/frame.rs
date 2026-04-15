@@ -82,13 +82,14 @@ impl Protocol<FrameRequest> for LengthDelimitedProtocol {
             return Ok(None);
         }
 
-        let head = src.split_to(HEADER_LEN).freeze();
+        // Read header fields directly without split_to().freeze() (avoids Arc promotion).
         let request_id =
-            u64::from_le_bytes(head[4..12].try_into().expect("slice length checked"));
+            u64::from_le_bytes(src[4..12].try_into().expect("slice length checked"));
         let opcode =
-            u64::from_le_bytes(head[12..20].try_into().expect("slice length checked"));
+            u64::from_le_bytes(src[12..20].try_into().expect("slice length checked"));
         let flags =
-            u32::from_le_bytes(head[20..24].try_into().expect("slice length checked"));
+            u32::from_le_bytes(src[20..24].try_into().expect("slice length checked"));
+        drop(src.split_to(HEADER_LEN));
         let body_len = frame_len - FIXED_FRAME_FIELDS_LEN;
 
         Ok(Some(DecodedRequest {

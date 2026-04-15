@@ -1,5 +1,4 @@
 use std::cell::UnsafeCell;
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +15,8 @@ pub trait RequestMetadata: Send + 'static {
 }
 
 enum RequestBodySource {
+    // Single-chunk bodies (the common case for small payloads): avoids Vec/Box heap alloc.
+    SingleChunk(Option<Bytes>),
     Buffered {
         chunks: Box<[Bytes]>,
         next_index: usize,
@@ -38,6 +39,13 @@ impl RequestBody {
         }
     }
 
+    pub(crate) fn from_single_chunk(chunk: Bytes, remaining_bytes: usize) -> Self {
+        Self {
+            source: RequestBodySource::SingleChunk(Some(chunk)),
+            remaining_bytes,
+        }
+    }
+
     pub(crate) fn from_buffered(chunks: Vec<Bytes>, remaining_bytes: usize) -> Self {
         Self {
             source: RequestBodySource::Buffered {
@@ -54,6 +62,11 @@ impl RequestBody {
 
     pub async fn next_chunk(&mut self) -> Option<Result<Bytes, CascadeError>> {
         match &mut self.source {
+            RequestBodySource::SingleChunk(slot) => {
+                let chunk = slot.take()?;
+                self.remaining_bytes = 0;
+                Some(Ok(chunk))
+            }
             RequestBodySource::Buffered { chunks, next_index } => {
                 let chunk = chunks.get(*next_index)?.clone();
                 *next_index += 1;
@@ -76,6 +89,13 @@ impl Stream for RequestBody {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match &mut self.source {
+            RequestBodySource::SingleChunk(slot) => {
+                let Some(chunk) = slot.take() else {
+                    return Poll::Ready(None);
+                };
+                self.remaining_bytes = 0;
+                Poll::Ready(Some(Ok(chunk)))
+            }
             RequestBodySource::Buffered { chunks, next_index } => {
                 let Some(chunk) = chunks.get(*next_index).cloned() else {
                     return Poll::Ready(None);
@@ -95,14 +115,13 @@ impl Stream for RequestBody {
     }
 }
 
-pub(crate) type SinkFuture<'a> = Pin<Box<dyn Future<Output = Result<(), CascadeError>> + Send + 'a>>;
-
 pub(crate) trait ResponseSink: Send {
     /// Encode `chunk` into the response buffer. Must not perform I/O — callers rely on this
     /// being synchronous and allocation-free on the hot path.
     fn write_bytes(&mut self, chunk: Bytes) -> Result<(), CascadeError>;
     /// Flush all buffered chunks to the underlying writer. Called exactly once per response.
-    fn finish<'a>(&'a mut self) -> SinkFuture<'a>;
+    /// Synchronous: implementations must use non-blocking I/O (e.g. unbounded channel send).
+    fn finish(&mut self) -> Result<(), CascadeError>;
 }
 
 struct ResponseWriterInner {
@@ -142,7 +161,7 @@ impl ResponseWriter {
         }
     }
 
-    pub async fn write_bytes(&self, chunk: impl Into<Bytes>) -> Result<(), CascadeError> {
+    pub fn write_bytes(&self, chunk: impl Into<Bytes>) -> Result<(), CascadeError> {
         let chunk = chunk.into();
         if chunk.is_empty() {
             return Ok(());
@@ -164,7 +183,7 @@ impl ResponseWriter {
         Ok(())
     }
 
-    pub async fn finish(&self) -> Result<(), CascadeError> {
+    pub fn finish(&self) -> Result<(), CascadeError> {
         // AcqRel: Acquire sees all preceding write_bytes stores; Release makes the
         // finished state visible to any other caller of finish (idempotency guard).
         if self.inner.finished.swap(true, Ordering::AcqRel) {
@@ -175,7 +194,7 @@ impl ResponseWriter {
         // only runs after the handler future has completed (no concurrent write_bytes).
         let sink = unsafe { &mut *self.inner.sink.get() }.take();
         if let Some(mut s) = sink {
-            s.finish().await?;
+            s.finish()?;
         }
         Ok(())
     }

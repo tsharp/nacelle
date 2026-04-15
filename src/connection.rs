@@ -44,7 +44,7 @@ where
     P: Protocol<Req>,
 {
     protocol: Arc<P>,
-    write_tx: mpsc::Sender<Bytes>,
+    write_tx: mpsc::UnboundedSender<Bytes>,
     context: P::ResponseContext,
     encode_buffer: BytesMut,
     pending_chunk: Option<Bytes>,
@@ -68,46 +68,41 @@ where
         Ok(())
     }
 
-    fn finish<'a>(&'a mut self) -> crate::request::SinkFuture<'a> {
-        Box::pin(async move {
-            // Encode the last pending chunk as a terminal frame (chunk + END flag in one
-            // frame), or write a bare END frame if the handler wrote no data.
-            if let Some(last) = self.pending_chunk.take() {
-                self.encode_buffer.reserve(last.len() + 32);
-                self.protocol.encode_response_terminal_chunk(
-                    &mut self.context,
-                    last,
-                    &mut self.encode_buffer,
-                )?;
-            } else {
-                self.encode_buffer.reserve(32);
-                self.protocol
-                    .encode_response_end(&mut self.context, &mut self.encode_buffer)?;
-            }
-            // Copy the encoded response into a reference-counted buffer so the encode
-            // buffer's allocation can be returned to the thread-local pool immediately,
-            // then ship the Bytes to the writer task without holding any mutex.
-            if !self.encode_buffer.is_empty() {
-                let bytes = Bytes::copy_from_slice(&self.encode_buffer);
-                let buf = std::mem::take(&mut self.encode_buffer);
-                return_encode_buf(buf);
-                self.write_tx
-                    .send(bytes)
-                    .await
-                    .map_err(|_| CascadeError::ConnectionClosed)?;
-            } else {
-                let buf = std::mem::take(&mut self.encode_buffer);
-                return_encode_buf(buf);
-            }
-            Ok(())
-        })
+    fn finish(&mut self) -> Result<(), CascadeError> {
+        // Encode the last pending chunk as a terminal frame (chunk + END flag in one
+        // frame), or write a bare END frame if the handler wrote no data.
+        if let Some(last) = self.pending_chunk.take() {
+            self.encode_buffer.reserve(last.len() + 32);
+            self.protocol.encode_response_terminal_chunk(
+                &mut self.context,
+                last,
+                &mut self.encode_buffer,
+            )?;
+        } else {
+            self.encode_buffer.reserve(32);
+            self.protocol
+                .encode_response_end(&mut self.context, &mut self.encode_buffer)?;
+        }
+        // Copy the encoded response into a reference-counted buffer so the encode
+        // buffer's allocation can be returned to the thread-local pool immediately,
+        // then ship the Bytes to the writer task via synchronous unbounded send.
+        if !self.encode_buffer.is_empty() {
+            let bytes = Bytes::copy_from_slice(&self.encode_buffer);
+            return_encode_buf(std::mem::take(&mut self.encode_buffer));
+            self.write_tx
+                .send(bytes)
+                .map_err(|_| CascadeError::ConnectionClosed)?;
+        } else {
+            return_encode_buf(std::mem::take(&mut self.encode_buffer));
+        }
+        Ok(())
     }
 }
 
 /// Per-connection writer task. Receives encoded response frames from concurrent
 /// request handlers and writes them to the TCP stream, coalescing multiple frames
 /// into one syscall when they arrive close together.
-async fn run_writer_task<W: AsyncWrite + Unpin>(writer: W, mut rx: mpsc::Receiver<Bytes>) {
+async fn run_writer_task<W: AsyncWrite + Unpin>(writer: W, mut rx: mpsc::UnboundedReceiver<Bytes>) {
     // BufWriter holds a 64 KiB app-space buffer so consecutive small frames from
     // concurrent handlers are merged before being handed to the kernel.
     let mut bw = BufWriter::with_capacity(64 * 1024, writer);
@@ -149,14 +144,11 @@ where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut reader, writer) = tokio::io::split(io);
-    // Channel capacity: enough for all concurrent request handlers to deposit their
-    // response frames without blocking, plus headroom for bursty arrivals.
-    let concurrency_limit = config.max_concurrent_requests_per_connection.max(1);
-    let channel_cap = (concurrency_limit * 4).max(16);
-    let (write_tx, write_rx) = mpsc::channel::<Bytes>(channel_cap);
+    let (write_tx, write_rx) = mpsc::unbounded_channel::<Bytes>();
     let writer_task = tokio::spawn(run_writer_task(writer, write_rx));
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     let mut active_requests = JoinSet::new();
+    let concurrency_limit = config.max_concurrent_requests_per_connection.max(1);
 
     let result: Result<(), CascadeError> = async {
         loop {
@@ -190,8 +182,7 @@ where
                     Some(error_context),
                     CascadeError::UnknownOpcode(opcode),
                     config.response_buffer_capacity,
-                )
-                .await?;
+                )?;
                 continue;
             };
 
@@ -254,7 +245,7 @@ struct HandlerOutcome {
 async fn run_request<Svc, Req, P, R>(
     reader: &mut R,
     read_buf: &mut BytesMut,
-    write_tx: mpsc::Sender<Bytes>,
+    write_tx: mpsc::UnboundedSender<Bytes>,
     service: Arc<Svc>,
     protocol: Arc<P>,
     handler: &BoxedHandler<Svc, Req>,
@@ -310,8 +301,7 @@ where
                 Some(error_context),
                 error,
                 config.response_buffer_capacity,
-            )
-            .await?;
+            )?;
         }
     }
 
@@ -319,7 +309,7 @@ where
 }
 
 async fn run_buffered_request<Svc, Req, P>(
-    write_tx: mpsc::Sender<Bytes>,
+    write_tx: mpsc::UnboundedSender<Bytes>,
     service: Arc<Svc>,
     protocol: Arc<P>,
     handler: BoxedHandler<Svc, Req>,
@@ -348,8 +338,7 @@ where
                 Some(error_context),
                 error,
                 response_buffer_capacity,
-            )
-            .await?;
+            )?;
         }
     }
     Ok(())
@@ -370,7 +359,7 @@ where
     let wrote_response = response.has_written();
     match result {
         Ok(()) => {
-            response.finish().await?;
+            response.finish()?;
             Ok(HandlerOutcome {
                 wrote_response,
                 error: None,
@@ -378,7 +367,7 @@ where
         }
         Err(error) => {
             if wrote_response {
-                response.finish().await?;
+                response.finish()?;
             }
             Ok(HandlerOutcome {
                 wrote_response,
@@ -495,6 +484,12 @@ fn buffered_request_body(
         return RequestBody::from_buffered(Vec::new(), 0);
     }
 
+    // Common case: body fits in one chunk — use SingleChunk to avoid Vec/Box alloc.
+    if body_len <= chunk_size {
+        let chunk = read_buf.split_to(body_len).freeze();
+        return RequestBody::from_single_chunk(chunk, body_len);
+    }
+
     let mut remaining = body_len;
     let mut chunks = Vec::with_capacity(body_len.div_ceil(chunk_size));
     while remaining > 0 {
@@ -512,7 +507,7 @@ fn can_buffer_request_body(body_len: usize, config: &CascadeConfig) -> bool {
 
 fn make_response_writer<Req, P>(
     protocol: Arc<P>,
-    write_tx: mpsc::Sender<Bytes>,
+    write_tx: mpsc::UnboundedSender<Bytes>,
     req: &Req,
     buffer_capacity: usize,
 ) -> ResponseWriter
@@ -533,8 +528,8 @@ where
     }))
 }
 
-async fn write_error<Req, P>(
-    write_tx: &mpsc::Sender<Bytes>,
+fn write_error<Req, P>(
+    write_tx: &mpsc::UnboundedSender<Bytes>,
     protocol: Arc<P>,
     context: Option<P::ErrorContext>,
     error: CascadeError,
@@ -548,7 +543,6 @@ where
     protocol.encode_error(context.as_ref(), &error, &mut dst)?;
     write_tx
         .send(dst.freeze())
-        .await
         .map_err(|_| CascadeError::ConnectionClosed)
 }
 
