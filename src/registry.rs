@@ -1,4 +1,4 @@
-use crate::error::CascadeError;
+use crate::error::NacelleError;
 use crate::handler::BoxedHandler;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,15 +27,15 @@ impl<Svc, Req> HandlerRegistry<Svc, Req> {
     pub fn build(
         mut handlers: Vec<(u64, BoxedHandler<Svc, Req>)>,
         default: Option<BoxedHandler<Svc, Req>>,
-    ) -> Result<Self, CascadeError> {
+    ) -> Result<Self, NacelleError> {
         if handlers.is_empty() && default.is_none() {
-            return Err(CascadeError::MissingHandler);
+            return Err(NacelleError::MissingHandler);
         }
 
         handlers.sort_unstable_by_key(|(opcode, _)| *opcode);
         for window in handlers.windows(2) {
             if window[0].0 == window[1].0 {
-                return Err(CascadeError::DuplicateHandler(window[0].0));
+                return Err(NacelleError::DuplicateHandler(window[0].0));
             }
         }
 
@@ -138,9 +138,8 @@ mod tests {
                 Ok(())
             },
         );
-        let registry =
-            HandlerRegistry::build(vec![(1, handler.clone()), (8192, handler)], None)
-                .expect("registry should build");
+        let registry = HandlerRegistry::build(vec![(1, handler.clone()), (8192, handler)], None)
+            .expect("registry should build");
 
         assert_eq!(registry.strategy(), RegistryStrategy::Sparse);
         assert!(registry.get(8192).is_some());

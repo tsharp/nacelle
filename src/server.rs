@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::config::CascadeConfig;
+use crate::config::NacelleConfig;
 use crate::connection::serve_connection;
-use crate::error::CascadeError;
+use crate::error::NacelleError;
 use crate::handler::BoxedHandler;
 use crate::protocol::Protocol;
 use crate::registry::{HandlerRegistry, RegistryStrategy};
@@ -15,14 +15,14 @@ use crate::request::RequestMetadata;
 pub struct Missing;
 pub struct Present;
 
-pub struct CascadeServer<Svc, Req, P> {
+pub struct NacelleServer<Svc, Req, P> {
     service: Arc<Svc>,
     protocol: Arc<P>,
     registry: Arc<HandlerRegistry<Svc, Req>>,
-    config: CascadeConfig,
+    config: NacelleConfig,
 }
 
-impl<Svc, Req, P> Clone for CascadeServer<Svc, Req, P> {
+impl<Svc, Req, P> Clone for NacelleServer<Svc, Req, P> {
     fn clone(&self) -> Self {
         Self {
             service: self.service.clone(),
@@ -33,27 +33,27 @@ impl<Svc, Req, P> Clone for CascadeServer<Svc, Req, P> {
     }
 }
 
-impl<Svc, Req> CascadeServer<Svc, Req, ()> {
-    pub fn builder() -> CascadeServerBuilder<Svc, Req, Missing, Missing, ()> {
-        CascadeServerBuilder {
+impl<Svc, Req> NacelleServer<Svc, Req, ()> {
+    pub fn builder() -> NacelleServerBuilder<Svc, Req, Missing, Missing, ()> {
+        NacelleServerBuilder {
             service: None,
             protocol: None,
             handlers: Vec::new(),
             default_handler: None,
-            config: CascadeConfig::default(),
+            config: NacelleConfig::default(),
             _service: PhantomData,
             _protocol: PhantomData,
         }
     }
 }
 
-impl<Svc, Req, P> CascadeServer<Svc, Req, P>
+impl<Svc, Req, P> NacelleServer<Svc, Req, P>
 where
     Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
 {
-    pub fn config(&self) -> &CascadeConfig {
+    pub fn config(&self) -> &NacelleConfig {
         &self.config
     }
 
@@ -69,7 +69,7 @@ where
         self.registry.strategy()
     }
 
-    pub async fn serve_io<IO>(&self, io: IO) -> Result<(), CascadeError>
+    pub async fn serve_io<IO>(&self, io: IO) -> Result<(), NacelleError>
     where
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
@@ -84,25 +84,25 @@ where
     }
 
     #[cfg(feature = "tcp")]
-    pub async fn serve_tcp(&self, addr: SocketAddr) -> Result<(), CascadeError> {
+    pub async fn serve_tcp(&self, addr: SocketAddr) -> Result<(), NacelleError> {
         crate::runtime::serve_tcp(Arc::new(self.clone()), addr).await
     }
 }
 
-pub struct CascadeServerBuilder<Svc, Req, ServiceState, ProtocolState, P> {
+pub struct NacelleServerBuilder<Svc, Req, ServiceState, ProtocolState, P> {
     service: Option<Arc<Svc>>,
     protocol: Option<Arc<P>>,
     handlers: Vec<(u64, BoxedHandler<Svc, Req>)>,
     default_handler: Option<BoxedHandler<Svc, Req>>,
-    config: CascadeConfig,
+    config: NacelleConfig,
     _service: PhantomData<ServiceState>,
     _protocol: PhantomData<ProtocolState>,
 }
 
 impl<Svc, Req, ServiceState, ProtocolState, P>
-    CascadeServerBuilder<Svc, Req, ServiceState, ProtocolState, P>
+    NacelleServerBuilder<Svc, Req, ServiceState, ProtocolState, P>
 {
-    pub fn config(mut self, config: CascadeConfig) -> Self {
+    pub fn config(mut self, config: NacelleConfig) -> Self {
         self.config = config;
         self
     }
@@ -118,9 +118,12 @@ impl<Svc, Req, ServiceState, ProtocolState, P>
     }
 }
 
-impl<Svc, Req, ProtocolState, P> CascadeServerBuilder<Svc, Req, Missing, ProtocolState, P> {
-    pub fn service(self, service: Svc) -> CascadeServerBuilder<Svc, Req, Present, ProtocolState, P> {
-        CascadeServerBuilder {
+impl<Svc, Req, ProtocolState, P> NacelleServerBuilder<Svc, Req, Missing, ProtocolState, P> {
+    pub fn service(
+        self,
+        service: Svc,
+    ) -> NacelleServerBuilder<Svc, Req, Present, ProtocolState, P> {
+        NacelleServerBuilder {
             service: Some(Arc::new(service)),
             protocol: self.protocol,
             handlers: self.handlers,
@@ -132,12 +135,12 @@ impl<Svc, Req, ProtocolState, P> CascadeServerBuilder<Svc, Req, Missing, Protoco
     }
 }
 
-impl<Svc, Req, ServiceState, P> CascadeServerBuilder<Svc, Req, ServiceState, Missing, P> {
+impl<Svc, Req, ServiceState, P> NacelleServerBuilder<Svc, Req, ServiceState, Missing, P> {
     pub fn protocol<P2>(
         self,
         protocol: P2,
-    ) -> CascadeServerBuilder<Svc, Req, ServiceState, Present, P2> {
-        CascadeServerBuilder {
+    ) -> NacelleServerBuilder<Svc, Req, ServiceState, Present, P2> {
+        NacelleServerBuilder {
             service: self.service,
             protocol: Some(Arc::new(protocol)),
             handlers: self.handlers,
@@ -149,18 +152,18 @@ impl<Svc, Req, ServiceState, P> CascadeServerBuilder<Svc, Req, ServiceState, Mis
     }
 }
 
-impl<Svc, Req, P> CascadeServerBuilder<Svc, Req, Present, Present, P>
+impl<Svc, Req, P> NacelleServerBuilder<Svc, Req, Present, Present, P>
 where
     Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
 {
-    pub fn build(self) -> Result<CascadeServer<Svc, Req, P>, CascadeError> {
-        let service = self.service.ok_or(CascadeError::MissingService)?;
-        let protocol = self.protocol.ok_or(CascadeError::MissingProtocol)?;
+    pub fn build(self) -> Result<NacelleServer<Svc, Req, P>, NacelleError> {
+        let service = self.service.ok_or(NacelleError::MissingService)?;
+        let protocol = self.protocol.ok_or(NacelleError::MissingProtocol)?;
         let registry = HandlerRegistry::build(self.handlers, self.default_handler)?;
 
-        Ok(CascadeServer {
+        Ok(NacelleServer {
             service,
             protocol,
             registry: Arc::new(registry),
@@ -177,11 +180,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::frame::{
-        FRAME_FLAG_END,
-        FRAME_FLAG_ERROR,
-        FRAME_FLAG_START,
-        FrameRequest,
-        LengthDelimitedProtocol,
+        FRAME_FLAG_END, FRAME_FLAG_ERROR, FRAME_FLAG_START, FrameRequest, LengthDelimitedProtocol,
     };
     use crate::handler::handler_fn;
     use crate::request::{RequestBody, ResponseWriter};
@@ -190,7 +189,7 @@ mod tests {
 
     #[test]
     fn build_requires_at_least_one_handler() {
-        let result = CascadeServer::<(), FrameRequest, ()>::builder()
+        let result = NacelleServer::<(), FrameRequest, ()>::builder()
             .service(())
             .protocol(LengthDelimitedProtocol)
             .build();
@@ -199,17 +198,17 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(matches!(error, CascadeError::MissingHandler));
+        assert!(matches!(error, NacelleError::MissingHandler));
     }
 
     #[tokio::test]
     async fn streams_request_body_and_response_without_full_buffering() {
         let protocol = LengthDelimitedProtocol;
-        let server = CascadeServer::<(), FrameRequest, ()>::builder()
+        let server = NacelleServer::<(), FrameRequest, ()>::builder()
             .service(())
             .protocol(protocol.clone())
             .config(
-                CascadeConfig::default()
+                NacelleConfig::default()
                     .with_request_body_chunk_size(3)
                     .with_request_body_channel_capacity(1),
             )
@@ -241,13 +240,17 @@ mod tests {
             )
             .await
             .expect("request should write");
-        client.shutdown().await.expect("client shutdown should succeed");
+        client
+            .shutdown()
+            .await
+            .expect("client shutdown should succeed");
 
         let mut payload = Vec::new();
         let mut flags = Vec::new();
         loop {
-            let (_request_id, opcode, current_flags, body) =
-                read_frame(&mut client).await.expect("response frame should decode");
+            let (_request_id, opcode, current_flags, body) = read_frame(&mut client)
+                .await
+                .expect("response frame should decode");
             assert_eq!(opcode, 7);
             flags.push(current_flags);
             payload.extend_from_slice(&body);
@@ -258,15 +261,21 @@ mod tests {
 
         assert_eq!(payload, b"streaming!");
         assert_eq!(flags[0] & FRAME_FLAG_START, FRAME_FLAG_START);
-        assert_eq!(flags.last().copied().unwrap_or_default() & FRAME_FLAG_END, FRAME_FLAG_END);
+        assert_eq!(
+            flags.last().copied().unwrap_or_default() & FRAME_FLAG_END,
+            FRAME_FLAG_END
+        );
         assert!(flags.len() >= 2);
-        server_task.await.expect("server task should join").expect("server should complete");
+        server_task
+            .await
+            .expect("server task should join")
+            .expect("server should complete");
     }
 
     #[tokio::test]
     async fn encodes_unknown_opcode_as_error_frame() {
         let protocol = LengthDelimitedProtocol;
-        let server = CascadeServer::<(), FrameRequest, ()>::builder()
+        let server = NacelleServer::<(), FrameRequest, ()>::builder()
             .service(())
             .protocol(protocol.clone())
             .register_handler(
@@ -291,20 +300,34 @@ mod tests {
             )
             .await
             .expect("request should write");
-        client.shutdown().await.expect("client shutdown should succeed");
+        client
+            .shutdown()
+            .await
+            .expect("client shutdown should succeed");
 
-        let (request_id, opcode, flags, body) =
-            read_frame(&mut client).await.expect("response frame should decode");
+        let (request_id, opcode, flags, body) = read_frame(&mut client)
+            .await
+            .expect("response frame should decode");
         assert_eq!(request_id, 11);
         assert_eq!(opcode, 99);
-        assert_eq!(flags & (FRAME_FLAG_START | FRAME_FLAG_END | FRAME_FLAG_ERROR), FRAME_FLAG_START | FRAME_FLAG_END | FRAME_FLAG_ERROR);
-        assert!(String::from_utf8(body).expect("response must be utf8").contains("unknown opcode 99"));
-        server_task.await.expect("server task should join").expect("server should complete");
+        assert_eq!(
+            flags & (FRAME_FLAG_START | FRAME_FLAG_END | FRAME_FLAG_ERROR),
+            FRAME_FLAG_START | FRAME_FLAG_END | FRAME_FLAG_ERROR
+        );
+        assert!(
+            String::from_utf8(body)
+                .expect("response must be utf8")
+                .contains("unknown opcode 99")
+        );
+        server_task
+            .await
+            .expect("server task should join")
+            .expect("server should complete");
     }
 
     async fn read_frame(
         stream: &mut tokio::io::DuplexStream,
-    ) -> Result<(u64, u64, u32, Vec<u8>), CascadeError> {
+    ) -> Result<(u64, u64, u32, Vec<u8>), NacelleError> {
         let mut len_buf = [0_u8; 4];
         stream.read_exact(&mut len_buf).await?;
         let frame_len = u32::from_le_bytes(len_buf) as usize;

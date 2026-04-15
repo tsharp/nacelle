@@ -8,24 +8,102 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use cascade::{
-    CascadeConfig,
-    CascadeError,
-    CascadeServer,
-    FRAME_FLAG_END,
-    FRAME_FLAG_ERROR,
-    FrameRequest,
-    LengthDelimitedProtocol,
-    RequestBody,
-    ResponseWriter,
-    handler_fn,
+use nacelle::{
+    FRAME_FLAG_END, FRAME_FLAG_ERROR, FrameRequest, LengthDelimitedProtocol, NacelleConfig,
+    NacelleError, NacelleServer, RequestBody, ResponseWriter, handler_fn,
 };
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::{Barrier, watch};
 
 const STRESS_OPCODE: u64 = 1;
 const LATENCY_SAMPLE_STRIDE: u64 = 64;
+
+/// Enables the Windows loopback fast-path (SIO_LOOPBACK_FAST_PATH) on a socket.
+///
+/// This ioctl bypasses most of the Windows TCP/IP stack for loopback connections,
+/// reducing per-packet processing from ~300 µs to ~50–100 µs RTT.  It must be
+/// called *before* bind() on listening sockets and *before* connect() on client
+/// sockets; accepted sockets inherit the setting from the listening socket.
+///
+/// No-op on non-Windows platforms or Windows versions older than 8 / Server 2012.
+#[cfg(windows)]
+fn set_loopback_fast_path(raw: std::os::windows::io::RawSocket) {
+    // Declare WSAIoctl without pulling in a winapi crate — the symbol is always
+    // available via Ws2_32.dll which Tokio already links.
+    unsafe extern "system" {
+        fn WSAIoctl(
+            s: usize,
+            dw_io_control_code: u32,
+            lp_vb_in_buffer: *const std::ffi::c_void,
+            cb_in_buffer: u32,
+            lp_vb_out_buffer: *mut std::ffi::c_void,
+            cb_out_buffer: u32,
+            lpcb_bytes_returned: *mut u32,
+            lp_overlapped: *mut std::ffi::c_void,
+            lp_completion_routine: Option<unsafe extern "system" fn()>,
+        ) -> i32;
+    }
+
+    const SIO_LOOPBACK_FAST_PATH: u32 = 0x9800_0010;
+    let enable: u32 = 1;
+    let mut bytes_returned: u32 = 0;
+
+    // SAFETY: `raw` is a valid SOCKET from AsRawSocket; WSAIoctl is thread-safe.
+    let _ = unsafe {
+        WSAIoctl(
+            raw as usize,
+            SIO_LOOPBACK_FAST_PATH,
+            (&enable) as *const u32 as *const std::ffi::c_void,
+            std::mem::size_of::<u32>() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut bytes_returned,
+            std::ptr::null_mut(),
+            None,
+        )
+    };
+}
+
+/// Creates a raw `TcpSocket` with platform-specific low-latency options applied.
+///
+/// On Windows: sets `SIO_LOOPBACK_FAST_PATH` before any bind/connect.
+fn new_raw_socket(addr: &SocketAddr) -> Result<TcpSocket, std::io::Error> {
+    let socket = if addr.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawSocket;
+        set_loopback_fast_path(socket.as_raw_socket());
+    }
+    Ok(socket)
+}
+
+/// Creates a client-side TCP socket ready for `connect()`.
+fn make_tcp_socket(addr: &SocketAddr) -> Result<TcpSocket, std::io::Error> {
+    new_raw_socket(addr)
+}
+
+/// Creates a server-side TCP socket ready for `bind()` + `listen()`.
+///
+/// When `reuseport` is true and the platform is Linux, `SO_REUSEPORT` is set so
+/// that multiple listeners can share the same port with kernel-level load
+/// balancing (true thread-per-core accept).  All sockets sharing a port must
+/// have `reuseport` enabled — including the very first one.
+fn make_server_socket(
+    addr: &SocketAddr,
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] reuseport: bool,
+) -> Result<TcpSocket, std::io::Error> {
+    let socket = new_raw_socket(addr)?;
+    #[cfg(target_os = "linux")]
+    if reuseport {
+        socket.set_reuseport(true)?;
+    }
+    Ok(socket)
+}
 
 #[derive(Debug, Clone)]
 struct StressConfig {
@@ -35,6 +113,7 @@ struct StressConfig {
     duration: Duration,
     payload_bytes: usize,
     response_bytes: usize,
+    server_threads: usize,
     max_concurrent_requests_per_connection: usize,
     read_buffer_capacity: usize,
     response_buffer_capacity: usize,
@@ -51,6 +130,9 @@ impl Default for StressConfig {
             duration: Duration::from_secs(10),
             payload_bytes: 256,
             response_bytes: 64,
+            server_threads: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
             max_concurrent_requests_per_connection: 8,
             read_buffer_capacity: 64 * 1024,
             response_buffer_capacity: 16 * 1024,
@@ -90,21 +172,61 @@ struct PartialResponse {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = parse_args(std::env::args().skip(1))?;
     let server = build_server(&config)?;
-    let listener = TcpListener::bind(config.bind).await?;
-    let listen_addr = listener.local_addr()?;
+
+    // On non-Linux platforms SO_REUSEPORT is not available; clamp to 1 and warn.
+    #[cfg(not(target_os = "linux"))]
+    let n_server_threads = {
+        if config.server_threads > 1 {
+            eprintln!(
+                "note: --server-threads > 1 requires Linux SO_REUSEPORT; using 1 server thread"
+            );
+        }
+        1_usize
+    };
+    #[cfg(target_os = "linux")]
+    let n_server_threads = config.server_threads.max(1);
+
+    // The first listener binds to the requested address (port 0 → OS assigns a port).
+    // Additional listeners (SO_REUSEPORT) must bind to the same concrete port.
+    let use_reuseport = n_server_threads > 1;
+    let first_socket = make_server_socket(&config.bind, use_reuseport)?;
+    first_socket.bind(config.bind)?;
+    let first_listener = first_socket.listen(1024)?;
+    let listen_addr = first_listener.local_addr()?;
 
     println!(
-        "stress target={} connections={} pipeline={} payload={}B response={}B duration={}s",
+        "stress target={} connections={} pipeline={} payload={}B response={}B duration={}s{}",
         listen_addr,
         config.connections,
         config.pipeline,
         config.payload_bytes,
         config.response_bytes,
-        config.duration.as_secs_f64()
+        config.duration.as_secs_f64(),
+        if n_server_threads > 1 {
+            format!(" server-threads={n_server_threads}")
+        } else {
+            String::new()
+        },
     );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let server_task = tokio::spawn(run_server(listener, server, shutdown_rx));
+
+    let mut server_tasks = Vec::with_capacity(n_server_threads);
+    server_tasks.push(tokio::spawn(run_server(
+        first_listener,
+        server.clone(),
+        shutdown_rx.clone(),
+    )));
+    for _ in 1..n_server_threads {
+        let socket = make_server_socket(&listen_addr, true)?;
+        socket.bind(listen_addr)?;
+        let listener = socket.listen(1024)?;
+        server_tasks.push(tokio::spawn(run_server(
+            listener,
+            server.clone(),
+            shutdown_rx.clone(),
+        )));
+    }
 
     let barrier = Arc::new(Barrier::new(config.connections + 1));
     let mut workers = Vec::with_capacity(config.connections);
@@ -126,22 +248,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let total_elapsed = load_started.elapsed();
 
     let _ = shutdown_tx.send(true);
-    server_task.await??;
+    for task in server_tasks {
+        task.await??;
+    }
 
-    print_summary(&config, &aggregate, total_elapsed);
+    print_summary(&config, n_server_threads, &aggregate, total_elapsed);
     Ok(())
 }
 
 fn build_server(
     config: &StressConfig,
-) -> Result<CascadeServer<StressService, FrameRequest, LengthDelimitedProtocol>, CascadeError> {
-    CascadeServer::<StressService, FrameRequest, ()>::builder()
+) -> Result<NacelleServer<StressService, FrameRequest, LengthDelimitedProtocol>, NacelleError> {
+    NacelleServer::<StressService, FrameRequest, ()>::builder()
         .service(StressService {
             response_payload: Bytes::from(vec![0x5A; config.response_bytes]),
         })
         .protocol(LengthDelimitedProtocol)
         .config(
-            CascadeConfig::default()
+            NacelleConfig::default()
                 .with_read_buffer_capacity(config.read_buffer_capacity)
                 .with_response_buffer_capacity(config.response_buffer_capacity)
                 .with_request_body_chunk_size(config.request_body_chunk_size)
@@ -173,9 +297,9 @@ fn build_server(
 
 async fn run_server(
     listener: TcpListener,
-    server: CascadeServer<StressService, FrameRequest, LengthDelimitedProtocol>,
+    server: NacelleServer<StressService, FrameRequest, LengthDelimitedProtocol>,
     mut shutdown: watch::Receiver<bool>,
-) -> Result<(), CascadeError> {
+) -> Result<(), NacelleError> {
     loop {
         tokio::select! {
             changed = shutdown.changed() => {
@@ -202,8 +326,8 @@ async fn run_worker(
     server_addr: SocketAddr,
     config: StressConfig,
     barrier: Arc<Barrier>,
-) -> Result<WorkerResult, CascadeError> {
-    let stream = TcpStream::connect(server_addr).await?;
+) -> Result<WorkerResult, NacelleError> {
+    let stream = make_tcp_socket(&server_addr)?.connect(server_addr).await?;
     stream.set_nodelay(true)?;
     let (mut reader, mut writer) = stream.into_split();
     let payload = vec![worker_id as u8; config.payload_bytes];
@@ -229,11 +353,12 @@ async fn run_worker(
 
     while !inflight.is_empty() {
         let response = read_response(&mut reader, &mut scratch, &mut partial_responses).await?;
-        let started_at = inflight
-            .remove(&response.request_id)
-            .ok_or(CascadeError::InvalidFrame(
-                "response request id was not in the in-flight map",
-            ))?;
+        let started_at =
+            inflight
+                .remove(&response.request_id)
+                .ok_or(NacelleError::InvalidFrame(
+                    "response request id was not in the in-flight map",
+                ))?;
 
         let latency_ns = started_at.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         result.record_completion(latency_ns, response.wire_bytes as u64);
@@ -256,12 +381,12 @@ async fn write_request_frame<W>(
     request_id: u64,
     opcode: u64,
     payload: &[u8],
-) -> Result<usize, CascadeError>
+) -> Result<usize, NacelleError>
 where
     W: AsyncWrite + Unpin,
 {
     let frame_len = 20 + payload.len();
-    let frame_len = u32::try_from(frame_len).map_err(|_| CascadeError::FrameTooLarge {
+    let frame_len = u32::try_from(frame_len).map_err(|_| NacelleError::FrameTooLarge {
         len: frame_len,
         max: u32::MAX as usize,
     })?;
@@ -284,22 +409,27 @@ async fn read_response<R>(
     reader: &mut R,
     scratch: &mut Vec<u8>,
     partial_responses: &mut HashMap<u64, PartialResponse>,
-) -> Result<ResponseSummary, CascadeError>
+) -> Result<ResponseSummary, NacelleError>
 where
     R: AsyncRead + Unpin,
 {
     loop {
         let (frame_request_id, flags, frame_wire_bytes) = read_frame(reader, scratch).await?;
         if flags & FRAME_FLAG_ERROR != 0 {
-            return Err(CascadeError::InvalidFrame("stress target returned an error frame"));
+            return Err(NacelleError::InvalidFrame(
+                "stress target returned an error frame",
+            ));
         }
 
         let partial = partial_responses.entry(frame_request_id).or_default();
         partial.wire_bytes += frame_wire_bytes;
         if flags & FRAME_FLAG_END != 0 {
-            let partial = partial_responses.remove(&frame_request_id).ok_or(
-                CascadeError::InvalidFrame("response completed without partial response state"),
-            )?;
+            let partial =
+                partial_responses
+                    .remove(&frame_request_id)
+                    .ok_or(NacelleError::InvalidFrame(
+                        "response completed without partial response state",
+                    ))?;
             return Ok(ResponseSummary {
                 request_id: frame_request_id,
                 wire_bytes: partial.wire_bytes,
@@ -311,7 +441,7 @@ where
 async fn read_frame<R>(
     reader: &mut R,
     scratch: &mut Vec<u8>,
-) -> Result<(u64, u32, usize), CascadeError>
+) -> Result<(u64, u32, usize), NacelleError>
 where
     R: AsyncRead + Unpin,
 {
@@ -319,7 +449,9 @@ where
     reader.read_exact(&mut len_buf).await?;
     let frame_len = u32::from_le_bytes(len_buf) as usize;
     if frame_len < 20 {
-        return Err(CascadeError::InvalidFrame("stress client received a truncated frame"));
+        return Err(NacelleError::InvalidFrame(
+            "stress client received a truncated frame",
+        ));
     }
 
     let mut fixed = [0_u8; 20];
@@ -344,7 +476,10 @@ impl WorkerResult {
         self.response_wire_bytes += response_wire_bytes;
         self.latency_total_ns += latency_ns as u128;
         self.max_latency_ns = self.max_latency_ns.max(latency_ns);
-        if self.completed_requests.is_multiple_of(LATENCY_SAMPLE_STRIDE) {
+        if self
+            .completed_requests
+            .is_multiple_of(LATENCY_SAMPLE_STRIDE)
+        {
             self.latency_samples_ns.push(latency_ns);
         }
     }
@@ -390,6 +525,9 @@ fn parse_args(
             "--response-bytes" => {
                 config.response_bytes = parse_value(&arg, args.next())?;
             }
+            "--server-threads" => {
+                config.server_threads = parse_value(&arg, args.next())?;
+            }
             "--max-concurrent-requests-per-connection" => {
                 config.max_concurrent_requests_per_connection = parse_value(&arg, args.next())?;
             }
@@ -411,6 +549,9 @@ fn parse_args(
         }
     }
 
+    if config.server_threads == 0 {
+        return Err("server-threads must be greater than zero".into());
+    }
     if config.connections == 0 {
         return Err("connections must be greater than zero".into());
     }
@@ -438,7 +579,7 @@ where
 
 fn print_help() {
     println!(
-        "Cascade stress harness\n\
+        "Nacelle stress harness\n\
          \n\
          Usage:\n\
            cargo run --release --bin stress -- [options]\n\
@@ -450,6 +591,7 @@ fn print_help() {
            --duration-secs <seconds>                Active load duration (default 10)\n\
            --payload-bytes <bytes>                  Request payload bytes (default 256)\n\
            --response-bytes <bytes>                 Response payload bytes (default 64)\n\
+           --server-threads <count>                 Server accept threads sharing one port via SO_REUSEPORT (default: logical CPU count; Linux only)\n\
            --max-concurrent-requests-per-connection <count>\n\
                                                     Server-side overlap per connection for fully buffered request bodies (default 8)\n\
            --read-buffer <bytes>                    Server read buffer capacity (default 65536)\n\
@@ -465,7 +607,12 @@ fn print_help() {
     );
 }
 
-fn print_summary(config: &StressConfig, result: &WorkerResult, elapsed: Duration) {
+fn print_summary(
+    config: &StressConfig,
+    n_server_threads: usize,
+    result: &WorkerResult,
+    elapsed: Duration,
+) {
     let elapsed_secs = elapsed.as_secs_f64().max(f64::EPSILON);
     let requests_per_sec = result.completed_requests as f64 / elapsed_secs;
     let total_wire_bytes = result.request_wire_bytes + result.response_wire_bytes;
@@ -501,26 +648,48 @@ fn print_summary(config: &StressConfig, result: &WorkerResult, elapsed: Duration
         format_bytes_per_sec(result.response_wire_bytes, elapsed)
     );
     println!("avg_latency          {:.2} us", avg_latency_us);
-    println!("max_latency          {:.2} us", result.max_latency_ns as f64 / 1_000.0);
+    println!(
+        "max_latency          {:.2} us",
+        result.max_latency_ns as f64 / 1_000.0
+    );
     if !samples.is_empty() {
-        println!("p50_latency          {:.2} us", percentile(&samples, 0.50) as f64 / 1_000.0);
-        println!("p95_latency          {:.2} us", percentile(&samples, 0.95) as f64 / 1_000.0);
-        println!("p99_latency          {:.2} us", percentile(&samples, 0.99) as f64 / 1_000.0);
+        println!(
+            "p50_latency          {:.2} us",
+            percentile(&samples, 0.50) as f64 / 1_000.0
+        );
+        println!(
+            "p95_latency          {:.2} us",
+            percentile(&samples, 0.95) as f64 / 1_000.0
+        );
+        println!(
+            "p99_latency          {:.2} us",
+            percentile(&samples, 0.99) as f64 / 1_000.0
+        );
     }
-    println!("configured_inflight  {}", config.connections * config.pipeline);
+    println!(
+        "configured_inflight  {}",
+        config.connections * config.pipeline
+    );
     println!("implied_inflight     {:.1}", implied_inflight);
     println!("queue_floor_latency  {:.2} us", little_law_latency_us);
     if config.pipeline > 1 {
-        println!("latency_note         saturation mode; use --pipeline 1 for established-connection RTT");
+        println!(
+            "latency_note         saturation mode; use --pipeline 1 for established-connection RTT"
+        );
     }
     println!();
     println!(
-        "profile              connections={} pipeline={} payload={}B response={}B elapsed={:.2}s",
+        "profile              connections={} pipeline={} payload={}B response={}B elapsed={:.2}s{}",
         config.connections,
         config.pipeline,
         config.payload_bytes,
         config.response_bytes,
-        elapsed_secs
+        elapsed_secs,
+        if n_server_threads > 1 {
+            format!(" server-threads={n_server_threads}")
+        } else {
+            String::new()
+        },
     );
 }
 

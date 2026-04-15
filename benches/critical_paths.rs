@@ -2,12 +2,7 @@ use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use cascade::{
-    FrameRequest,
-    HandlerRegistry,
-    LengthDelimitedProtocol,
-    Protocol,
-    RequestBody,
-    ResponseWriter,
+    FrameRequest, HandlerRegistry, LengthDelimitedProtocol, Protocol, RequestBody, ResponseWriter,
     handler_fn,
 };
 use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
@@ -22,24 +17,14 @@ fn registry_dispatch_benches(c: &mut Criterion) {
 
     let dense = HandlerRegistry::build(
         (0_u64..512)
-            .map(|opcode| {
-                (
-                    opcode,
-                    handler.clone(),
-                )
-            })
+            .map(|opcode| (opcode, handler.clone()))
             .collect(),
         None,
     )
     .expect("dense registry should build");
     let sparse = HandlerRegistry::build(
         (0_u64..512)
-            .map(|index| {
-                (
-                    index * 1024,
-                    handler.clone(),
-                )
-            })
+            .map(|index| (index * 1024, handler.clone()))
             .collect(),
         None,
     )
@@ -127,7 +112,12 @@ fn protocol_frame_benches(c: &mut Criterion) {
     });
     group.bench_function(BenchmarkId::new("encode_response_chunk", "4k"), |b| {
         b.iter_batched(
-            || (protocol.response_context(&req), BytesMut::with_capacity(8192)),
+            || {
+                (
+                    protocol.response_context(&req),
+                    BytesMut::with_capacity(8192),
+                )
+            },
             |(mut context, mut dst)| {
                 protocol
                     .encode_response_chunk(&mut context, response_chunk.clone(), &mut dst)
@@ -140,5 +130,9 @@ fn protocol_frame_benches(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(critical_paths, registry_dispatch_benches, protocol_frame_benches);
+criterion_group!(
+    critical_paths,
+    registry_dispatch_benches,
+    protocol_frame_benches
+);
 criterion_main!(critical_paths);

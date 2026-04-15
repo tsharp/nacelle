@@ -8,7 +8,7 @@ use bytes::Bytes;
 use futures_core::Stream;
 use tokio::sync::mpsc;
 
-use crate::error::CascadeError;
+use crate::error::NacelleError;
 
 pub trait RequestMetadata: Send + 'static {
     fn opcode(&self) -> u64;
@@ -22,7 +22,7 @@ enum RequestBodySource {
         next_index: usize,
     },
     Streaming {
-        receiver: mpsc::Receiver<Result<Bytes, CascadeError>>,
+        receiver: mpsc::Receiver<Result<Bytes, NacelleError>>,
     },
 }
 
@@ -32,7 +32,10 @@ pub struct RequestBody {
 }
 
 impl RequestBody {
-    pub(crate) fn new(receiver: mpsc::Receiver<Result<Bytes, CascadeError>>, remaining_bytes: usize) -> Self {
+    pub(crate) fn new(
+        receiver: mpsc::Receiver<Result<Bytes, NacelleError>>,
+        remaining_bytes: usize,
+    ) -> Self {
         Self {
             source: RequestBodySource::Streaming { receiver },
             remaining_bytes,
@@ -60,7 +63,7 @@ impl RequestBody {
         self.remaining_bytes
     }
 
-    pub async fn next_chunk(&mut self) -> Option<Result<Bytes, CascadeError>> {
+    pub async fn next_chunk(&mut self) -> Option<Result<Bytes, NacelleError>> {
         match &mut self.source {
             RequestBodySource::SingleChunk(slot) => {
                 let chunk = slot.take()?;
@@ -85,7 +88,7 @@ impl RequestBody {
 }
 
 impl Stream for RequestBody {
-    type Item = Result<Bytes, CascadeError>;
+    type Item = Result<Bytes, NacelleError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match &mut self.source {
@@ -118,10 +121,10 @@ impl Stream for RequestBody {
 pub(crate) trait ResponseSink: Send {
     /// Encode `chunk` into the response buffer. Must not perform I/O — callers rely on this
     /// being synchronous and allocation-free on the hot path.
-    fn write_bytes(&mut self, chunk: Bytes) -> Result<(), CascadeError>;
+    fn write_bytes(&mut self, chunk: Bytes) -> Result<(), NacelleError>;
     /// Flush all buffered chunks to the underlying writer. Called exactly once per response.
     /// Synchronous: implementations must use non-blocking I/O (e.g. unbounded channel send).
-    fn finish(&mut self) -> Result<(), CascadeError>;
+    fn finish(&mut self) -> Result<(), NacelleError>;
 }
 
 struct ResponseWriterInner {
@@ -161,14 +164,14 @@ impl ResponseWriter {
         }
     }
 
-    pub fn write_bytes(&self, chunk: impl Into<Bytes>) -> Result<(), CascadeError> {
+    pub fn write_bytes(&self, chunk: impl Into<Bytes>) -> Result<(), NacelleError> {
         let chunk = chunk.into();
         if chunk.is_empty() {
             return Ok(());
         }
 
         if self.inner.finished.load(Ordering::Relaxed) {
-            return Err(CascadeError::ConnectionClosed);
+            return Err(NacelleError::ConnectionClosed);
         }
 
         // Safety: write_bytes is only called from within the handler future, which is
@@ -176,14 +179,14 @@ impl ResponseWriter {
         // after the handler future has completed.  These phases never overlap.
         let sink = unsafe { &mut *self.inner.sink.get() };
         sink.as_mut()
-            .ok_or(CascadeError::ConnectionClosed)?
+            .ok_or(NacelleError::ConnectionClosed)?
             .write_bytes(chunk)?;
 
         self.inner.wrote.store(true, Ordering::Relaxed);
         Ok(())
     }
 
-    pub fn finish(&self) -> Result<(), CascadeError> {
+    pub fn finish(&self) -> Result<(), NacelleError> {
         // AcqRel: Acquire sees all preceding write_bytes stores; Release makes the
         // finished state visible to any other caller of finish (idempotency guard).
         if self.inner.finished.swap(true, Ordering::AcqRel) {

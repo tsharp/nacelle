@@ -7,19 +7,19 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 
 #[cfg(feature = "tcp")]
-use crate::error::CascadeError;
+use crate::error::NacelleError;
 #[cfg(feature = "tcp")]
 use crate::protocol::Protocol;
 #[cfg(feature = "tcp")]
 use crate::request::RequestMetadata;
 #[cfg(feature = "tcp")]
-use crate::server::CascadeServer;
+use crate::server::NacelleServer;
 
 #[cfg(feature = "tcp")]
 pub async fn serve_tcp<Svc, Req, P>(
-    server: Arc<CascadeServer<Svc, Req, P>>,
+    server: Arc<NacelleServer<Svc, Req, P>>,
     addr: SocketAddr,
-) -> Result<(), CascadeError>
+) -> Result<(), NacelleError>
 where
     Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,

@@ -1,6 +1,6 @@
 use bytes::{Bytes, BytesMut};
 
-use crate::error::CascadeError;
+use crate::error::NacelleError;
 use crate::request::RequestMetadata;
 
 #[derive(Debug)]
@@ -20,7 +20,7 @@ where
         &self,
         src: &mut BytesMut,
         max_frame_len: usize,
-    ) -> Result<Option<DecodedRequest<Req>>, CascadeError>;
+    ) -> Result<Option<DecodedRequest<Req>>, NacelleError>;
 
     fn response_context(&self, req: &Req) -> Self::ResponseContext;
 
@@ -31,14 +31,14 @@ where
         context: &mut Self::ResponseContext,
         chunk: Bytes,
         dst: &mut BytesMut,
-    ) -> Result<(), CascadeError>;
+    ) -> Result<(), NacelleError>;
 
     fn encode_response_terminal_chunk(
         &self,
         context: &mut Self::ResponseContext,
         chunk: Bytes,
         dst: &mut BytesMut,
-    ) -> Result<(), CascadeError> {
+    ) -> Result<(), NacelleError> {
         self.encode_response_chunk(context, chunk, dst)?;
         self.encode_response_end(context, dst)
     }
@@ -47,12 +47,12 @@ where
         &self,
         context: &mut Self::ResponseContext,
         dst: &mut BytesMut,
-    ) -> Result<(), CascadeError>;
+    ) -> Result<(), NacelleError>;
 
     fn encode_error(
         &self,
         context: Option<&Self::ErrorContext>,
-        error: &CascadeError,
+        error: &NacelleError,
         dst: &mut BytesMut,
-    ) -> Result<(), CascadeError>;
+    ) -> Result<(), NacelleError>;
 }

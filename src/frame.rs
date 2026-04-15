@@ -1,6 +1,6 @@
 use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::error::CascadeError;
+use crate::error::NacelleError;
 use crate::protocol::{DecodedRequest, Protocol};
 use crate::request::RequestMetadata;
 use crate::util::checked_u32_len;
@@ -48,7 +48,7 @@ impl LengthDelimitedProtocol {
         opcode: u64,
         flags: u32,
         body: &[u8],
-    ) -> Result<Bytes, CascadeError> {
+    ) -> Result<Bytes, NacelleError> {
         let mut dst = BytesMut::with_capacity(HEADER_LEN + body.len());
         encode_frame(request_id, opcode, flags, body, &mut dst)?;
         Ok(dst.freeze())
@@ -63,17 +63,20 @@ impl Protocol<FrameRequest> for LengthDelimitedProtocol {
         &self,
         src: &mut BytesMut,
         max_frame_len: usize,
-    ) -> Result<Option<DecodedRequest<FrameRequest>>, CascadeError> {
+    ) -> Result<Option<DecodedRequest<FrameRequest>>, NacelleError> {
         if src.len() < 4 {
             return Ok(None);
         }
 
-        let frame_len = u32::from_le_bytes(src[0..4].try_into().expect("slice length checked")) as usize;
+        let frame_len =
+            u32::from_le_bytes(src[0..4].try_into().expect("slice length checked")) as usize;
         if frame_len < FIXED_FRAME_FIELDS_LEN {
-            return Err(CascadeError::InvalidFrame("frame length is smaller than the fixed header"));
+            return Err(NacelleError::InvalidFrame(
+                "frame length is smaller than the fixed header",
+            ));
         }
         if frame_len > max_frame_len {
-            return Err(CascadeError::FrameTooLarge {
+            return Err(NacelleError::FrameTooLarge {
                 len: frame_len,
                 max: max_frame_len,
             });
@@ -83,12 +86,9 @@ impl Protocol<FrameRequest> for LengthDelimitedProtocol {
         }
 
         // Read header fields directly without split_to().freeze() (avoids Arc promotion).
-        let request_id =
-            u64::from_le_bytes(src[4..12].try_into().expect("slice length checked"));
-        let opcode =
-            u64::from_le_bytes(src[12..20].try_into().expect("slice length checked"));
-        let flags =
-            u32::from_le_bytes(src[20..24].try_into().expect("slice length checked"));
+        let request_id = u64::from_le_bytes(src[4..12].try_into().expect("slice length checked"));
+        let opcode = u64::from_le_bytes(src[12..20].try_into().expect("slice length checked"));
+        let flags = u32::from_le_bytes(src[20..24].try_into().expect("slice length checked"));
         drop(src.split_to(HEADER_LEN));
         let body_len = frame_len - FIXED_FRAME_FIELDS_LEN;
 
@@ -123,7 +123,7 @@ impl Protocol<FrameRequest> for LengthDelimitedProtocol {
         context: &mut Self::ResponseContext,
         chunk: Bytes,
         dst: &mut BytesMut,
-    ) -> Result<(), CascadeError> {
+    ) -> Result<(), NacelleError> {
         let mut flags = 0;
         if !context.started {
             flags |= FRAME_FLAG_START;
@@ -137,7 +137,7 @@ impl Protocol<FrameRequest> for LengthDelimitedProtocol {
         &self,
         context: &mut Self::ResponseContext,
         dst: &mut BytesMut,
-    ) -> Result<(), CascadeError> {
+    ) -> Result<(), NacelleError> {
         let mut flags = FRAME_FLAG_END;
         if !context.started {
             flags |= FRAME_FLAG_START;
@@ -152,7 +152,7 @@ impl Protocol<FrameRequest> for LengthDelimitedProtocol {
         context: &mut Self::ResponseContext,
         chunk: Bytes,
         dst: &mut BytesMut,
-    ) -> Result<(), CascadeError> {
+    ) -> Result<(), NacelleError> {
         let mut flags = FRAME_FLAG_END;
         if !context.started {
             flags |= FRAME_FLAG_START;
@@ -165,9 +165,9 @@ impl Protocol<FrameRequest> for LengthDelimitedProtocol {
     fn encode_error(
         &self,
         context: Option<&Self::ErrorContext>,
-        error: &CascadeError,
+        error: &NacelleError,
         dst: &mut BytesMut,
-    ) -> Result<(), CascadeError> {
+    ) -> Result<(), NacelleError> {
         let (request_id, opcode) = context
             .map(|context| (context.request_id, context.opcode))
             .unwrap_or((0, 0));
@@ -188,7 +188,7 @@ fn encode_frame(
     flags: u32,
     body: &[u8],
     dst: &mut BytesMut,
-) -> Result<(), CascadeError> {
+) -> Result<(), NacelleError> {
     let frame_len = FIXED_FRAME_FIELDS_LEN + body.len();
     let frame_len = checked_u32_len(frame_len)?;
     dst.reserve(HEADER_LEN + body.len());
@@ -212,10 +212,12 @@ mod tests {
             .expect("frame encoded");
 
         let mut buf = BytesMut::from(&frame[..10]);
-        assert!(protocol
-            .decode_head(&mut buf, 1024)
-            .expect("decode should succeed")
-            .is_none());
+        assert!(
+            protocol
+                .decode_head(&mut buf, 1024)
+                .expect("decode should succeed")
+                .is_none()
+        );
 
         buf.extend_from_slice(&frame[10..]);
         let decoded = protocol
@@ -232,7 +234,9 @@ mod tests {
     fn rejects_malformed_frame_lengths() {
         let protocol = LengthDelimitedProtocol;
         let mut buf = BytesMut::from(&[4_u8, 0, 0, 0][..]);
-        let error = protocol.decode_head(&mut buf, 1024).expect_err("frame must fail");
-        assert!(matches!(error, CascadeError::InvalidFrame(_)));
+        let error = protocol
+            .decode_head(&mut buf, 1024)
+            .expect_err("frame must fail");
+        assert!(matches!(error, NacelleError::InvalidFrame(_)));
     }
 }

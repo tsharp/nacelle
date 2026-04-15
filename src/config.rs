@@ -1,5 +1,5 @@
 #[derive(Debug, Clone)]
-pub struct CascadeConfig {
+pub struct NacelleConfig {
     pub read_buffer_capacity: usize,
     pub response_buffer_capacity: usize,
     pub max_frame_len: usize,
@@ -9,7 +9,7 @@ pub struct CascadeConfig {
     pub max_buffered_request_body_per_request: usize,
 }
 
-impl Default for CascadeConfig {
+impl Default for NacelleConfig {
     fn default() -> Self {
         Self {
             read_buffer_capacity: 8 * 1024,
@@ -23,7 +23,7 @@ impl Default for CascadeConfig {
     }
 }
 
-impl CascadeConfig {
+impl NacelleConfig {
     pub fn with_read_buffer_capacity(mut self, capacity: usize) -> Self {
         self.read_buffer_capacity = capacity.max(1024);
         self

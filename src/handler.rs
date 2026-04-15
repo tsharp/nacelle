@@ -2,10 +2,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use crate::error::CascadeError;
+use crate::error::NacelleError;
 use crate::request::{RequestBody, ResponseWriter};
 
-pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<(), CascadeError>> + Send + 'static>>;
+pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<(), NacelleError>> + Send + 'static>>;
 
 pub trait Handler<Svc, Req>: Send + Sync + 'static {
     fn call(
@@ -28,7 +28,7 @@ where
     Svc: Send + Sync + 'static,
     Req: Send + 'static,
     F: Fn(Arc<Svc>, Req, RequestBody, ResponseWriter) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<(), CascadeError>> + Send + 'static,
+    Fut: Future<Output = Result<(), NacelleError>> + Send + 'static,
 {
     fn call(
         &self,
@@ -46,7 +46,7 @@ where
     Svc: Send + Sync + 'static,
     Req: Send + 'static,
     F: Fn(Arc<Svc>, Req, RequestBody, ResponseWriter) -> Fut + Send + Sync + 'static,
-    Fut: Future<Output = Result<(), CascadeError>> + Send + 'static,
+    Fut: Future<Output = Result<(), NacelleError>> + Send + 'static,
 {
     Arc::new(FnHandler { inner: handler })
 }

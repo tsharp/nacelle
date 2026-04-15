@@ -6,9 +6,8 @@ use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-
-use crate::config::CascadeConfig;
-use crate::error::CascadeError;
+use crate::config::NacelleConfig;
+use crate::error::NacelleError;
 use crate::handler::BoxedHandler;
 use crate::protocol::{DecodedRequest, Protocol};
 use crate::registry::HandlerRegistry;
@@ -60,19 +59,22 @@ where
     Req: RequestMetadata,
     P: Protocol<Req> + Send + Sync + 'static,
 {
-    fn write_bytes(&mut self, chunk: Bytes) -> Result<(), CascadeError> {
+    fn write_bytes(&mut self, chunk: Bytes) -> Result<(), NacelleError> {
         // Encode the previous pending chunk as a non-terminal frame into the accumulation
         // buffer. The incoming chunk is held in reserve so we always know which frame is
         // terminal (needed to set the correct END flag). No I/O or locking here.
         if let Some(prev) = self.pending_chunk.replace(chunk) {
             self.encode_buffer.reserve(prev.len() + 32);
-            self.protocol
-                .encode_response_chunk(&mut self.context, prev, &mut self.encode_buffer)?;
+            self.protocol.encode_response_chunk(
+                &mut self.context,
+                prev,
+                &mut self.encode_buffer,
+            )?;
         }
         Ok(())
     }
 
-    fn finish(&mut self) -> Result<(), CascadeError> {
+    fn finish(&mut self) -> Result<(), NacelleError> {
         // Encode the last pending chunk as a terminal frame (chunk + END flag in one
         // frame), or write a bare END frame if the handler wrote no data.
         if let Some(last) = self.pending_chunk.take() {
@@ -107,7 +109,8 @@ where
 // handler's writes and the connection task's subsequent reads of write_buf.
 unsafe impl<Req: RequestMetadata, P: Protocol<Req> + Send + Sync + 'static> Send
     for ProtocolResponseSink<Req, P>
-{}
+{
+}
 
 /// Per-connection writer task. Receives encoded response frames from concurrent
 /// request handlers and writes them to the TCP stream, coalescing multiple frames
@@ -117,8 +120,8 @@ pub async fn serve_connection<Svc, Req, P, IO>(
     service: Arc<Svc>,
     protocol: Arc<P>,
     registry: Arc<HandlerRegistry<Svc, Req>>,
-    config: CascadeConfig,
-) -> Result<(), CascadeError>
+    config: NacelleConfig,
+) -> Result<(), NacelleError>
 where
     Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
@@ -132,7 +135,7 @@ where
     // blocking socket read.  Starts empty; capacity grows on first use.
     let mut write_buf = BytesMut::with_capacity(64 * 1024);
 
-    let result: Result<(), CascadeError> = async {
+    let result: Result<(), NacelleError> = async {
         'conn: loop {
             // Flush all accumulated responses before we block waiting for more data.
             // Doing it here — rather than after every request — lets pipelined responses
@@ -148,36 +151,32 @@ where
                 if read_buf.is_empty() {
                     break 'conn;
                 }
-                return Err(CascadeError::UnexpectedEof);
+                return Err(NacelleError::UnexpectedEof);
             }
 
             // Decode and process every complete request already in read_buf without
             // yielding back to the executor.  This is the hot loop for pipelined
             // connections: all pipelined requests are processed back-to-back and their
             // responses accumulate in write_buf, then flushed together above.
-            while let Some(decoded) =
-                protocol.decode_head(&mut read_buf, config.max_frame_len)?
-            {
+            while let Some(decoded) = protocol.decode_head(&mut read_buf, config.max_frame_len)? {
                 let opcode = decoded.request.opcode();
                 let error_context = protocol.error_context(&decoded.request);
                 let Some(handler) = registry.resolve(opcode) else {
                     if can_buffer_request_body(decoded.body_len, &config) {
-                        ensure_body_buffered(&mut reader, &mut read_buf, decoded.body_len)
-                            .await?;
+                        ensure_body_buffered(&mut reader, &mut read_buf, decoded.body_len).await?;
                         drop(buffered_request_body(
                             &mut read_buf,
                             decoded.body_len,
                             config.request_body_chunk_size,
                         ));
                     } else {
-                        discard_body(&mut reader, &mut read_buf, decoded.body_len, &config)
-                            .await?;
+                        discard_body(&mut reader, &mut read_buf, decoded.body_len, &config).await?;
                     }
                     write_error::<Req, P>(
                         &mut write_buf,
                         protocol.clone(),
                         Some(error_context),
-                        CascadeError::UnknownOpcode(opcode),
+                        NacelleError::UnknownOpcode(opcode),
                         config.response_buffer_capacity,
                     )?;
                     continue;
@@ -212,7 +211,7 @@ where
 
 struct HandlerOutcome {
     wrote_response: bool,
-    error: Option<CascadeError>,
+    error: Option<NacelleError>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -225,8 +224,8 @@ async fn run_request<Svc, Req, P, R>(
     handler: &BoxedHandler<Svc, Req>,
     decoded: DecodedRequest<Req>,
     error_context: P::ErrorContext,
-    config: &CascadeConfig,
-) -> Result<(), CascadeError>
+    config: &NacelleConfig,
+) -> Result<(), NacelleError>
 where
     Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
@@ -241,7 +240,8 @@ where
             &request,
             config.response_buffer_capacity,
         );
-        let body = buffered_request_body(read_buf, decoded.body_len, config.request_body_chunk_size);
+        let body =
+            buffered_request_body(read_buf, decoded.body_len, config.request_body_chunk_size);
         execute_handler(handler, service, request, body, response).await?
     } else {
         let response = make_response_writer(
@@ -288,7 +288,7 @@ async fn execute_handler<Svc, Req>(
     request: Req,
     body: RequestBody,
     response: ResponseWriter,
-) -> Result<HandlerOutcome, CascadeError>
+) -> Result<HandlerOutcome, NacelleError>
 where
     Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
@@ -319,14 +319,14 @@ async fn ensure_body_buffered<R>(
     reader: &mut R,
     read_buf: &mut BytesMut,
     body_len: usize,
-) -> Result<(), CascadeError>
+) -> Result<(), NacelleError>
 where
     R: AsyncRead + Unpin,
 {
     while read_buf.len() < body_len {
         let bytes_read = reader.read_buf(read_buf).await?;
         if bytes_read == 0 {
-            return Err(CascadeError::UnexpectedEof);
+            return Err(NacelleError::UnexpectedEof);
         }
     }
     Ok(())
@@ -336,9 +336,9 @@ async fn pump_request_body<R>(
     reader: &mut R,
     read_buf: &mut BytesMut,
     body_len: usize,
-    tx: &mpsc::Sender<Result<Bytes, CascadeError>>,
-    config: &CascadeConfig,
-) -> Result<(), CascadeError>
+    tx: &mpsc::Sender<Result<Bytes, NacelleError>>,
+    config: &NacelleConfig,
+) -> Result<(), NacelleError>
 where
     R: AsyncRead + Unpin,
 {
@@ -346,7 +346,9 @@ where
     let mut receiver_open = true;
 
     while remaining > 0 && !read_buf.is_empty() {
-        let take = remaining.min(read_buf.len()).min(config.request_body_chunk_size);
+        let take = remaining
+            .min(read_buf.len())
+            .min(config.request_body_chunk_size);
         let chunk = read_buf.split_to(take).freeze();
         remaining -= take;
         if receiver_open && tx.send(Ok(chunk)).await.is_err() {
@@ -360,9 +362,9 @@ where
         let bytes_read = reader.read_buf(&mut chunk).await?;
         if bytes_read == 0 {
             if receiver_open {
-                let _ = tx.send(Err(CascadeError::UnexpectedEof)).await;
+                let _ = tx.send(Err(NacelleError::UnexpectedEof)).await;
             }
-            return Err(CascadeError::UnexpectedEof);
+            return Err(NacelleError::UnexpectedEof);
         }
 
         remaining -= bytes_read;
@@ -378,8 +380,8 @@ async fn discard_body<R>(
     reader: &mut R,
     read_buf: &mut BytesMut,
     body_len: usize,
-    config: &CascadeConfig,
-) -> Result<(), CascadeError>
+    config: &NacelleConfig,
+) -> Result<(), NacelleError>
 where
     R: AsyncRead + Unpin,
 {
@@ -413,7 +415,7 @@ fn buffered_request_body(
     RequestBody::from_buffered(chunks, body_len)
 }
 
-fn can_buffer_request_body(body_len: usize, config: &CascadeConfig) -> bool {
+fn can_buffer_request_body(body_len: usize, config: &NacelleConfig) -> bool {
     body_len <= config.max_buffered_request_body_per_request
 }
 
@@ -444,9 +446,9 @@ fn write_error<Req, P>(
     write_buf: &mut BytesMut,
     protocol: Arc<P>,
     context: Option<P::ErrorContext>,
-    error: CascadeError,
+    error: NacelleError,
     buffer_capacity: usize,
-) -> Result<(), CascadeError>
+) -> Result<(), NacelleError>
 where
     Req: RequestMetadata,
     P: Protocol<Req> + Send + Sync + 'static,
@@ -459,4 +461,3 @@ where
     }
     Ok(())
 }
-
