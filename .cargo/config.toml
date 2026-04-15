@@ -1,0 +1,4 @@
+[build]
+# Use the host CPU's full instruction set (AVX2, etc.) for maximum throughput.
+# The binary will not be portable to other machines.
+rustflags = ["-C", "target-cpu=native"]

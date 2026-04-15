@@ -1,9 +1,10 @@
+use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::sync::{Mutex, mpsc};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 use crate::config::CascadeConfig;
@@ -13,24 +14,47 @@ use crate::protocol::{DecodedRequest, Protocol};
 use crate::registry::HandlerRegistry;
 use crate::request::{RequestBody, RequestMetadata, ResponseSink, ResponseWriter};
 
-struct ProtocolResponseSink<Req, P, W>
+// One pooled encode buffer per OS thread. Tokio may move tasks between worker
+// threads across await points, but buffers naturally migrate toward the threads
+// that use them most, eliminating the per-request heap allocation after warmup.
+thread_local! {
+    static ENCODE_BUF_POOL: RefCell<Option<BytesMut>> = const { RefCell::new(None) };
+}
+
+#[inline]
+fn take_encode_buf(capacity: usize) -> BytesMut {
+    ENCODE_BUF_POOL.with(|pool| {
+        pool.borrow_mut()
+            .take()
+            .unwrap_or_else(|| BytesMut::with_capacity(capacity))
+    })
+}
+
+#[inline]
+fn return_encode_buf(mut buf: BytesMut) {
+    buf.clear();
+    ENCODE_BUF_POOL.with(|pool| {
+        *pool.borrow_mut() = Some(buf);
+    });
+}
+
+struct ProtocolResponseSink<Req, P>
 where
     Req: RequestMetadata,
     P: Protocol<Req>,
 {
     protocol: Arc<P>,
-    writer: Arc<Mutex<W>>,
+    write_tx: mpsc::Sender<Bytes>,
     context: P::ResponseContext,
     encode_buffer: BytesMut,
     pending_chunk: Option<Bytes>,
     _req: PhantomData<fn() -> Req>,
 }
 
-impl<Req, P, W> ResponseSink for ProtocolResponseSink<Req, P, W>
+impl<Req, P> ResponseSink for ProtocolResponseSink<Req, P>
 where
     Req: RequestMetadata,
     P: Protocol<Req> + Send + Sync + 'static,
-    W: AsyncWrite + Unpin + Send + 'static,
 {
     fn write_bytes(&mut self, chunk: Bytes) -> Result<(), CascadeError> {
         // Encode the previous pending chunk as a non-terminal frame into the accumulation
@@ -60,14 +84,55 @@ where
                 self.protocol
                     .encode_response_end(&mut self.context, &mut self.encode_buffer)?;
             }
-            // Single mutex acquisition and single write_all for the entire response.
+            // Copy the encoded response into a reference-counted buffer so the encode
+            // buffer's allocation can be returned to the thread-local pool immediately,
+            // then ship the Bytes to the writer task without holding any mutex.
             if !self.encode_buffer.is_empty() {
-                let mut writer = self.writer.lock().await;
-                writer.write_all(&self.encode_buffer).await?;
+                let bytes = Bytes::copy_from_slice(&self.encode_buffer);
+                let buf = std::mem::take(&mut self.encode_buffer);
+                return_encode_buf(buf);
+                self.write_tx
+                    .send(bytes)
+                    .await
+                    .map_err(|_| CascadeError::ConnectionClosed)?;
+            } else {
+                let buf = std::mem::take(&mut self.encode_buffer);
+                return_encode_buf(buf);
             }
             Ok(())
         })
     }
+}
+
+/// Per-connection writer task. Receives encoded response frames from concurrent
+/// request handlers and writes them to the TCP stream, coalescing multiple frames
+/// into one syscall when they arrive close together.
+async fn run_writer_task<W: AsyncWrite + Unpin>(writer: W, mut rx: mpsc::Receiver<Bytes>) {
+    // BufWriter holds a 64 KiB app-space buffer so consecutive small frames from
+    // concurrent handlers are merged before being handed to the kernel.
+    let mut bw = BufWriter::with_capacity(64 * 1024, writer);
+    'outer: while let Some(bytes) = rx.recv().await {
+        if bw.write_all(&bytes).await.is_err() {
+            break;
+        }
+        // Drain all frames that are already queued (no yield point) so they land in
+        // the same kernel write as the first frame.
+        loop {
+            match rx.try_recv() {
+                Ok(more) => {
+                    if bw.write_all(&more).await.is_err() {
+                        break 'outer;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        if bw.flush().await.is_err() {
+            break;
+        }
+    }
+    // Best-effort final flush so the client sees any buffered bytes.
+    let _ = bw.flush().await;
 }
 
 pub async fn serve_connection<Svc, Req, P, IO>(
@@ -84,83 +149,101 @@ where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut reader, writer) = tokio::io::split(io);
-    let shared_writer = Arc::new(Mutex::new(writer));
+    // Channel capacity: enough for all concurrent request handlers to deposit their
+    // response frames without blocking, plus headroom for bursty arrivals.
+    let concurrency_limit = config.max_concurrent_requests_per_connection.max(1);
+    let channel_cap = (concurrency_limit * 4).max(16);
+    let (write_tx, write_rx) = mpsc::channel::<Bytes>(channel_cap);
+    let writer_task = tokio::spawn(run_writer_task(writer, write_rx));
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     let mut active_requests = JoinSet::new();
-    let concurrency_limit = config.max_concurrent_requests_per_connection.max(1);
 
-    loop {
-        while active_requests.len() >= concurrency_limit {
-            join_next_request(&mut active_requests).await?;
-        }
+    let result: Result<(), CascadeError> = async {
+        loop {
+            while active_requests.len() >= concurrency_limit {
+                join_next_request(&mut active_requests).await?;
+            }
 
-        let Some(decoded) =
-            read_decoded_request(&mut reader, &mut read_buf, protocol.as_ref(), &config).await?
-        else {
-            break;
-        };
+            let Some(decoded) =
+                read_decoded_request(&mut reader, &mut read_buf, protocol.as_ref(), &config)
+                    .await?
+            else {
+                break;
+            };
 
-        let opcode = decoded.request.opcode();
-        let error_context = protocol.error_context(&decoded.request);
-        let Some(handler) = registry.resolve(opcode) else {
-            if can_buffer_request_body(decoded.body_len, &config) {
+            let opcode = decoded.request.opcode();
+            let error_context = protocol.error_context(&decoded.request);
+            let Some(handler) = registry.resolve(opcode) else {
+                if can_buffer_request_body(decoded.body_len, &config) {
+                    ensure_body_buffered(&mut reader, &mut read_buf, decoded.body_len).await?;
+                    drop(buffered_request_body(
+                        &mut read_buf,
+                        decoded.body_len,
+                        config.request_body_chunk_size,
+                    ));
+                } else {
+                    discard_body(&mut reader, &mut read_buf, decoded.body_len, &config).await?;
+                }
+                write_error::<Req, P>(
+                    &write_tx,
+                    protocol.clone(),
+                    Some(error_context),
+                    CascadeError::UnknownOpcode(opcode),
+                    config.response_buffer_capacity,
+                )
+                .await?;
+                continue;
+            };
+
+            if can_buffer_request_body(decoded.body_len, &config) && concurrency_limit > 1 {
                 ensure_body_buffered(&mut reader, &mut read_buf, decoded.body_len).await?;
-                drop(buffered_request_body(
+                let request = decoded.request;
+                let body = buffered_request_body(
                     &mut read_buf,
                     decoded.body_len,
                     config.request_body_chunk_size,
+                );
+                active_requests.spawn(run_buffered_request(
+                    write_tx.clone(),
+                    service.clone(),
+                    protocol.clone(),
+                    handler.clone(),
+                    request,
+                    body,
+                    error_context,
+                    config.response_buffer_capacity,
                 ));
-            } else {
-                discard_body(&mut reader, &mut read_buf, decoded.body_len, &config).await?;
+                continue;
             }
-            write_error::<Req, P, _>(
-                shared_writer.clone(),
-                protocol.clone(),
-                Some(error_context),
-                CascadeError::UnknownOpcode(opcode),
-                config.response_buffer_capacity,
-            )
-            .await?;
-            continue;
-        };
 
-        if can_buffer_request_body(decoded.body_len, &config) && concurrency_limit > 1 {
-            ensure_body_buffered(&mut reader, &mut read_buf, decoded.body_len).await?;
-            let request = decoded.request;
-            let body =
-                buffered_request_body(&mut read_buf, decoded.body_len, config.request_body_chunk_size);
-            active_requests.spawn(run_buffered_request(
-                shared_writer.clone(),
+            run_request(
+                &mut reader,
+                &mut read_buf,
+                write_tx.clone(),
                 service.clone(),
                 protocol.clone(),
-                handler.clone(),
-                request,
-                body,
+                handler,
+                decoded,
                 error_context,
-                config.response_buffer_capacity,
-            ));
-            continue;
+                &config,
+            )
+            .await?;
         }
 
-        run_request(
-            &mut reader,
-            &mut read_buf,
-            shared_writer.clone(),
-            service.clone(),
-            protocol.clone(),
-            handler,
-            decoded,
-            error_context,
-            &config,
-        )
-        .await?;
-    }
+        while !active_requests.is_empty() {
+            join_next_request(&mut active_requests).await?;
+        }
 
-    while !active_requests.is_empty() {
-        join_next_request(&mut active_requests).await?;
+        Ok(())
     }
+    .await;
 
-    Ok(())
+    // Drop write_tx so the writer task sees the channel closed and exits cleanly.
+    drop(write_tx);
+    // Await the writer task to ensure all buffered data is flushed before returning.
+    let _ = writer_task.await;
+
+    result
 }
 
 struct HandlerOutcome {
@@ -168,10 +251,10 @@ struct HandlerOutcome {
     error: Option<CascadeError>,
 }
 
-async fn run_request<Svc, Req, P, R, W>(
+async fn run_request<Svc, Req, P, R>(
     reader: &mut R,
     read_buf: &mut BytesMut,
-    writer: Arc<Mutex<W>>,
+    write_tx: mpsc::Sender<Bytes>,
     service: Arc<Svc>,
     protocol: Arc<P>,
     handler: &BoxedHandler<Svc, Req>,
@@ -184,13 +267,12 @@ where
     Req: RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
     R: AsyncRead + Unpin + Send,
-    W: AsyncWrite + Unpin + Send + 'static,
 {
     let request = decoded.request;
     let outcome = if decoded.body_len <= read_buf.len() {
         let response = make_response_writer(
             protocol.clone(),
-            writer.clone(),
+            write_tx.clone(),
             &request,
             config.response_buffer_capacity,
         );
@@ -199,7 +281,7 @@ where
     } else {
         let response = make_response_writer(
             protocol.clone(),
-            writer.clone(),
+            write_tx.clone(),
             &request,
             config.response_buffer_capacity,
         );
@@ -222,8 +304,8 @@ where
 
     if let Some(error) = outcome.error {
         if !outcome.wrote_response {
-            write_error::<Req, P, W>(
-                writer,
+            write_error::<Req, P>(
+                &write_tx,
                 protocol,
                 Some(error_context),
                 error,
@@ -236,8 +318,8 @@ where
     Ok(())
 }
 
-async fn run_buffered_request<Svc, Req, P, W>(
-    writer: Arc<Mutex<W>>,
+async fn run_buffered_request<Svc, Req, P>(
+    write_tx: mpsc::Sender<Bytes>,
     service: Arc<Svc>,
     protocol: Arc<P>,
     handler: BoxedHandler<Svc, Req>,
@@ -250,19 +332,18 @@ where
     Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
-    W: AsyncWrite + Unpin + Send + 'static,
 {
     let response = make_response_writer(
         protocol.clone(),
-        writer.clone(),
+        write_tx.clone(),
         &request,
         response_buffer_capacity,
     );
     let outcome = execute_handler(&handler, service, request, body, response).await?;
     if let Some(error) = outcome.error {
         if !outcome.wrote_response {
-            write_error::<Req, P, W>(
-                writer,
+            write_error::<Req, P>(
+                &write_tx,
                 protocol,
                 Some(error_context),
                 error,
@@ -429,32 +510,31 @@ fn can_buffer_request_body(body_len: usize, config: &CascadeConfig) -> bool {
     body_len <= config.max_buffered_request_body_per_request
 }
 
-fn make_response_writer<Req, P, W>(
+fn make_response_writer<Req, P>(
     protocol: Arc<P>,
-    writer: Arc<Mutex<W>>,
+    write_tx: mpsc::Sender<Bytes>,
     req: &Req,
     buffer_capacity: usize,
 ) -> ResponseWriter
 where
     Req: RequestMetadata,
     P: Protocol<Req> + Send + Sync + 'static,
-    W: AsyncWrite + Unpin + Send + 'static,
 {
     // Call response_context first (borrows protocol), then move protocol into the
     // struct — avoids a redundant Arc clone.
     let context = protocol.response_context(req);
-    ResponseWriter::new(Box::new(ProtocolResponseSink::<Req, P, W> {
+    ResponseWriter::new(Box::new(ProtocolResponseSink::<Req, P> {
         protocol,
-        writer,
+        write_tx,
         context,
-        encode_buffer: BytesMut::with_capacity(buffer_capacity.max(32)),
+        encode_buffer: take_encode_buf(buffer_capacity.max(32)),
         pending_chunk: None,
         _req: PhantomData,
     }))
 }
 
-async fn write_error<Req, P, W>(
-    writer: Arc<Mutex<W>>,
+async fn write_error<Req, P>(
+    write_tx: &mpsc::Sender<Bytes>,
     protocol: Arc<P>,
     context: Option<P::ErrorContext>,
     error: CascadeError,
@@ -462,14 +542,14 @@ async fn write_error<Req, P, W>(
 ) -> Result<(), CascadeError>
 where
     Req: RequestMetadata,
-    W: AsyncWrite + Unpin + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
 {
     let mut dst = BytesMut::with_capacity(buffer_capacity.max(128));
     protocol.encode_error(context.as_ref(), &error, &mut dst)?;
-    let mut guard = writer.lock().await;
-    guard.write_all(&dst).await?;
-    Ok(())
+    write_tx
+        .send(dst.freeze())
+        .await
+        .map_err(|_| CascadeError::ConnectionClosed)
 }
 
 async fn join_next_request(
