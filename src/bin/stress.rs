@@ -647,22 +647,22 @@ fn print_summary(
         "response_throughput  {} / s",
         format_bytes_per_sec(result.response_wire_bytes, elapsed)
     );
-    println!("avg_latency          {:.2} us", avg_latency_us);
+    println!("avg_latency          {:.2} µs", avg_latency_us);
     println!(
-        "max_latency          {:.2} us",
+        "max_latency          {:.2} µs",
         result.max_latency_ns as f64 / 1_000.0
     );
     if !samples.is_empty() {
         println!(
-            "p50_latency          {:.2} us",
+            "p50_latency          {:.2} µs",
             percentile(&samples, 0.50) as f64 / 1_000.0
         );
         println!(
-            "p95_latency          {:.2} us",
+            "p95_latency          {:.2} µs",
             percentile(&samples, 0.95) as f64 / 1_000.0
         );
         println!(
-            "p99_latency          {:.2} us",
+            "p99_latency          {:.2} µs",
             percentile(&samples, 0.99) as f64 / 1_000.0
         );
     }
@@ -671,7 +671,7 @@ fn print_summary(
         config.connections * config.pipeline
     );
     println!("implied_inflight     {:.1}", implied_inflight);
-    println!("queue_floor_latency  {:.2} us", little_law_latency_us);
+    println!("queue_floor_latency  {:.2} µs", little_law_latency_us);
     if config.pipeline > 1 {
         println!(
             "latency_note         saturation mode; use --pipeline 1 for established-connection RTT"
