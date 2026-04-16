@@ -393,6 +393,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nacelle-stress-test"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "mimalloc",
+ "nacelle",
+ "tokio",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
