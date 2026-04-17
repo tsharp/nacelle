@@ -1,5 +1,5 @@
 [workspace]
-members = ["nacelle", "nacelle-stress-test"]
+members = ["nacelle", "nacelle-stress-test", "nacelle-stress-server"]
 resolver = "2"
 
 [profile.release]

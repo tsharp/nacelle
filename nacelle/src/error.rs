@@ -18,7 +18,7 @@ pub enum NacelleError {
     Io(io::Error),
     Protocol(BoxError),
     Handler(BoxError),
-    Join(tokio::task::JoinError),
+    Join(crate::runtime::JoinError),
 }
 
 impl NacelleError {
@@ -75,8 +75,8 @@ impl From<io::Error> for NacelleError {
     }
 }
 
-impl From<tokio::task::JoinError> for NacelleError {
-    fn from(value: tokio::task::JoinError) -> Self {
+impl From<crate::runtime::JoinError> for NacelleError {
+    fn from(value: crate::runtime::JoinError) -> Self {
         Self::Join(value)
     }
 }

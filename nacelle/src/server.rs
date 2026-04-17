@@ -2,8 +2,6 @@ use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tokio::io::{AsyncRead, AsyncWrite};
-
 use crate::config::NacelleConfig;
 use crate::connection::serve_connection;
 use crate::error::NacelleError;
@@ -11,6 +9,7 @@ use crate::handler::BoxedHandler;
 use crate::protocol::Protocol;
 use crate::registry::{HandlerRegistry, RegistryStrategy};
 use crate::request::RequestMetadata;
+use crate::runtime::{MaybeSend, NacelleRead, NacelleWrite};
 
 pub struct Missing;
 pub struct Present;
@@ -69,12 +68,36 @@ where
         self.registry.strategy()
     }
 
-    pub async fn serve_io<IO>(&self, io: IO) -> Result<(), NacelleError>
+    pub async fn serve_halves<R, W>(&self, reader: R, writer: W) -> Result<(), NacelleError>
     where
-        IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+        R: NacelleRead + MaybeSend + 'static,
+        W: NacelleWrite + MaybeSend + 'static,
     {
         serve_connection(
-            io,
+            reader,
+            writer,
+            self.service.clone(),
+            self.protocol.clone(),
+            self.registry.clone(),
+            self.config.clone(),
+        )
+        .await
+    }
+
+    /// Serve an I/O stream that implements tokio's `AsyncRead + AsyncWrite`.
+    ///
+    /// The stream is split into independent read/write halves internally.
+    /// Available under the tokio runtime only; monoio callers should use
+    /// `serve_halves` directly with pre-split stream halves.
+    #[cfg(feature = "tokio-runtime")]
+    pub async fn serve_io<IO>(&self, io: IO) -> Result<(), NacelleError>
+    where
+        IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + 'static + MaybeSend,
+    {
+        let (reader, writer) = tokio::io::split(io);
+        serve_connection(
+            reader,
+            writer,
             self.service.clone(),
             self.protocol.clone(),
             self.registry.clone(),
@@ -172,7 +195,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio-runtime"))]
 mod tests {
     use std::sync::Arc;
     use std::time::Duration;

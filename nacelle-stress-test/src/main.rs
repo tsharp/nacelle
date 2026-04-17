@@ -7,14 +7,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
-use nacelle::{
-    FRAME_FLAG_END, FRAME_FLAG_ERROR, FrameRequest, LengthDelimitedProtocol, NacelleConfig,
-    NacelleError, NacelleServer, RequestBody, ResponseWriter, handler_fn,
-};
+use nacelle::{FRAME_FLAG_END, FRAME_FLAG_ERROR, NacelleError};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpSocket};
-use tokio::sync::{Barrier, watch};
+use tokio::net::TcpSocket;
+use tokio::sync::Barrier;
 
 const STRESS_OPCODE: u64 = 1;
 const LATENCY_SAMPLE_STRIDE: u64 = 64;
@@ -87,64 +83,25 @@ fn make_tcp_socket(addr: &SocketAddr) -> Result<TcpSocket, std::io::Error> {
     new_raw_socket(addr)
 }
 
-/// Creates a server-side TCP socket ready for `bind()` + `listen()`.
-///
-/// When `reuseport` is true and the platform is Linux, `SO_REUSEPORT` is set so
-/// that multiple listeners can share the same port with kernel-level load
-/// balancing (true thread-per-core accept).  All sockets sharing a port must
-/// have `reuseport` enabled — including the very first one.
-fn make_server_socket(
-    addr: &SocketAddr,
-    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] reuseport: bool,
-) -> Result<TcpSocket, std::io::Error> {
-    let socket = new_raw_socket(addr)?;
-    #[cfg(target_os = "linux")]
-    if reuseport {
-        socket.set_reuseport(true)?;
-    }
-    Ok(socket)
-}
-
 #[derive(Debug, Clone)]
 struct StressConfig {
-    bind: SocketAddr,
+    server_addr: SocketAddr,
     connections: usize,
     pipeline: usize,
     duration: Duration,
     payload_bytes: usize,
-    response_bytes: usize,
-    server_threads: usize,
-    max_concurrent_requests_per_connection: usize,
-    read_buffer_capacity: usize,
-    response_buffer_capacity: usize,
-    request_body_chunk_size: usize,
-    request_body_channel_capacity: usize,
 }
 
 impl Default for StressConfig {
     fn default() -> Self {
         Self {
-            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            server_addr: SocketAddr::from(([127, 0, 0, 1], 7878)),
             connections: 256,
             pipeline: 8,
             duration: Duration::from_secs(10),
             payload_bytes: 256,
-            response_bytes: 64,
-            server_threads: std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1),
-            max_concurrent_requests_per_connection: 8,
-            read_buffer_capacity: 64 * 1024,
-            response_buffer_capacity: 16 * 1024,
-            request_body_chunk_size: 16 * 1024,
-            request_body_channel_capacity: 8,
         }
     }
-}
-
-#[derive(Debug)]
-struct StressService {
-    response_payload: Bytes,
 }
 
 #[derive(Debug, Default)]
@@ -171,69 +128,22 @@ struct PartialResponse {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = parse_args(std::env::args().skip(1))?;
-    let server = build_server(&config)?;
-
-    // On non-Linux platforms SO_REUSEPORT is not available; clamp to 1 and warn.
-    #[cfg(not(target_os = "linux"))]
-    let n_server_threads = {
-        if config.server_threads > 1 {
-            eprintln!(
-                "note: --server-threads > 1 requires Linux SO_REUSEPORT; using 1 server thread"
-            );
-        }
-        1_usize
-    };
-    #[cfg(target_os = "linux")]
-    let n_server_threads = config.server_threads.max(1);
-
-    // The first listener binds to the requested address (port 0 → OS assigns a port).
-    // Additional listeners (SO_REUSEPORT) must bind to the same concrete port.
-    let use_reuseport = n_server_threads > 1;
-    let first_socket = make_server_socket(&config.bind, use_reuseport)?;
-    first_socket.bind(config.bind)?;
-    let first_listener = first_socket.listen(1024)?;
-    let listen_addr = first_listener.local_addr()?;
 
     println!(
-        "stress target={} connections={} pipeline={} payload={}B response={}B duration={}s{}",
-        listen_addr,
+        "stress target={} connections={} pipeline={} payload={}B duration={}s",
+        config.server_addr,
         config.connections,
         config.pipeline,
         config.payload_bytes,
-        config.response_bytes,
         config.duration.as_secs_f64(),
-        if n_server_threads > 1 {
-            format!(" server-threads={n_server_threads}")
-        } else {
-            String::new()
-        },
     );
-
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-
-    let mut server_tasks = Vec::with_capacity(n_server_threads);
-    server_tasks.push(tokio::spawn(run_server(
-        first_listener,
-        server.clone(),
-        shutdown_rx.clone(),
-    )));
-    for _ in 1..n_server_threads {
-        let socket = make_server_socket(&listen_addr, true)?;
-        socket.bind(listen_addr)?;
-        let listener = socket.listen(1024)?;
-        server_tasks.push(tokio::spawn(run_server(
-            listener,
-            server.clone(),
-            shutdown_rx.clone(),
-        )));
-    }
 
     let barrier = Arc::new(Barrier::new(config.connections + 1));
     let mut workers = Vec::with_capacity(config.connections);
     for worker_id in 0..config.connections {
         workers.push(tokio::spawn(run_worker(
             worker_id,
-            listen_addr,
+            config.server_addr,
             config.clone(),
             barrier.clone(),
         )));
@@ -247,77 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     let total_elapsed = load_started.elapsed();
 
-    let _ = shutdown_tx.send(true);
-    for task in server_tasks {
-        task.await??;
-    }
-
-    print_summary(&config, n_server_threads, &aggregate, total_elapsed);
-    Ok(())
-}
-
-fn build_server(
-    config: &StressConfig,
-) -> Result<NacelleServer<StressService, FrameRequest, LengthDelimitedProtocol>, NacelleError> {
-    NacelleServer::<StressService, FrameRequest, ()>::builder()
-        .service(StressService {
-            response_payload: Bytes::from(vec![0x5A; config.response_bytes]),
-        })
-        .protocol(LengthDelimitedProtocol)
-        .config(
-            NacelleConfig::default()
-                .with_read_buffer_capacity(config.read_buffer_capacity)
-                .with_response_buffer_capacity(config.response_buffer_capacity)
-                .with_request_body_chunk_size(config.request_body_chunk_size)
-                .with_request_body_channel_capacity(config.request_body_channel_capacity)
-                .with_max_concurrent_requests_per_connection(
-                    config.max_concurrent_requests_per_connection,
-                )
-                .with_max_buffered_request_body_per_request(config.payload_bytes.max(1)),
-        )
-        .register_handler(
-            STRESS_OPCODE,
-            handler_fn(
-                |svc: Arc<StressService>,
-                 _req: FrameRequest,
-                 mut body: RequestBody,
-                 response: ResponseWriter| async move {
-                    while let Some(chunk) = body.next_chunk().await {
-                        let _ = chunk?;
-                    }
-                    if !svc.response_payload.is_empty() {
-                        response.write_bytes(svc.response_payload.clone())?;
-                    }
-                    Ok(())
-                },
-            ),
-        )
-        .build()
-}
-
-async fn run_server(
-    listener: TcpListener,
-    server: NacelleServer<StressService, FrameRequest, LengthDelimitedProtocol>,
-    mut shutdown: watch::Receiver<bool>,
-) -> Result<(), NacelleError> {
-    loop {
-        tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    break;
-                }
-            }
-            accepted = listener.accept() => {
-                let (stream, _) = accepted?;
-                stream.set_nodelay(true)?;
-                let server = server.clone();
-                tokio::spawn(async move {
-                    let _ = server.serve_io(stream).await;
-                });
-            }
-        }
-    }
-
+    print_summary(&config, &aggregate, total_elapsed);
     Ok(())
 }
 
@@ -331,7 +171,7 @@ async fn run_worker(
     stream.set_nodelay(true)?;
     let (mut reader, mut writer) = stream.into_split();
     let payload = vec![worker_id as u8; config.payload_bytes];
-    let mut scratch = Vec::with_capacity(config.response_bytes.max(1024));
+    let mut scratch = Vec::with_capacity(1024);
     let mut inflight = HashMap::with_capacity(config.pipeline);
     let mut partial_responses = HashMap::<u64, PartialResponse>::with_capacity(config.pipeline);
     let mut result = WorkerResult::default();
@@ -506,8 +346,8 @@ fn parse_args(
                 print_help();
                 std::process::exit(0);
             }
-            "--bind" => {
-                config.bind = parse_value(&arg, args.next())?;
+            "--addr" => {
+                config.server_addr = parse_value(&arg, args.next())?;
             }
             "--connections" => {
                 config.connections = parse_value(&arg, args.next())?;
@@ -522,44 +362,17 @@ fn parse_args(
             "--payload-bytes" => {
                 config.payload_bytes = parse_value(&arg, args.next())?;
             }
-            "--response-bytes" => {
-                config.response_bytes = parse_value(&arg, args.next())?;
-            }
-            "--server-threads" => {
-                config.server_threads = parse_value(&arg, args.next())?;
-            }
-            "--max-concurrent-requests-per-connection" => {
-                config.max_concurrent_requests_per_connection = parse_value(&arg, args.next())?;
-            }
-            "--read-buffer" => {
-                config.read_buffer_capacity = parse_value(&arg, args.next())?;
-            }
-            "--response-buffer" => {
-                config.response_buffer_capacity = parse_value(&arg, args.next())?;
-            }
-            "--request-body-chunk-size" => {
-                config.request_body_chunk_size = parse_value(&arg, args.next())?;
-            }
-            "--request-body-channel-capacity" => {
-                config.request_body_channel_capacity = parse_value(&arg, args.next())?;
-            }
             other => {
                 return Err(format!("unknown argument: {other}").into());
             }
         }
     }
 
-    if config.server_threads == 0 {
-        return Err("server-threads must be greater than zero".into());
-    }
     if config.connections == 0 {
         return Err("connections must be greater than zero".into());
     }
     if config.pipeline == 0 {
         return Err("pipeline must be greater than zero".into());
-    }
-    if config.max_concurrent_requests_per_connection == 0 {
-        return Err("max-concurrent-requests-per-connection must be greater than zero".into());
     }
 
     Ok(config)
@@ -585,34 +398,22 @@ fn print_help() {
            cargo run --release --bin stress -- [options]\n\
          \n\
          Options:\n\
-           --bind <addr>                             Bind address for the in-process server (default 127.0.0.1:0)\n\
-           --connections <count>                    Concurrent TCP connections (default 256)\n\
-           --pipeline <count>                       Requests kept in flight per connection (default 8)\n\
-           --duration-secs <seconds>                Active load duration (default 10)\n\
-           --payload-bytes <bytes>                  Request payload bytes (default 256)\n\
-           --response-bytes <bytes>                 Response payload bytes (default 64)\n\
-           --server-threads <count>                 Server accept threads sharing one port via SO_REUSEPORT (default: logical CPU count; Linux only)\n\
-           --max-concurrent-requests-per-connection <count>\n\
-                                                    Server-side overlap per connection for fully buffered request bodies (default 8)\n\
-           --read-buffer <bytes>                    Server read buffer capacity (default 65536)\n\
-           --response-buffer <bytes>                Server response encode buffer capacity (default 16384)\n\
-           --request-body-chunk-size <bytes>        Request body chunk size (default 16384)\n\
-           --request-body-channel-capacity <count>  Request body channel capacity (default 8)\n\
+           --addr <addr>          Target server address (default 127.0.0.1:7878)\n\
+           --connections <count>  Concurrent TCP connections (default 256)\n\
+           --pipeline <count>     Requests kept in flight per connection (default 8)\n\
+           --duration-secs <s>    Active load duration (default 10)\n\
+           --payload-bytes <n>    Request payload bytes (default 256)\n\
          \n\
          Notes:\n\
            - Connections are established once per worker and reused for the whole run.\n\
            - High pipeline values measure saturation throughput and queueing under load, not just base RTT.\n\
            - For established-connection RTT, start with --pipeline 1.\n\
+           - Run nacelle-stress-server separately and point --addr at it.\n\
         "
     );
 }
 
-fn print_summary(
-    config: &StressConfig,
-    n_server_threads: usize,
-    result: &WorkerResult,
-    elapsed: Duration,
-) {
+fn print_summary(config: &StressConfig, result: &WorkerResult, elapsed: Duration) {
     let elapsed_secs = elapsed.as_secs_f64().max(f64::EPSILON);
     let requests_per_sec = result.completed_requests as f64 / elapsed_secs;
     let total_wire_bytes = result.request_wire_bytes + result.response_wire_bytes;
@@ -679,17 +480,8 @@ fn print_summary(
     }
     println!();
     println!(
-        "profile              connections={} pipeline={} payload={}B response={}B elapsed={:.2}s{}",
-        config.connections,
-        config.pipeline,
-        config.payload_bytes,
-        config.response_bytes,
-        elapsed_secs,
-        if n_server_threads > 1 {
-            format!(" server-threads={n_server_threads}")
-        } else {
-            String::new()
-        },
+        "profile              connections={} pipeline={} payload={}B elapsed={:.2}s",
+        config.connections, config.pipeline, config.payload_bytes, elapsed_secs,
     );
 }
 
