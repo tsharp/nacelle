@@ -4,9 +4,22 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["tcp", "runtime"]
+# Any feature whose name ends in `-runtime` is treated as a runtime selector.
+# Exactly one must be active per compilation — enforced by build.rs.
+# `tokio-runtime` is the default multi-threaded runtime (tokio work-stealing scheduler).
+# `monoio-runtime` enables the io_uring / kqueue thread-per-core runtime via monoio.
+default = ["tcp", "tokio-runtime"]
 tcp = []
-runtime = []
+tokio-runtime = [
+    "tokio/rt",
+    "tokio/rt-multi-thread",
+    "tokio/net",
+    "tokio/macros",
+    "tokio/time",
+]
+monoio-runtime = ["dep:monoio"]
+compio-runtime = ["dep:compio-runtime", "dep:compio-net", "dep:compio-io", "dep:socket2"]
+kimojio-runtime = ["dep:kimojio", "dep:rustix"]
 metrics = []
 tracing = ["dep:tracing"]
 tls = ["dep:rustls"]
@@ -14,13 +27,26 @@ auth = []
 compression = []
 bench = []
 fuzzing = []
+io_uring = []
+iocp = []
+epoll = []
 
 [dependencies]
 bytes = "1.10.1"
 mimalloc = { version = "0.1", default-features = false }
 futures-core = "0.3.31"
 rustls = { version = "0.23.28", optional = true }
-tokio = { version = "1.47.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+# tokio is always required: `sync` drives the request-body channel, `io-util`
+# provides the AsyncRead/AsyncWrite compat traits used by the tokio backend.
+# The `rt*`/`net`/`macros`/`time` features are only pulled in by tokio-runtime.
+tokio = { version = "1.47.1", features = ["sync", "io-util"] }
+monoio = { version = "0.2", optional = true }
+compio-runtime = { version = "0.11", optional = true }
+compio-net = { version = "0.11", optional = true }
+compio-io = { version = "0.9", optional = true }
+socket2 = { version = "0.5", features = ["all"], optional = true }
+kimojio = { git = "https://github.com/tsharp/kimojio-rs", branch = "users/tsharp/support-non-io-uring", package = "kimojio", default-features = false, optional = true }
+rustix = { version = "1", features = ["net", "fs"], optional = true }
 tracing = { version = "0.1.41", optional = true }
 
 [dev-dependencies]

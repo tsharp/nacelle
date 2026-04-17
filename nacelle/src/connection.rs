@@ -3,8 +3,9 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
+
+use crate::runtime::{MaybeSend, NacelleRead, NacelleWrite};
 
 use crate::config::NacelleConfig;
 use crate::error::NacelleError;
@@ -115,8 +116,9 @@ unsafe impl<Req: RequestMetadata, P: Protocol<Req> + Send + Sync + 'static> Send
 /// Per-connection writer task. Receives encoded response frames from concurrent
 /// request handlers and writes them to the TCP stream, coalescing multiple frames
 /// into one syscall when they arrive close together.
-pub async fn serve_connection<Svc, Req, P, IO>(
-    io: IO,
+pub async fn serve_connection<Svc, Req, P, R, W>(
+    mut reader: R,
+    mut writer: W,
     service: Arc<Svc>,
     protocol: Arc<P>,
     registry: Arc<HandlerRegistry<Svc, Req>>,
@@ -126,9 +128,9 @@ where
     Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
-    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    R: NacelleRead + MaybeSend + 'static,
+    W: NacelleWrite + MaybeSend + 'static,
 {
-    let (mut reader, mut writer) = tokio::io::split(io);
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     // Per-connection accumulation buffer: responses are appended here synchronously
     // during request processing, then flushed in one write syscall before the next
@@ -232,7 +234,7 @@ where
     Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
-    R: AsyncRead + Unpin + Send,
+    R: NacelleRead + MaybeSend,
 {
     let request = decoded.request;
     let outcome = if decoded.body_len <= read_buf.len() {
@@ -257,7 +259,7 @@ where
         let body = RequestBody::new(body_rx, decoded.body_len);
         // Clone only for the spawn path (streaming body — uncommon).
         let h = handler.clone();
-        let handler_task = tokio::spawn(async move {
+        let handler_task = crate::runtime::spawn(async move {
             execute_handler(&h, service, request, body, response_probe).await
         });
 
@@ -323,7 +325,7 @@ async fn ensure_body_buffered<R>(
     body_len: usize,
 ) -> Result<(), NacelleError>
 where
-    R: AsyncRead + Unpin,
+    R: NacelleRead,
 {
     while read_buf.len() < body_len {
         let bytes_read = reader.read_buf(read_buf).await?;
@@ -342,7 +344,7 @@ async fn pump_request_body<R>(
     config: &NacelleConfig,
 ) -> Result<(), NacelleError>
 where
-    R: AsyncRead + Unpin,
+    R: NacelleRead,
 {
     let mut remaining = body_len;
     let mut receiver_open = true;
@@ -385,7 +387,7 @@ async fn discard_body<R>(
     config: &NacelleConfig,
 ) -> Result<(), NacelleError>
 where
-    R: AsyncRead + Unpin,
+    R: NacelleRead,
 {
     let (tx, _rx) = mpsc::channel(1);
     pump_request_body(reader, read_buf, body_len, &tx, config).await

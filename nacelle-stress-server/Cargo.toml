@@ -1,0 +1,105 @@
+[package]
+name = "nacelle-stress-server"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "tokio-server"
+path = "src/bin/stress-tokio.rs"
+required-features = ["tokio-runtime"]
+
+[[bin]]
+name = "monoio-server"
+path = "src/bin/stress-monoio.rs"
+required-features = ["monoio-runtime"]
+
+[[bin]]
+name = "compio-iouring-server"
+path = "src/bin/stress-compio.rs"
+required-features = ["compio-iouring-runtime"]
+
+[[bin]]
+name = "compio-epoll-server"
+path = "src/bin/stress-compio.rs"
+required-features = ["compio-epoll-runtime"]
+
+[[bin]]
+name = "compio-iocp-server"
+path = "src/bin/stress-compio.rs"
+required-features = ["compio-iocp-runtime"]
+
+[[bin]]
+name = "kimojio-iouring-server"
+path = "src/bin/stress-kimojio.rs"
+required-features = ["kimojio-iouring-runtime"]
+
+[[bin]]
+name = "kimojio-epoll-server"
+path = "src/bin/stress-kimojio.rs"
+required-features = ["kimojio-epoll-runtime"]
+
+[[bin]]
+name = "kimojio-iocp-server"
+path = "src/bin/stress-kimojio.rs"
+required-features = ["kimojio-iocp-runtime"]
+
+[features]
+default = []
+tokio-runtime = [
+    "nacelle/tokio-runtime",
+    "dep:tokio",
+]
+monoio-runtime = [
+    "nacelle/monoio-runtime",
+    "dep:monoio",
+]
+
+compio-iocp-runtime = [
+    "nacelle/compio-runtime",
+    "dep:compio-runtime",
+    "dep:compio-driver",
+    "compio-driver/iocp-global",
+]
+compio-epoll-runtime = [
+    "nacelle/compio-runtime",
+    "dep:compio-runtime",
+    "dep:compio-driver",
+    "compio-driver/polling",
+]
+compio-iouring-runtime = [
+    "nacelle/compio-runtime",
+    "dep:compio-runtime",
+    "dep:compio-driver",
+    "compio-driver/io-uring",
+]
+
+kimojio-iocp-runtime = [
+    "nacelle/kimojio-runtime",
+    "dep:kimojio",
+    "kimojio/windows-iocp",
+]
+kimojio-epoll-runtime = [
+    "nacelle/kimojio-runtime",
+    "dep:kimojio",
+    "kimojio/epoll",
+]
+kimojio-iouring-runtime = [
+    "nacelle/kimojio-runtime",
+    "dep:kimojio",
+    "kimojio/io_uring",
+]
+
+[dependencies]
+nacelle = { path = "../nacelle", features = ["tcp"], default-features = false }
+bytes = "1.10.1"
+mimalloc = { version = "0.1", default-features = false }
+# Tokio — only needed for the tokio runtime variant
+tokio = { version = "1.47.1", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync"], optional = true }
+# Monoio — thread-per-core via io_uring / epoll
+monoio = { version = "0.2", optional = true }
+# Compio — thread-per-core via io_uring / IOCP / polling
+compio-runtime = { version = "0.11", optional = true }
+# compio-driver selected explicitly per variant via feature forwarding
+compio-driver = { version = "0.11", default-features = false, optional = true }
+# Kimojio — thread-per-core via io_uring / epoll / IOCP
+kimojio = { git = "https://github.com/tsharp/kimojio-rs", branch = "users/tsharp/support-non-io-uring", package = "kimojio", default-features = false, optional = true }
