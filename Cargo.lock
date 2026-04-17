@@ -959,7 +959,9 @@ dependencies = [
  "kimojio",
  "mimalloc",
  "monoio",
+ "rustix",
  "rustls",
+ "socket2 0.5.10",
  "tokio",
  "tracing",
 ]

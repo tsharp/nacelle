@@ -18,8 +18,8 @@ tokio-runtime = [
     "tokio/time",
 ]
 monoio-runtime = ["dep:monoio"]
-compio-runtime = ["dep:compio-runtime", "dep:compio-net", "dep:compio-io"]
-kimojio-runtime = ["dep:kimojio"]
+compio-runtime = ["dep:compio-runtime", "dep:compio-net", "dep:compio-io", "dep:socket2"]
+kimojio-runtime = ["dep:kimojio", "dep:rustix"]
 metrics = []
 tracing = ["dep:tracing"]
 tls = ["dep:rustls"]
@@ -44,7 +44,9 @@ monoio = { version = "0.2", optional = true }
 compio-runtime = { version = "0.11", optional = true }
 compio-net = { version = "0.11", optional = true }
 compio-io = { version = "0.9", optional = true }
+socket2 = { version = "0.5", features = ["all"], optional = true }
 kimojio = { git = "https://github.com/tsharp/kimojio-rs", branch = "users/tsharp/support-non-io-uring", package = "kimojio", default-features = false, optional = true }
+rustix = { version = "1", features = ["net", "fs"], optional = true }
 tracing = { version = "0.1.41", optional = true }
 
 [dev-dependencies]

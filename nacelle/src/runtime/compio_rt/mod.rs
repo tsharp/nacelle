@@ -76,7 +76,8 @@ where
 
 impl crate::runtime::NacelleRead for compio_net::OwnedReadHalf<compio_net::TcpStream> {
     async fn read_buf(&mut self, dst: &mut bytes::BytesMut) -> std::io::Result<usize> {
-        let cap = (dst.capacity() - dst.len()).max(4096);
+        let spare = dst.capacity() - dst.len();
+        let cap = if spare == 0 { 4096 } else { spare };
         let buf = vec![0u8; cap];
         let result = compio_io::AsyncRead::read(self, buf).await;
         let n = result.0?;
@@ -128,7 +129,22 @@ where
     Req: RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
 {
-    let listener = compio_net::TcpListener::bind(addr).await?;
+    let listener = {
+        use socket2::{Domain, Protocol, Socket, Type};
+        let domain = if addr.is_ipv4() {
+            Domain::IPV4
+        } else {
+            Domain::IPV6
+        };
+        let sock = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+        sock.set_reuse_address(true)?;
+        #[cfg(target_os = "linux")]
+        sock.set_reuse_port(true)?;
+        sock.set_nonblocking(true)?;
+        sock.bind(&addr.into())?;
+        sock.listen(128)?;
+        compio_net::TcpListener::from_std(sock.into())?
+    };
     loop {
         let (stream, _) = listener.accept().await?;
         let _ = stream.set_nodelay(true);

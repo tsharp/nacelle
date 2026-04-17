@@ -107,7 +107,8 @@ use crate::server::NacelleServer;
 
 impl crate::runtime::NacelleRead for monoio::net::tcp::TcpOwnedReadHalf {
     async fn read_buf(&mut self, dst: &mut bytes::BytesMut) -> std::io::Result<usize> {
-        let cap = (dst.capacity() - dst.len()).max(4096);
+        let spare = dst.capacity() - dst.len();
+        let cap = if spare == 0 { 4096 } else { spare };
         let buf = vec![0u8; cap];
         let (result, buf) = monoio::io::AsyncReadRent::read(self, buf).await;
         let n = result?;
