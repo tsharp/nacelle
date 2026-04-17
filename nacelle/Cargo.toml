@@ -18,6 +18,8 @@ tokio-runtime = [
     "tokio/time",
 ]
 monoio-runtime = ["dep:monoio"]
+compio-runtime = ["dep:compio-runtime", "dep:compio-net", "dep:compio-io"]
+kimojio-runtime = ["dep:kimojio"]
 metrics = []
 tracing = ["dep:tracing"]
 tls = ["dep:rustls"]
@@ -39,6 +41,10 @@ rustls = { version = "0.23.28", optional = true }
 # The `rt*`/`net`/`macros`/`time` features are only pulled in by tokio-runtime.
 tokio = { version = "1.47.1", features = ["sync", "io-util"] }
 monoio = { version = "0.2", optional = true }
+compio-runtime = { version = "0.11", optional = true }
+compio-net = { version = "0.11", optional = true }
+compio-io = { version = "0.9", optional = true }
+kimojio = { git = "https://github.com/tsharp/kimojio-rs", branch = "users/tsharp/support-non-io-uring", package = "kimojio", default-features = false, optional = true }
 tracing = { version = "0.1.41", optional = true }
 
 [dev-dependencies]

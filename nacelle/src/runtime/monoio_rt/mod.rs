@@ -105,7 +105,7 @@ use crate::server::NacelleServer;
 //
 // The extra allocation is network-latency-dominated and negligible in practice.
 
-impl crate::runtime::NacelleRead for monoio::net::tcp::OwnedReadHalf {
+impl crate::runtime::NacelleRead for monoio::net::tcp::TcpOwnedReadHalf {
     async fn read_buf(&mut self, dst: &mut bytes::BytesMut) -> std::io::Result<usize> {
         let cap = (dst.capacity() - dst.len()).max(4096);
         let buf = vec![0u8; cap];
@@ -116,11 +116,11 @@ impl crate::runtime::NacelleRead for monoio::net::tcp::OwnedReadHalf {
     }
 }
 
-impl crate::runtime::NacelleWrite for monoio::net::tcp::OwnedWriteHalf {
+impl crate::runtime::NacelleWrite for monoio::net::tcp::TcpOwnedWriteHalf {
     async fn write_all(&mut self, src: &[u8]) -> std::io::Result<()> {
         let buf = src.to_vec();
         let (result, _) = monoio::io::AsyncWriteRentExt::write_all(self, buf).await;
-        result
+        result.map(|_| ())
     }
 
     async fn flush(&mut self) -> std::io::Result<()> {
@@ -143,6 +143,7 @@ where
     Req: RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
 {
+    use monoio::io::Splitable as _;
     let listener = monoio::net::TcpListener::bind(addr)?;
     loop {
         let (stream, _) = listener.accept().await?;

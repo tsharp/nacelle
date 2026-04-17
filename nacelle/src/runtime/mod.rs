@@ -17,17 +17,25 @@
 // `TcpStreamCompat`) without a separate API surface.
 
 /// Requires `Send` under multi-threaded runtimes (tokio); no-op under
-/// thread-per-core runtimes (monoio).
-#[cfg(all(feature = "tokio-runtime", not(feature = "monoio-runtime")))]
+/// thread-per-core runtimes (monoio, compio, kimojio).
+#[cfg(feature = "tokio-runtime")]
 pub trait MaybeSend: Send {}
 
-#[cfg(all(feature = "tokio-runtime", not(feature = "monoio-runtime")))]
+#[cfg(feature = "tokio-runtime")]
 impl<T: Send> MaybeSend for T {}
 
-#[cfg(feature = "monoio-runtime")]
+#[cfg(any(
+    feature = "monoio-runtime",
+    feature = "compio-runtime",
+    feature = "kimojio-runtime"
+))]
 pub trait MaybeSend {}
 
-#[cfg(feature = "monoio-runtime")]
+#[cfg(any(
+    feature = "monoio-runtime",
+    feature = "compio-runtime",
+    feature = "kimojio-runtime"
+))]
 impl<T> MaybeSend for T {}
 
 // ── NacelleRead / NacelleWrite ────────────────────────────────────────────────
@@ -94,3 +102,23 @@ pub use monoio_rt::{JoinError, JoinHandle, spawn};
 
 #[cfg(all(feature = "tcp", feature = "monoio-runtime"))]
 pub(crate) use monoio_rt::serve_tcp;
+
+// ── compio ───────────────────────────────────────────────────────────────────
+#[cfg(feature = "compio-runtime")]
+mod compio_rt;
+
+#[cfg(feature = "compio-runtime")]
+pub use compio_rt::{JoinError, JoinHandle, spawn};
+
+#[cfg(all(feature = "tcp", feature = "compio-runtime"))]
+pub(crate) use compio_rt::serve_tcp;
+
+// ── kimojio ──────────────────────────────────────────────────────────────────
+#[cfg(feature = "kimojio-runtime")]
+mod kimojio_rt;
+
+#[cfg(feature = "kimojio-runtime")]
+pub use kimojio_rt::{JoinError, JoinHandle, spawn};
+
+#[cfg(all(feature = "tcp", feature = "kimojio-runtime"))]
+pub(crate) use kimojio_rt::serve_tcp;

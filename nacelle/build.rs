@@ -6,6 +6,10 @@ const MONOIO_RUNTIME: &str = "monoio-runtime";
 #[allow(dead_code)]
 const COMPIO_RUNTIME: &str = "compio-runtime";
 
+// Supports io_uring/epoll/IOCP (thread-per-core)
+#[allow(dead_code)]
+const KIMOJIO_RUNTIME: &str = "kimojio-runtime";
+
 /// Nacelle build script.
 ///
 /// Scans every active Cargo feature for names ending in `-runtime` and emits a
