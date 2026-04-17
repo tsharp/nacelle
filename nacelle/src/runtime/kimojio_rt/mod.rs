@@ -154,6 +154,8 @@ where
 
     operations::bind(&server_fd, &addr).map_err(kimojio_err)?;
     operations::listen(&server_fd, 128).map_err(kimojio_err)?;
+    #[cfg(not(windows))]
+    {
     // The listening socket must also be non-blocking so accept() returns EAGAIN
     // when no connection is ready, allowing the epoll driver to yield correctly.
     rustix::fs::fcntl_setfl(
@@ -161,9 +163,12 @@ where
         rustix::fs::fcntl_getfl(&server_fd).map_err(kimojio_err)? | rustix::fs::OFlags::NONBLOCK,
     )
     .map_err(kimojio_err)?;
+    }
 
     loop {
         let client_fd = operations::accept(&server_fd).await.map_err(kimojio_err)?;
+        #[cfg(not(windows))]
+        {
         // Accepted sockets don't inherit O_NONBLOCK from the listening socket;
         // kimojio's epoll futures require non-blocking fds or they block the thread.
         rustix::fs::fcntl_setfl(
@@ -172,6 +177,7 @@ where
                 | rustix::fs::OFlags::NONBLOCK,
         )
         .map_err(kimojio_err)?;
+        }
         let _ = update_accept_socket(&client_fd);
         let stream = OwnedFdStream::new(client_fd);
         let (reader, writer) = stream.split().await.map_err(kimojio_err)?;
