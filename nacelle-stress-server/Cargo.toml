@@ -93,6 +93,7 @@ kimojio-iouring-runtime = [
 nacelle = { path = "../nacelle", features = ["tcp"], default-features = false }
 bytes = "1.10.1"
 mimalloc = { version = "0.1", default-features = false }
+libmimalloc-sys = { version = "0.1", features = ["extended"], default-features = false }
 # Tokio — only needed for the tokio runtime variant
 tokio = { version = "1.47.1", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync"], optional = true }
 # Monoio — thread-per-core via io_uring / epoll

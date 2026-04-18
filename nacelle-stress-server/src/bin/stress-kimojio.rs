@@ -14,10 +14,11 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[path = "../shared.rs"]
 mod shared;
-use shared::{build_server, parse_args};
+use shared::{build_server, configure_allocator, parse_args};
 
 fn main() {
     let config = parse_args(std::env::args().skip(1), "kimojio").expect("invalid args");
+    configure_allocator(config.low_memory);
     let server = build_server(&config).expect("failed to build server");
     let addr = config.bind;
     let n_threads = config.server_threads.max(1);

@@ -3,7 +3,7 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[path = "../shared.rs"]
 mod shared;
-use shared::{StressService, build_server, parse_args};
+use shared::{StressService, build_server, configure_allocator, parse_args};
 
 use std::net::SocketAddr;
 
@@ -118,6 +118,7 @@ async fn run_server(
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = parse_args(std::env::args().skip(1), "tokio")?;
+    configure_allocator(config.low_memory);
     let server = build_server(&config)?;
 
     #[cfg(not(target_os = "linux"))]

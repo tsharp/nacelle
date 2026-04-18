@@ -1,6 +1,7 @@
 // Shared service/config logic used by all runtime-specific entry points.
 
 use std::net::SocketAddr;
+use std::os::raw::c_long;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ pub struct ServerConfig {
     pub response_buffer_capacity: usize,
     pub request_body_chunk_size: usize,
     pub request_body_channel_capacity: usize,
+    pub low_memory: bool,
 }
 
 impl Default for ServerConfig {
@@ -37,6 +39,7 @@ impl Default for ServerConfig {
             response_buffer_capacity: 16 * 1024,
             request_body_chunk_size: 16 * 1024,
             request_body_channel_capacity: 8,
+            low_memory: false,
         }
     }
 }
@@ -44,6 +47,32 @@ impl Default for ServerConfig {
 #[derive(Debug)]
 pub struct StressService {
     pub response_payload: Bytes,
+}
+
+/// mimalloc v2 option constants not yet exposed by `libmimalloc-sys`.
+/// Values match the `mi_option_e` enum in mimalloc v2 `mimalloc/types.h`.
+/// These are stable within v2 and `libmimalloc-sys` always compiles v2 unless
+/// the `v3` feature is explicitly enabled.
+const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
+const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
+
+/// Configures mimalloc for minimal OS memory retention when `low_memory` is
+/// true.  Call this once at the start of `main()`, before spawning threads.
+///
+/// The same effect can be achieved without recompiling by setting environment
+/// variables before launching the server:
+///   `MIMALLOC_PURGE_DELAY=0 MIMALLOC_ARENA_EAGER_COMMIT=0 ./server`
+pub fn configure_allocator(low_memory: bool) {
+    if !low_memory {
+        return;
+    }
+    unsafe {
+        // Return freed pages to the OS immediately instead of holding them for
+        // a default grace period (~100 ms).  Reduces RSS after traffic spikes.
+        libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, 0 as c_long);
+        // Do not pre-commit arena memory up-front; commit only as needed.
+        libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0 as c_long);
+    }
 }
 
 pub fn build_server(
@@ -121,6 +150,9 @@ pub fn parse_args(
             "--request-body-channel-capacity" => {
                 config.request_body_channel_capacity = parse_value(&arg, args.next())?;
             }
+            "--low-memory" => {
+                config.low_memory = true;
+            }
             other => {
                 return Err(format!("unknown argument: {other}").into());
             }
@@ -166,6 +198,13 @@ pub fn print_help(runtime: &str) {
            --response-buffer <bytes>                 Response encode buffer capacity (default 16384)\n\
            --request-body-chunk-size <bytes>         Request body chunk size (default 16384)\n\
            --request-body-channel-capacity <count>   Request body channel capacity (default 8)\n\
+           --low-memory                              Configure mimalloc to return freed pages to the\n\
+                                                     OS immediately (purge_delay=0, no eager arena\n\
+                                                     commit).  Reduces RSS on constrained systems at\n\
+                                                     the cost of slightly higher allocation latency.\n\
+                                                     Equivalent env vars (no recompile required):\n\
+                                                       MIMALLOC_PURGE_DELAY=0\n\
+                                                       MIMALLOC_ARENA_EAGER_COMMIT=0\n\
         "
     );
 }
