@@ -165,6 +165,14 @@ where
                 }
             }
 
+            // If read_buf is empty and grew to buffer a large request body, release
+            // the excess capacity before we block on the next read, for the same
+            // reason write_buf is shrunk above.  Only possible when empty; partial
+            // frame data must be preserved.
+            if read_buf.is_empty() && read_buf.capacity() > config.read_buffer_capacity {
+                read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
+            }
+
             // Block until at least one more byte of request data arrives.
             let bytes_read = reader.read_buf(&mut read_buf).await?;
             if bytes_read == 0 {
