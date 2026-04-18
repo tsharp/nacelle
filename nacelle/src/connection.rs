@@ -31,11 +31,16 @@ fn take_encode_buf(capacity: usize) -> BytesMut {
 }
 
 #[inline]
-fn return_encode_buf(mut buf: BytesMut) {
+fn return_encode_buf(mut buf: BytesMut, max_capacity: usize) {
     buf.clear();
-    ENCODE_BUF_POOL.with(|pool| {
-        *pool.borrow_mut() = Some(buf);
-    });
+    // Only pool the buffer when it fits within the configured response capacity.
+    // Oversized buffers (grown to serve a large response) are dropped here so
+    // threads don't permanently retain e.g. 10 MB of heap per worker thread.
+    if buf.capacity() <= max_capacity {
+        ENCODE_BUF_POOL.with(|pool| {
+            *pool.borrow_mut() = Some(buf);
+        });
+    }
 }
 
 struct ProtocolResponseSink<Req, P>
@@ -51,6 +56,11 @@ where
     write_buf: *mut BytesMut,
     context: P::ResponseContext,
     encode_buffer: BytesMut,
+    // Maximum capacity to retain in the thread-local encode buffer pool.
+    // Buffers that grew beyond this (e.g. for a large response) are dropped
+    // instead of being pooled, so worker threads don't permanently hold
+    // large allocations after serving an unusually large response.
+    max_pool_encode_buf: usize,
     pending_chunk: Option<Bytes>,
     _req: PhantomData<fn() -> Req>,
 }
@@ -95,9 +105,9 @@ where
         if !self.encode_buffer.is_empty() {
             let wb = unsafe { &mut *self.write_buf };
             wb.extend_from_slice(&self.encode_buffer);
-            return_encode_buf(std::mem::take(&mut self.encode_buffer));
+            return_encode_buf(std::mem::take(&mut self.encode_buffer), self.max_pool_encode_buf);
         } else {
-            return_encode_buf(std::mem::take(&mut self.encode_buffer));
+            return_encode_buf(std::mem::take(&mut self.encode_buffer), self.max_pool_encode_buf);
         }
         Ok(())
     }
@@ -147,6 +157,12 @@ where
             if !write_buf.is_empty() {
                 writer.write_all(&write_buf).await?;
                 write_buf.clear();
+                // If write_buf grew to serve a large response, release the excess
+                // capacity so idle connections don't permanently retain their
+                // high-water-mark allocation while blocked waiting for the next request.
+                if write_buf.capacity() > config.response_buffer_capacity {
+                    write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
+                }
             }
 
             // Block until at least one more byte of request data arrives.
@@ -206,6 +222,7 @@ where
     .await;
 
     // Best-effort final flush so the client sees all pending response bytes.
+    // write_buf is dropped immediately after, so no need to shrink it here.
     if !write_buf.is_empty() {
         let _ = writer.write_all(&write_buf).await;
     }
@@ -441,6 +458,7 @@ where
         write_buf,
         context,
         encode_buffer: take_encode_buf(buffer_capacity.max(32)),
+        max_pool_encode_buf: buffer_capacity,
         pending_chunk: None,
         _req: PhantomData,
     }))
