@@ -10,6 +10,7 @@ use crate::handler::Handler;
 use crate::protocol::{DecodedRequest, Protocol};
 use crate::request::{NacelleBody, NacelleRequest, NacelleRequestMeta, RequestMetadata};
 use crate::response::{NacelleResponse, NacelleResponseMeta};
+use crate::telemetry::{NacelleTelemetry, NacelleTransport};
 
 /// Drive one raw TCP framed connection and coalesce completed responses into writes.
 pub async fn serve_connection<Req, P, H, R, W>(
@@ -18,6 +19,7 @@ pub async fn serve_connection<Req, P, H, R, W>(
     protocol: Arc<P>,
     handler: H,
     config: NacelleConfig,
+    telemetry: NacelleTelemetry,
 ) -> Result<(), NacelleError>
 where
     Req: RequestMetadata + Send + 'static,
@@ -28,6 +30,7 @@ where
 {
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     let mut write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
+    telemetry.connection_opened(NacelleTransport::RawTcp);
 
     let result: Result<(), NacelleError> = async {
         'conn: loop {
@@ -62,6 +65,7 @@ where
                     decoded,
                     error_context,
                     &config,
+                    &telemetry,
                 )
                 .await?;
             }
@@ -84,6 +88,7 @@ pub async fn serve_stream<Req, P, H, IO>(
     protocol: Arc<P>,
     handler: H,
     config: NacelleConfig,
+    telemetry: NacelleTelemetry,
 ) -> Result<(), NacelleError>
 where
     Req: RequestMetadata + Send + 'static,
@@ -93,6 +98,7 @@ where
 {
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     let mut write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
+    telemetry.connection_opened(NacelleTransport::RawTcp);
 
     let result: Result<(), NacelleError> = async {
         'conn: loop {
@@ -127,6 +133,7 @@ where
                     decoded,
                     error_context,
                     &config,
+                    &telemetry,
                 )
                 .await?;
             }
@@ -153,6 +160,7 @@ async fn run_request<Req, P, H, R>(
     decoded: DecodedRequest<Req>,
     error_context: P::ErrorContext,
     config: &NacelleConfig,
+    telemetry: &NacelleTelemetry,
 ) -> Result<(), NacelleError>
 where
     Req: RequestMetadata + Send + 'static,
@@ -161,6 +169,9 @@ where
     R: AsyncRead + Unpin + Send,
 {
     let request = decoded.request;
+    let request_started = std::time::Instant::now();
+    let opcode = request.opcode();
+    let request_bytes = 4 + 20 + decoded.body_len;
     let response_context = protocol.response_context(&request);
     let outcome = if decoded.body_len <= read_buf.len() {
         let body =
@@ -187,9 +198,24 @@ where
 
     match outcome {
         Ok(response) => {
+            let prev_response_len = write_buf.len();
             encode_response_body::<Req, P>(protocol, response_context, response, write_buf).await?;
+            telemetry.request_completed(
+                NacelleTransport::RawTcp,
+                Some(opcode),
+                request_bytes,
+                write_buf.len().saturating_sub(prev_response_len),
+                request_started.elapsed(),
+            );
         }
         Err(error) => {
+            let prev_response_len = write_buf.len();
+            telemetry.request_failed(
+                NacelleTransport::RawTcp,
+                Some(opcode),
+                request_started.elapsed(),
+                &error,
+            );
             write_error::<Req, P>(
                 write_buf,
                 protocol,
@@ -197,6 +223,13 @@ where
                 error,
                 config.response_buffer_capacity,
             )?;
+            telemetry.request_completed(
+                NacelleTransport::RawTcp,
+                Some(opcode),
+                request_bytes,
+                write_buf.len().saturating_sub(prev_response_len),
+                request_started.elapsed(),
+            );
         }
     }
 

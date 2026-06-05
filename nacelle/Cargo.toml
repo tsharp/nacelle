@@ -8,6 +8,7 @@ default = ["raw_tcp"]
 raw_tcp = []
 reference_protocol = ["raw_tcp"]
 http = ["dep:http", "dep:http-body-util", "dep:hyper", "dep:hyper-util"]
+otel = ["dep:opentelemetry"]
 tower = ["dep:tower"]
 bench = []
 fuzzing = []
@@ -20,8 +21,10 @@ http = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
 hyper = { version = "1", features = ["http1", "server"], optional = true }
 hyper-util = { version = "0.1", features = ["server", "tokio"], optional = true }
+opentelemetry = { version = "0.32", optional = true }
 tower = { version = "0.5", features = ["util"], optional = true }
 tokio = { version = "1.47.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1.44"
 
 [dev-dependencies]
 criterion = "0.5.1"

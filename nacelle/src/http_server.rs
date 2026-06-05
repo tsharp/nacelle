@@ -17,11 +17,13 @@ use crate::error::{BoxError, NacelleError};
 use crate::handler::Handler;
 use crate::request::{HttpRequestMeta, NacelleBody, NacelleRequest, NacelleRequestMeta};
 use crate::response::{NacelleResponse, NacelleResponseMeta};
+use crate::telemetry::{NacelleTelemetry, NacelleTransport};
 
 type HttpBody = BoxBody<Bytes, BoxError>;
 
 pub struct HyperServer<H = ()> {
     handler: H,
+    telemetry: NacelleTelemetry,
 }
 
 impl<H> Clone for HyperServer<H>
@@ -31,6 +33,7 @@ where
     fn clone(&self) -> Self {
         Self {
             handler: self.handler.clone(),
+            telemetry: self.telemetry.clone(),
         }
     }
 }
@@ -40,7 +43,15 @@ where
     H: Handler,
 {
     pub fn new(handler: H) -> Self {
-        Self { handler }
+        Self {
+            handler,
+            telemetry: NacelleTelemetry::default(),
+        }
+    }
+
+    pub fn with_telemetry(mut self, telemetry: NacelleTelemetry) -> Self {
+        self.telemetry = telemetry;
+        self
     }
 
     pub async fn serve(self, addr: SocketAddr) -> Result<(), NacelleError> {
@@ -57,6 +68,7 @@ where
             let (stream, _) = listener.accept().await?;
             let io = TokioIo::new(stream);
             let server = server.clone();
+            server.telemetry.connection_opened(NacelleTransport::Http);
             tokio::spawn(async move {
                 let service = service_fn(move |request| {
                     let server = server.clone();
@@ -68,6 +80,7 @@ where
     }
 
     async fn handle(&self, request: Request<Incoming>) -> Result<Response<HttpBody>, NacelleError> {
+        let request_started = std::time::Instant::now();
         let (parts, body) = request.into_parts();
         let request = NacelleRequest {
             meta: NacelleRequestMeta::Http(HttpRequestMeta {
@@ -79,11 +92,37 @@ where
         };
 
         match self.handler.call(request).await {
-            Ok(response) => response_to_http(response),
-            Err(error) => response_to_http(NacelleResponse::http_bytes(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                error.to_string(),
-            )),
+            Ok(response) => {
+                let response = response_to_http(response);
+                self.telemetry.request_completed(
+                    NacelleTransport::Http,
+                    None,
+                    0,
+                    0,
+                    request_started.elapsed(),
+                );
+                response
+            }
+            Err(error) => {
+                self.telemetry.request_failed(
+                    NacelleTransport::Http,
+                    None,
+                    request_started.elapsed(),
+                    &error,
+                );
+                let response = response_to_http(NacelleResponse::http_bytes(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error.to_string(),
+                ));
+                self.telemetry.request_completed(
+                    NacelleTransport::Http,
+                    None,
+                    0,
+                    0,
+                    request_started.elapsed(),
+                );
+                response
+            }
         }
     }
 }

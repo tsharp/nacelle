@@ -27,6 +27,8 @@ jobs:
         run: cargo clippy -p nacelle --features reference_protocol,http --all-targets -- -D warnings
       - name: Clippy Tower
         run: cargo clippy -p nacelle --features reference_protocol,http,tower --all-targets -- -D warnings
+      - name: Clippy OTel
+        run: cargo clippy -p nacelle --features reference_protocol,http,tower,otel --all-targets -- -D warnings
       - name: Test Raw TCP
         run: cargo test --workspace --all-targets
       - name: Test Raw TCP Without Reference Protocol
@@ -39,3 +41,5 @@ jobs:
         run: cargo test -p nacelle --features reference_protocol,http --all-targets
       - name: Test Tower
         run: cargo test -p nacelle --features reference_protocol,http,tower --all-targets
+      - name: Test OTel
+        run: cargo test -p nacelle --features reference_protocol,http,tower,otel --all-targets

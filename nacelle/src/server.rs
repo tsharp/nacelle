@@ -9,6 +9,7 @@ use crate::error::NacelleError;
 use crate::handler::Handler;
 use crate::protocol::Protocol;
 use crate::request::RequestMetadata;
+use crate::telemetry::NacelleTelemetry;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub struct Missing;
@@ -18,6 +19,7 @@ pub struct NacelleServer<Req, P, H = ()> {
     protocol: Arc<P>,
     handler: H,
     config: NacelleConfig,
+    telemetry: NacelleTelemetry,
     _request: PhantomData<fn() -> Req>,
 }
 
@@ -32,6 +34,7 @@ where
             protocol: self.protocol.clone(),
             handler: self.handler.clone(),
             config: self.config.clone(),
+            telemetry: self.telemetry.clone(),
             _request: PhantomData,
         }
     }
@@ -43,6 +46,7 @@ impl<Req> NacelleServer<Req, (), ()> {
             protocol: None,
             handler: None,
             config: NacelleConfig::default(),
+            telemetry: NacelleTelemetry::default(),
             _protocol: PhantomData,
             _handler: PhantomData,
             _request: PhantomData,
@@ -75,6 +79,7 @@ where
             self.protocol.clone(),
             self.handler.clone(),
             self.config.clone(),
+            self.telemetry.clone(),
         )
         .await
     }
@@ -89,6 +94,7 @@ where
             self.protocol.clone(),
             self.handler.clone(),
             self.config.clone(),
+            self.telemetry.clone(),
         )
         .await
     }
@@ -103,6 +109,7 @@ pub struct NacelleServerBuilder<Req, ProtocolState, HandlerState, P, H> {
     protocol: Option<Arc<P>>,
     handler: Option<H>,
     config: NacelleConfig,
+    telemetry: NacelleTelemetry,
     _protocol: PhantomData<ProtocolState>,
     _handler: PhantomData<HandlerState>,
     _request: PhantomData<fn() -> Req>,
@@ -113,6 +120,11 @@ impl<Req, ProtocolState, HandlerState, P, H>
 {
     pub fn config(mut self, config: NacelleConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    pub fn telemetry(mut self, telemetry: NacelleTelemetry) -> Self {
+        self.telemetry = telemetry;
         self
     }
 }
@@ -126,6 +138,7 @@ impl<Req, HandlerState, P, H> NacelleServerBuilder<Req, Missing, HandlerState, P
             protocol: Some(Arc::new(protocol)),
             handler: self.handler,
             config: self.config,
+            telemetry: self.telemetry,
             _protocol: PhantomData,
             _handler: PhantomData,
             _request: PhantomData,
@@ -142,6 +155,7 @@ impl<Req, ProtocolState, P, H> NacelleServerBuilder<Req, ProtocolState, Missing,
             protocol: self.protocol,
             handler: Some(handler),
             config: self.config,
+            telemetry: self.telemetry,
             _protocol: PhantomData,
             _handler: PhantomData,
             _request: PhantomData,
@@ -163,6 +177,7 @@ where
             protocol,
             handler,
             config: self.config,
+            telemetry: self.telemetry,
             _request: PhantomData,
         })
     }
