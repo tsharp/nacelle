@@ -18,6 +18,7 @@ const DEFAULT_CONFIG_PATH: &str = "config.yaml";
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
+    pub config_sources: Vec<String>,
     pub bind: SocketAddr,
     pub server_threads: usize,
     pub response_bytes: usize,
@@ -32,6 +33,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
+            config_sources: vec!["code defaults".to_string()],
             bind: SocketAddr::from(([127, 0, 0, 1], 7878)),
             server_threads: std::thread::available_parallelism()
                 .map(|n| n.get())
@@ -81,9 +83,11 @@ impl ServerConfig {
         &mut self,
         path: impl AsRef<Path>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let path = path.as_ref();
         let yaml = std::fs::read_to_string(path)?;
         let file = serde_yaml::from_str::<ServerConfigFile>(&yaml)?;
         self.apply_config_file(file);
+        self.config_sources.push(format!("yaml {}", path.display()));
         Ok(())
     }
 
@@ -233,6 +237,7 @@ fn parse_args_with_default_config(
         config.apply_file(default_config_path)?;
     }
     apply_config_args(&mut config, &args, runtime)?;
+    let cli_overrides = has_cli_overrides(&args);
     let mut args = args.into_iter();
 
     while let Some(arg) = args.next() {
@@ -280,7 +285,89 @@ fn parse_args_with_default_config(
         return Err("--server-threads must be greater than zero".into());
     }
 
+    if cli_overrides {
+        config.config_sources.push("cli args".to_string());
+    }
+
     Ok(config)
+}
+
+pub fn print_config(config: &ServerConfig, runtime: &str, actual_server_threads: usize) {
+    println!("nacelle-stress-server effective config:");
+    println!("  runtime: {runtime}");
+    println!("  config_sources: {}", config.config_sources.join(" -> "));
+    println!("  bind: {}", config.bind);
+    println!("  server_threads: {}", config.server_threads);
+    println!("  actual_server_threads: {actual_server_threads}");
+    println!("  response_bytes: {}", config.response_bytes);
+    println!("  read_buffer_capacity: {}", config.read_buffer_capacity);
+    println!(
+        "  response_buffer_capacity: {}",
+        config.response_buffer_capacity
+    );
+    println!(
+        "  request_body_chunk_size: {}",
+        config.request_body_chunk_size
+    );
+    println!(
+        "  request_body_channel_capacity: {}",
+        config.request_body_channel_capacity
+    );
+    println!("  low_memory: {}", config.low_memory);
+    println!("  limits:");
+    println!("    max_connections: {}", config.limits.max_connections);
+    println!(
+        "    max_in_flight_requests: {}",
+        config.limits.max_in_flight_requests
+    );
+    println!(
+        "    max_streaming_tasks: {}",
+        config.limits.max_streaming_tasks
+    );
+    println!("    max_memory_bytes: {}", config.limits.max_memory_bytes);
+    println!(
+        "    max_request_body_bytes: {}",
+        config.limits.max_request_body_bytes
+    );
+    println!(
+        "    max_response_body_bytes: {}",
+        config.limits.max_response_body_bytes
+    );
+    println!(
+        "    read_timeout_ms: {}",
+        format_duration_ms(config.limits.read_timeout)
+    );
+    println!(
+        "    write_timeout_ms: {}",
+        format_duration_ms(config.limits.write_timeout)
+    );
+    println!(
+        "    handler_timeout_ms: {}",
+        format_duration_ms(config.limits.handler_timeout)
+    );
+    println!(
+        "    idle_timeout_ms: {}",
+        format_duration_ms(config.limits.idle_timeout)
+    );
+}
+
+fn has_cli_overrides(args: &[String]) -> bool {
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--config" => index += 2,
+            "--help" | "-h" => index += 1,
+            _ => return true,
+        }
+    }
+    false
+}
+
+fn format_duration_ms(duration: Option<Duration>) -> String {
+    match duration {
+        Some(duration) => duration.as_millis().to_string(),
+        None => "null".to_string(),
+    }
 }
 
 fn apply_config_args(
@@ -431,7 +518,7 @@ limits:
         )
         .unwrap();
 
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(&path);
         assert_eq!(config.server_threads, 8);
         assert_eq!(config.response_bytes, 128);
         assert_eq!(config.limits.max_connections, 1_500);
@@ -470,9 +557,16 @@ limits:
 
         let config = parse_args_with_default_config([], "tokio", &path).unwrap();
 
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(&path);
         assert_eq!(config.response_bytes, 512);
         assert_eq!(config.limits.max_connections, 1_500);
+        assert_eq!(
+            config.config_sources,
+            vec![
+                "code defaults".to_string(),
+                format!("yaml {}", path.display())
+            ]
+        );
     }
 
     #[test]
@@ -512,5 +606,32 @@ limits:
         let _ = std::fs::remove_file(explicit_path);
         assert_eq!(config.response_bytes, 1024);
         assert_eq!(config.limits.max_connections, 32_000);
+        assert_eq!(config.config_sources.last().unwrap(), "cli args");
+    }
+
+    #[test]
+    fn explicit_config_without_cli_override_does_not_record_cli_source() {
+        let path = std::env::temp_dir().join(format!(
+            "nacelle-stress-server-explicit-only-config-{}.yaml",
+            std::process::id()
+        ));
+        std::fs::write(&path, "response_bytes: 256\n").unwrap();
+
+        let config = parse_args_with_default_config(
+            ["--config".to_string(), path.to_string_lossy().into_owned()],
+            "tokio",
+            Path::new("nacelle-stress-server-test-missing-default-config.yaml"),
+        )
+        .unwrap();
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(config.response_bytes, 256);
+        assert_eq!(
+            config.config_sources,
+            vec![
+                "code defaults".to_string(),
+                format!("yaml {}", path.display())
+            ]
+        );
     }
 }

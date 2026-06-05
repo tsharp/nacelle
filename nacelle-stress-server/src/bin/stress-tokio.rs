@@ -3,7 +3,7 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[path = "../shared.rs"]
 mod shared;
-use shared::{build_server, configure_allocator, parse_args};
+use shared::{build_server, configure_allocator, parse_args, print_config};
 
 use std::net::SocketAddr;
 use std::thread;
@@ -157,6 +157,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
     #[cfg(target_os = "linux")]
     let n_server_threads = config.server_threads.max(1);
+
+    print_config(&config, "tokio", n_server_threads);
 
     let use_reuseport = n_server_threads > 1;
     let first_socket = make_server_socket(&config.bind, use_reuseport)?;
