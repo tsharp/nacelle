@@ -6,11 +6,15 @@ mod shared;
 use shared::{build_server, configure_allocator, parse_args, print_config};
 
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use nacelle::{FrameRequest, Handler, LengthDelimitedProtocol, NacelleError, RawTcpServer};
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::watch;
+use tokio::time::MissedTickBehavior;
 
 const SOCKET_BUFFER_BYTES: u32 = 4 * 1024 * 1024;
 
@@ -95,6 +99,7 @@ async fn run_server<H>(
     listener: TcpListener,
     server: RawTcpServer<FrameRequest, LengthDelimitedProtocol, H>,
     mut shutdown: watch::Receiver<bool>,
+    stats: Arc<ServerStats>,
 ) -> Result<(), NacelleError>
 where
     H: Handler,
@@ -110,8 +115,12 @@ where
                 let (stream, _) = accepted?;
                 stream.set_nodelay(true)?;
                 let server = server.clone();
+                let stats = stats.clone();
+                stats.record_accepted_connection();
                 tokio::spawn(async move {
-                    let _ = server.serve_io(stream).await;
+                    let active_connection = ActiveConnection::new(stats);
+                    let result = server.serve_io(stream).await;
+                    active_connection.record_finished(result.is_err());
                 });
             }
         }
@@ -127,6 +136,7 @@ fn spawn_server_thread<H>(
     listener: TcpListener,
     server: RawTcpServer<FrameRequest, LengthDelimitedProtocol, H>,
     shutdown: watch::Receiver<bool>,
+    stats: Arc<ServerStats>,
 ) -> thread::JoinHandle<Result<(), NacelleError>>
 where
     H: Handler,
@@ -136,8 +146,184 @@ where
             .enable_all()
             .build()
             .map_err(NacelleError::from)?;
-        runtime.block_on(run_server(listener, server, shutdown))
+        runtime.block_on(run_server(listener, server, shutdown, stats))
     })
+}
+
+// ---------------------------------------------------------------------------
+// Stats
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct ServerStats {
+    started_at: Instant,
+    accepted_connections: AtomicU64,
+    active_connections: AtomicU64,
+    completed_connections: AtomicU64,
+    failed_connections: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ServerStatsSnapshot {
+    uptime: Duration,
+    accepted_connections: u64,
+    active_connections: u64,
+    completed_connections: u64,
+    failed_connections: u64,
+}
+
+impl ServerStats {
+    fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+            accepted_connections: AtomicU64::new(0),
+            active_connections: AtomicU64::new(0),
+            completed_connections: AtomicU64::new(0),
+            failed_connections: AtomicU64::new(0),
+        }
+    }
+
+    fn record_accepted_connection(&self) {
+        self.accepted_connections.fetch_add(1, Ordering::Relaxed);
+        self.active_connections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_finished_connection(&self, failed: bool) {
+        self.completed_connections.fetch_add(1, Ordering::Relaxed);
+        if failed {
+            self.failed_connections.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn record_inactive_connection(&self) {
+        self.active_connections.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> ServerStatsSnapshot {
+        ServerStatsSnapshot {
+            uptime: self.started_at.elapsed(),
+            accepted_connections: self.accepted_connections.load(Ordering::Relaxed),
+            active_connections: self.active_connections.load(Ordering::Relaxed),
+            completed_connections: self.completed_connections.load(Ordering::Relaxed),
+            failed_connections: self.failed_connections.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct ActiveConnection {
+    stats: Arc<ServerStats>,
+}
+
+impl ActiveConnection {
+    fn new(stats: Arc<ServerStats>) -> Self {
+        Self { stats }
+    }
+
+    fn record_finished(&self, failed: bool) {
+        self.stats.record_finished_connection(failed);
+    }
+}
+
+impl Drop for ActiveConnection {
+    fn drop(&mut self) {
+        self.stats.record_inactive_connection();
+    }
+}
+
+async fn print_periodic_stats(stats: Arc<ServerStats>, mut shutdown: watch::Receiver<bool>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    interval.tick().await;
+    let mut previous = stats.snapshot();
+
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+            _ = interval.tick() => {
+                let snapshot = stats.snapshot();
+                print_server_stats("periodic", snapshot, Some(previous));
+                previous = snapshot;
+            }
+        }
+    }
+}
+
+fn print_server_stats(
+    kind: &str,
+    snapshot: ServerStatsSnapshot,
+    previous: Option<ServerStatsSnapshot>,
+) {
+    let completed_per_sec = previous
+        .map(|previous| {
+            let elapsed = snapshot
+                .uptime
+                .saturating_sub(previous.uptime)
+                .as_secs_f64()
+                .max(f64::EPSILON);
+            (snapshot
+                .completed_connections
+                .saturating_sub(previous.completed_connections)) as f64
+                / elapsed
+        })
+        .unwrap_or_else(|| {
+            snapshot.completed_connections as f64 / snapshot.uptime.as_secs_f64().max(f64::EPSILON)
+        });
+    let accepted_delta = previous
+        .map(|previous| {
+            snapshot
+                .accepted_connections
+                .saturating_sub(previous.accepted_connections)
+        })
+        .unwrap_or(snapshot.accepted_connections);
+    let completed_delta = previous
+        .map(|previous| {
+            snapshot
+                .completed_connections
+                .saturating_sub(previous.completed_connections)
+        })
+        .unwrap_or(snapshot.completed_connections);
+    let failed_delta = previous
+        .map(|previous| {
+            snapshot
+                .failed_connections
+                .saturating_sub(previous.failed_connections)
+        })
+        .unwrap_or(snapshot.failed_connections);
+
+    println!(
+        "nacelle-stress-server stats kind={} uptime={:.1}s active_connections={} accepted_total={} accepted_delta={} completed_total={} completed_delta={} failed_total={} failed_delta={} completed_connections_per_sec={:.2}",
+        kind,
+        snapshot.uptime.as_secs_f64(),
+        snapshot.active_connections,
+        snapshot.accepted_connections,
+        accepted_delta,
+        snapshot.completed_connections,
+        completed_delta,
+        snapshot.failed_connections,
+        failed_delta,
+        completed_per_sec,
+    );
+}
+
+async fn wait_for_shutdown_signal() -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await
+    }
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -172,13 +358,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let stats = Arc::new(ServerStats::new());
+    let stats_task = tokio::spawn(print_periodic_stats(stats.clone(), shutdown_rx.clone()));
 
     if n_server_threads == 1 {
-        let server_task = tokio::spawn(run_server(first_listener, server, shutdown_rx));
-        tokio::signal::ctrl_c().await?;
+        let server_task = tokio::spawn(run_server(
+            first_listener,
+            server,
+            shutdown_rx,
+            stats.clone(),
+        ));
+        wait_for_shutdown_signal().await?;
         eprintln!("\nshutting down...");
         let _ = shutdown_tx.send(true);
         server_task.await??;
+        stats_task.await?;
+        print_server_stats("final", stats.snapshot(), None);
         return Ok(());
     }
 
@@ -187,6 +382,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         first_listener,
         server.clone(),
         shutdown_rx.clone(),
+        stats.clone(),
     ));
     for _ in 1..n_server_threads {
         let socket = make_server_socket(&listen_addr, true)?;
@@ -196,10 +392,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             listener,
             server.clone(),
             shutdown_rx.clone(),
+            stats.clone(),
         ));
     }
 
-    tokio::signal::ctrl_c().await?;
+    wait_for_shutdown_signal().await?;
     eprintln!("\nshutting down...");
     let _ = shutdown_tx.send(true);
     for task in server_tasks {
@@ -207,6 +404,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .map_err(|_| "server thread panicked")?
             .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(error) })?;
     }
+    stats_task.await?;
+    print_server_stats("final", stats.snapshot(), None);
 
     Ok(())
 }
