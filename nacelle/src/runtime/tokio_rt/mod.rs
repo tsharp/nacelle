@@ -26,22 +26,22 @@ where
     JoinHandle(tokio::spawn(future))
 }
 
-#[cfg(feature = "tcp")]
+#[cfg(feature = "raw_tcp")]
 use std::net::SocketAddr;
-#[cfg(feature = "tcp")]
+#[cfg(feature = "raw_tcp")]
 use std::sync::Arc;
 
-#[cfg(feature = "tcp")]
+#[cfg(feature = "raw_tcp")]
 use crate::error::NacelleError;
-#[cfg(feature = "tcp")]
+#[cfg(feature = "raw_tcp")]
 use crate::protocol::Protocol;
-#[cfg(feature = "tcp")]
+#[cfg(feature = "raw_tcp")]
 use crate::request::RequestMetadata;
-#[cfg(feature = "tcp")]
+#[cfg(feature = "raw_tcp")]
 use crate::server::NacelleServer;
 
 /// Listen on `addr` and serve each accepted TCP connection in its own task.
-#[cfg(feature = "tcp")]
+#[cfg(feature = "raw_tcp")]
 pub async fn serve_tcp<Svc, Req, P>(
     server: Arc<NacelleServer<Svc, Req, P>>,
     addr: SocketAddr,

@@ -1,70 +1,69 @@
 # Nacelle
 
-**Nacelle is an experimental Tokio-based Rust library for building custom binary protocol servers with framed streaming request processing, opcode-based handler dispatch, and minimal head decode.**
+**Nacelle is an experimental Tokio-based Rust library for streaming application handlers across multiple transports.**
 
-## Example
+The current transports are:
+
+- `raw_tcp` (default) — custom length-delimited frames over TCP
+- `http` — Hyper HTTP/1 server transport
+
+Both transports call the same app-facing handler shape:
+
+```rust
+async fn handle(request: NacelleRequest) -> Result<NacelleResponse, NacelleError>
+```
+
+`NacelleBody` is streaming, so handlers can consume request chunks and return response chunks without forcing full buffering.
+
+## Raw TCP Example
 
 ```rust
 use std::sync::Arc;
+
 use nacelle::{
-    NacelleServer, NacelleConfig, handler_fn,
-    RequestBody, ResponseWriter, FrameRequest,
-    LengthDelimitedProtocol, NacelleError,
+    FrameRequest, LengthDelimitedProtocol, NacelleError, NacelleRequestMeta,
+    NacelleResponse, RawTcpServer, handler_fn,
 };
-use bytes::Bytes;
 
-// Service state shared across all requests
-struct MyService {
-    response_data: Bytes,
-}
+struct MyService;
 
-// Build server with handlers
-let server = NacelleServer::<MyService, FrameRequest, _>::builder()
-    .service(MyService {
-        response_data: Bytes::from_static(b"Hello"),
-    })
+let server = RawTcpServer::<MyService, FrameRequest, ()>::builder()
+    .service(MyService)
     .protocol(LengthDelimitedProtocol)
-    .handler(
-        handler_fn(|svc: Arc<MyService>, 
-                    req: FrameRequest,
-                    mut body: RequestBody,
-                    response: ResponseWriter| async move {
-            // Consume request body
-            while let Some(chunk) = body.next_chunk().await {
+    .handler(handler_fn(|_svc: Arc<MyService>, mut request| async move {
+        let opcode = match &request.meta {
+            NacelleRequestMeta::RawTcp(meta) => meta.opcode,
+        };
+        if opcode != 1 {
+            while let Some(chunk) = request.body.next_chunk().await {
                 let _ = chunk?;
             }
-            if req.opcode != 1 {
-                return Err(NacelleError::handler(std::io::Error::other(
-                    format!("unknown opcode {}", req.opcode),
-                )));
-            }
-            // Write response
-            response.write_bytes(svc.response_data.clone())?;
-            Ok::<_, NacelleError>(())
-        }),
-    )
+            return Err(NacelleError::handler(std::io::Error::other(
+                format!("unknown opcode {opcode}"),
+            )));
+        }
+        Ok(NacelleResponse::raw_tcp(request.body))
+    }))
     .build()?;
 
-// Serve on TCP
 server.serve_tcp("127.0.0.1:8080".parse()?).await?;
 ```
-
-## Features
-
-- `tcp` (default) — TCP listener and transport
-- Tokio-only runtime support
-- Length-delimited binary frame protocol
-- Single application handler with request metadata
-- Streaming request bodies and framed responses
-
-TLS, authentication, compression, metrics, and Tower integration are not implemented in this prototype.
 
 ## Building
 
 ```bash
 cargo build --release
 
-# Run stress benchmark
+# Raw TCP echo
+cargo run --example echo -- 127.0.0.1:8080
+
+# HTTP echo
+cargo run --no-default-features --features http --example http_echo -- 127.0.0.1:8080
+```
+
+## Stress Harness
+
+```bash
 cargo run --release --package nacelle-stress-server --bin tokio-server
 
 # In another shell:
@@ -74,16 +73,9 @@ cargo run --release --package nacelle-stress-test -- \
   --duration-secs 15
 ```
 
-The protocol contract is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md).
-A runnable echo server is available with:
+The raw TCP protocol contract is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-```bash
-cargo run --example echo -- 127.0.0.1:8080
-```
-
-## Performance
-
-Built for high-throughput workloads. Includes Criterion benchmarks for frame encoding/decoding and handler dispatch.
+TLS, authentication, compression, metrics, and Tower integration are not implemented in this prototype.
 
 ## License
 

@@ -33,7 +33,7 @@ server does not currently interpret request flags.
 
 Each request frame contains one complete request body. The server decodes only
 the frame head before dispatch, then exposes the body to the handler as a
-`RequestBody`. Small bodies are served from the connection read buffer. Larger
+`NacelleBody`. Small bodies are served from the connection read buffer. Larger
 bodies are streamed to the handler in configured chunks.
 
 `opcode` is request metadata. The application handler decides whether to use it
@@ -43,15 +43,15 @@ response frame.
 
 ## Responses
 
-Handlers write zero or more body chunks through `ResponseWriter`.
+Handlers return a `NacelleResponse` with a streaming `NacelleBody`. The raw TCP
+transport encodes that response body into one or more response frames.
 
 The protocol guarantees:
 
 - the first response frame has `FRAME_FLAG_START`
 - the last response frame has `FRAME_FLAG_END`
-- a handler that writes no body still emits a start/end response frame
-- a handler error emits a start/end/error frame when the handler has not already
-  started writing a response
+- a handler that returns an empty body still emits a start/end response frame
+- a handler error emits a start/end/error frame
 
 Responses are written in request-processing order for a single connection. The
 prototype does not yet provide concurrent per-connection response interleaving.
@@ -59,8 +59,8 @@ prototype does not yet provide concurrent per-connection response interleaving.
 ## Error Handling
 
 Malformed frame heads, oversized frames, and EOF before a complete frame cause
-the connection to fail. Unknown opcodes and handler errors are encoded as error
-frames when enough request context is available.
+the connection to fail. Handler errors are encoded as error frames when enough
+request context is available. Unknown opcode handling is application policy.
 
 ## Limits
 

@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["tcp"]
-tcp = []
+default = ["raw_tcp"]
+raw_tcp = []
+http = ["dep:http", "dep:http-body-util", "dep:hyper", "dep:hyper-util"]
 bench = []
 fuzzing = []
 
@@ -13,6 +14,10 @@ fuzzing = []
 bytes = "1.10.1"
 mimalloc = { version = "0.1", default-features = false }
 futures-core = "0.3.31"
+http = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
+hyper = { version = "1", features = ["http1", "server"], optional = true }
+hyper-util = { version = "0.1", features = ["server", "tokio"], optional = true }
 tokio = { version = "1.47.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
@@ -21,4 +26,14 @@ criterion = "0.5.1"
 [[bench]]
 name = "critical_paths"
 harness = false
-required-features = ["bench"]
+required-features = ["bench", "raw_tcp"]
+
+[[example]]
+name = "echo"
+path = "examples/echo.rs"
+required-features = ["raw_tcp"]
+
+[[example]]
+name = "http_echo"
+path = "examples/http_echo.rs"
+required-features = ["http"]

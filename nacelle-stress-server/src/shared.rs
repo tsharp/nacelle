@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use nacelle::{
-    FrameRequest, LengthDelimitedProtocol, NacelleConfig, NacelleError, NacelleServer, RequestBody,
-    ResponseWriter, handler_fn,
+    FrameRequest, LengthDelimitedProtocol, NacelleConfig, NacelleError, NacelleRequestMeta,
+    NacelleResponse, RawTcpServer, handler_fn,
 };
 
 pub const STRESS_OPCODE: u64 = 1;
@@ -75,8 +75,8 @@ pub fn configure_allocator(low_memory: bool) {
 
 pub fn build_server(
     config: &ServerConfig,
-) -> Result<NacelleServer<StressService, FrameRequest, LengthDelimitedProtocol>, NacelleError> {
-    NacelleServer::<StressService, FrameRequest, ()>::builder()
+) -> Result<RawTcpServer<StressService, FrameRequest, LengthDelimitedProtocol>, NacelleError> {
+    RawTcpServer::<StressService, FrameRequest, ()>::builder()
         .service(StressService {
             response_payload: Bytes::from(vec![0x5A; config.response_bytes]),
         })
@@ -89,23 +89,20 @@ pub fn build_server(
                 .with_request_body_channel_capacity(config.request_body_channel_capacity),
         )
         .handler(handler_fn(
-            |svc: Arc<StressService>,
-             req: FrameRequest,
-             mut body: RequestBody,
-             response: ResponseWriter| async move {
-                while let Some(chunk) = body.next_chunk().await {
+            |svc: Arc<StressService>, mut request| async move {
+                let opcode = match &request.meta {
+                    NacelleRequestMeta::RawTcp(meta) => meta.opcode,
+                };
+                while let Some(chunk) = request.body.next_chunk().await {
                     let _ = chunk?;
                 }
-                if req.opcode != STRESS_OPCODE {
+                if opcode != STRESS_OPCODE {
                     return Err(NacelleError::handler(std::io::Error::other(format!(
                         "unknown opcode {}",
-                        req.opcode
+                        opcode
                     ))));
                 }
-                if !svc.response_payload.is_empty() {
-                    response.write_bytes(svc.response_payload.clone())?;
-                }
-                Ok(())
+                Ok(NacelleResponse::raw_tcp_bytes(svc.response_payload.clone()))
             },
         ))
         .build()

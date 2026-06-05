@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use nacelle::{
-    FrameRequest, LengthDelimitedProtocol, NacelleError, NacelleServer, RequestBody,
-    ResponseWriter, handler_fn,
+    FrameRequest, LengthDelimitedProtocol, NacelleError, NacelleRequestMeta, NacelleResponse,
+    RawTcpServer, handler_fn,
 };
 
 struct EchoService;
@@ -16,26 +16,27 @@ async fn main() -> Result<(), NacelleError> {
         .parse()
         .map_err(NacelleError::protocol)?;
 
-    let server = NacelleServer::<EchoService, FrameRequest, ()>::builder()
+    let server = RawTcpServer::<EchoService, FrameRequest, ()>::builder()
         .service(EchoService)
         .protocol(LengthDelimitedProtocol)
         .handler(handler_fn(
-            |_svc: Arc<EchoService>,
-             req: FrameRequest,
-             mut body: RequestBody,
-             response: ResponseWriter| async move {
+            |_svc: Arc<EchoService>, mut request| async move {
+                let opcode = match &request.meta {
+                    NacelleRequestMeta::RawTcp(meta) => meta.opcode,
+                    #[cfg(feature = "http")]
+                    NacelleRequestMeta::Http(_) => 0,
+                };
                 let mut echoed = BytesMut::new();
-                while let Some(chunk) = body.next_chunk().await {
+                while let Some(chunk) = request.body.next_chunk().await {
                     echoed.extend_from_slice(&chunk?);
                 }
-                if req.opcode != 1 {
+                if opcode != 1 {
                     return Err(NacelleError::handler(std::io::Error::other(format!(
                         "unknown opcode {}",
-                        req.opcode
+                        opcode
                     ))));
                 }
-                response.write_bytes(echoed.freeze())?;
-                Ok(())
+                Ok(NacelleResponse::raw_tcp_bytes(echoed.freeze()))
             },
         ))
         .build()?;

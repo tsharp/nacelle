@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+#[cfg(feature = "raw_tcp")]
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -16,9 +17,12 @@ pub struct Present;
 pub struct NacelleServer<Svc, Req, P> {
     service: Arc<Svc>,
     protocol: Arc<P>,
-    handler: BoxedHandler<Svc, Req>,
+    handler: BoxedHandler<Svc>,
     config: NacelleConfig,
+    _request: PhantomData<fn() -> Req>,
 }
+
+pub type RawTcpServer<Svc, Req, P> = NacelleServer<Svc, Req, P>;
 
 impl<Svc, Req, P> Clone for NacelleServer<Svc, Req, P> {
     fn clone(&self) -> Self {
@@ -27,6 +31,7 @@ impl<Svc, Req, P> Clone for NacelleServer<Svc, Req, P> {
             protocol: self.protocol.clone(),
             handler: self.handler.clone(),
             config: self.config.clone(),
+            _request: PhantomData,
         }
     }
 }
@@ -41,6 +46,7 @@ impl<Svc, Req> NacelleServer<Svc, Req, ()> {
             _service: PhantomData,
             _protocol: PhantomData,
             _handler: PhantomData,
+            _request: PhantomData,
         }
     }
 }
@@ -96,20 +102,21 @@ where
         .await
     }
 
-    #[cfg(feature = "tcp")]
+    #[cfg(feature = "raw_tcp")]
     pub async fn serve_tcp(&self, addr: SocketAddr) -> Result<(), NacelleError> {
-        crate::runtime::serve_tcp(Arc::new(self.clone()), addr).await
+        crate::runtime::serve_tcp(Arc::<NacelleServer<Svc, Req, P>>::new(self.clone()), addr).await
     }
 }
 
 pub struct NacelleServerBuilder<Svc, Req, ServiceState, ProtocolState, HandlerState, P> {
     service: Option<Arc<Svc>>,
     protocol: Option<Arc<P>>,
-    handler: Option<BoxedHandler<Svc, Req>>,
+    handler: Option<BoxedHandler<Svc>>,
     config: NacelleConfig,
     _service: PhantomData<ServiceState>,
     _protocol: PhantomData<ProtocolState>,
     _handler: PhantomData<HandlerState>,
+    _request: PhantomData<fn() -> Req>,
 }
 
 impl<Svc, Req, ServiceState, ProtocolState, HandlerState, P>
@@ -136,6 +143,7 @@ impl<Svc, Req, ProtocolState, HandlerState, P>
             _service: PhantomData,
             _protocol: PhantomData,
             _handler: PhantomData,
+            _request: PhantomData,
         }
     }
 }
@@ -155,6 +163,7 @@ impl<Svc, Req, ServiceState, HandlerState, P>
             _service: PhantomData,
             _protocol: PhantomData,
             _handler: PhantomData,
+            _request: PhantomData,
         }
     }
 }
@@ -164,7 +173,7 @@ impl<Svc, Req, ServiceState, ProtocolState, P>
 {
     pub fn handler(
         self,
-        handler: BoxedHandler<Svc, Req>,
+        handler: BoxedHandler<Svc>,
     ) -> NacelleServerBuilder<Svc, Req, ServiceState, ProtocolState, Present, P> {
         NacelleServerBuilder {
             service: self.service,
@@ -174,6 +183,7 @@ impl<Svc, Req, ServiceState, ProtocolState, P>
             _service: PhantomData,
             _protocol: PhantomData,
             _handler: PhantomData,
+            _request: PhantomData,
         }
     }
 }
@@ -194,6 +204,7 @@ where
             protocol,
             handler,
             config: self.config,
+            _request: PhantomData,
         })
     }
 }
@@ -210,7 +221,8 @@ mod tests {
         FRAME_FLAG_END, FRAME_FLAG_ERROR, FRAME_FLAG_START, FrameRequest, LengthDelimitedProtocol,
     };
     use crate::handler::handler_fn;
-    use crate::request::{RequestBody, ResponseWriter};
+    use crate::request::NacelleRequestMeta;
+    use crate::response::NacelleResponse;
 
     use super::*;
 
@@ -225,18 +237,22 @@ mod tests {
                     .with_request_body_chunk_size(3)
                     .with_request_body_channel_capacity(1),
             )
-            .handler(handler_fn(
-                |_svc: Arc<()>,
-                 _req: FrameRequest,
-                 mut body: RequestBody,
-                 response: ResponseWriter| async move {
-                    while let Some(chunk) = body.next_chunk().await {
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                        response.write_bytes(chunk?)?;
+            .handler(handler_fn(|_svc: Arc<()>, mut request| async move {
+                let mut chunks = Vec::new();
+                while let Some(chunk) = request.body.next_chunk().await {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    chunks.push(chunk?);
+                }
+                let (tx, body) = crate::request::NacelleBody::channel(1);
+                tokio::spawn(async move {
+                    for chunk in chunks {
+                        if tx.send(Ok(chunk)).await.is_err() {
+                            break;
+                        }
                     }
-                    Ok(())
-                },
-            ))
+                });
+                Ok(NacelleResponse::raw_tcp(body))
+            }))
             .build()
             .expect("server should build");
 
@@ -497,14 +513,9 @@ mod tests {
         let server = NacelleServer::<(), FrameRequest, ()>::builder()
             .service(())
             .protocol(protocol.clone())
-            .handler(handler_fn(
-                |_svc: Arc<()>,
-                 _req: FrameRequest,
-                 _body: RequestBody,
-                 _response: ResponseWriter| async move {
-                    Err(NacelleError::handler(std::io::Error::other("handler boom")))
-                },
-            ))
+            .handler(handler_fn(|_svc: Arc<()>, _request| async move {
+                Err(NacelleError::handler(std::io::Error::other("handler boom")))
+            }))
             .build()
             .expect("server should build");
 
@@ -548,16 +559,17 @@ mod tests {
         let server = NacelleServer::<(), FrameRequest, ()>::builder()
             .service(())
             .protocol(protocol.clone())
-            .handler(handler_fn(
-                |_svc: Arc<()>,
-                 _req: FrameRequest,
-                 _body: RequestBody,
-                 response: ResponseWriter| async move {
-                    response.write_bytes(Bytes::from_static(b"first"))?;
-                    response.write_bytes(Bytes::from_static(b"second"))?;
-                    Ok(())
-                },
-            ))
+            .handler(handler_fn(|_svc: Arc<()>, _request| async move {
+                let (tx, body) = crate::request::NacelleBody::channel(2);
+                tx.send(Ok(Bytes::from_static(b"first")))
+                    .await
+                    .expect("receiver should be open");
+                tx.send(Ok(Bytes::from_static(b"second")))
+                    .await
+                    .expect("receiver should be open");
+                drop(tx);
+                Ok(NacelleResponse::raw_tcp(body))
+            }))
             .build()
             .expect("server should build");
 
@@ -603,17 +615,9 @@ mod tests {
             .service(())
             .protocol(protocol)
             .config(config)
-            .handler(handler_fn(
-                |_svc: Arc<()>,
-                 _req: FrameRequest,
-                 mut body: RequestBody,
-                 response: ResponseWriter| async move {
-                    while let Some(chunk) = body.next_chunk().await {
-                        response.write_bytes(chunk?)?;
-                    }
-                    Ok(())
-                },
-            ))
+            .handler(handler_fn(|_svc: Arc<()>, request| async move {
+                Ok(NacelleResponse::raw_tcp(request.body))
+            }))
             .build()
             .expect("server should build")
     }
@@ -626,27 +630,23 @@ mod tests {
             .service(())
             .protocol(protocol)
             .config(config)
-            .handler(handler_fn(
-                |_svc: Arc<()>,
-                 req: FrameRequest,
-                 mut body: RequestBody,
-                 response: ResponseWriter| async move {
-                    if req.opcode != 1 {
-                        while let Some(chunk) = body.next_chunk().await {
-                            let _ = chunk?;
-                        }
-                        return Err(NacelleError::handler(std::io::Error::other(format!(
-                            "unknown opcode {}",
-                            req.opcode
-                        ))));
+            .handler(handler_fn(|_svc: Arc<()>, mut request| async move {
+                let opcode = match &request.meta {
+                    NacelleRequestMeta::RawTcp(meta) => meta.opcode,
+                    #[cfg(feature = "http")]
+                    NacelleRequestMeta::Http(_) => 0,
+                };
+                if opcode != 1 {
+                    while let Some(chunk) = request.body.next_chunk().await {
+                        let _ = chunk?;
                     }
+                    return Err(NacelleError::handler(std::io::Error::other(format!(
+                        "unknown opcode {opcode}"
+                    ))));
+                }
 
-                    while let Some(chunk) = body.next_chunk().await {
-                        response.write_bytes(chunk?)?;
-                    }
-                    Ok(())
-                },
-            ))
+                Ok(NacelleResponse::raw_tcp(request.body))
+            }))
             .build()
             .expect("server should build")
     }

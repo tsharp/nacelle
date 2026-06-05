@@ -1,7 +1,4 @@
-use std::cell::UnsafeCell;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -10,11 +7,48 @@ use tokio::sync::mpsc;
 
 use crate::error::NacelleError;
 
-pub trait RequestMetadata: Send + 'static {
-    fn opcode(&self) -> u64;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawTcpRequestMeta {
+    pub request_id: Option<u64>,
+    pub opcode: u64,
+    pub flags: u32,
+    pub body_len: usize,
 }
 
-enum RequestBodySource {
+#[cfg(feature = "http")]
+#[derive(Debug, Clone)]
+pub struct HttpRequestMeta {
+    pub method: http::Method,
+    pub uri: http::Uri,
+    pub headers: http::HeaderMap,
+}
+
+#[derive(Debug, Clone)]
+pub enum NacelleRequestMeta {
+    RawTcp(RawTcpRequestMeta),
+    #[cfg(feature = "http")]
+    Http(HttpRequestMeta),
+}
+
+pub trait RequestMetadata: Send + 'static {
+    fn opcode(&self) -> u64;
+
+    fn raw_tcp_meta(&self, body_len: usize) -> RawTcpRequestMeta {
+        RawTcpRequestMeta {
+            request_id: None,
+            opcode: self.opcode(),
+            flags: 0,
+            body_len,
+        }
+    }
+}
+
+pub struct NacelleRequest {
+    pub meta: NacelleRequestMeta,
+    pub body: NacelleBody,
+}
+
+enum NacelleBodySource {
     // Single-chunk bodies (the common case for small payloads): avoids Vec/Box heap alloc.
     SingleChunk(Option<Bytes>),
     Buffered {
@@ -26,32 +60,61 @@ enum RequestBodySource {
     },
 }
 
-pub struct RequestBody {
-    source: RequestBodySource,
+pub struct NacelleBody {
+    source: NacelleBodySource,
     remaining_bytes: usize,
 }
 
-impl RequestBody {
+impl NacelleBody {
     pub(crate) fn new(
         receiver: mpsc::Receiver<Result<Bytes, NacelleError>>,
         remaining_bytes: usize,
     ) -> Self {
         Self {
-            source: RequestBodySource::Streaming { receiver },
+            source: NacelleBodySource::Streaming { receiver },
             remaining_bytes,
         }
     }
 
+    pub fn empty() -> Self {
+        Self {
+            source: NacelleBodySource::Buffered {
+                chunks: Box::new([]),
+                next_index: 0,
+            },
+            remaining_bytes: 0,
+        }
+    }
+
+    pub fn bytes(chunk: impl Into<Bytes>) -> Self {
+        let chunk = chunk.into();
+        let remaining_bytes = chunk.len();
+        if remaining_bytes == 0 {
+            return Self::empty();
+        }
+        Self {
+            source: NacelleBodySource::SingleChunk(Some(chunk)),
+            remaining_bytes,
+        }
+    }
+
+    pub fn channel(capacity: usize) -> (mpsc::Sender<Result<Bytes, NacelleError>>, NacelleBody) {
+        let (tx, rx) = mpsc::channel(capacity.max(1));
+        (tx, NacelleBody::new(rx, 0))
+    }
+
+    #[cfg(feature = "raw_tcp")]
     pub(crate) fn from_single_chunk(chunk: Bytes, remaining_bytes: usize) -> Self {
         Self {
-            source: RequestBodySource::SingleChunk(Some(chunk)),
+            source: NacelleBodySource::SingleChunk(Some(chunk)),
             remaining_bytes,
         }
     }
 
+    #[cfg(feature = "raw_tcp")]
     pub(crate) fn from_buffered(chunks: Vec<Bytes>, remaining_bytes: usize) -> Self {
         Self {
-            source: RequestBodySource::Buffered {
+            source: NacelleBodySource::Buffered {
                 chunks: chunks.into_boxed_slice(),
                 next_index: 0,
             },
@@ -65,18 +128,18 @@ impl RequestBody {
 
     pub async fn next_chunk(&mut self) -> Option<Result<Bytes, NacelleError>> {
         match &mut self.source {
-            RequestBodySource::SingleChunk(slot) => {
+            NacelleBodySource::SingleChunk(slot) => {
                 let chunk = slot.take()?;
                 self.remaining_bytes = 0;
                 Some(Ok(chunk))
             }
-            RequestBodySource::Buffered { chunks, next_index } => {
+            NacelleBodySource::Buffered { chunks, next_index } => {
                 let chunk = chunks.get(*next_index)?.clone();
                 *next_index += 1;
                 self.remaining_bytes = self.remaining_bytes.saturating_sub(chunk.len());
                 Some(Ok(chunk))
             }
-            RequestBodySource::Streaming { receiver } => match receiver.recv().await {
+            NacelleBodySource::Streaming { receiver } => match receiver.recv().await {
                 Some(Ok(chunk)) => {
                     self.remaining_bytes = self.remaining_bytes.saturating_sub(chunk.len());
                     Some(Ok(chunk))
@@ -87,19 +150,19 @@ impl RequestBody {
     }
 }
 
-impl Stream for RequestBody {
+impl Stream for NacelleBody {
     type Item = Result<Bytes, NacelleError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match &mut self.source {
-            RequestBodySource::SingleChunk(slot) => {
+            NacelleBodySource::SingleChunk(slot) => {
                 let Some(chunk) = slot.take() else {
                     return Poll::Ready(None);
                 };
                 self.remaining_bytes = 0;
                 Poll::Ready(Some(Ok(chunk)))
             }
-            RequestBodySource::Buffered { chunks, next_index } => {
+            NacelleBodySource::Buffered { chunks, next_index } => {
                 let Some(chunk) = chunks.get(*next_index).cloned() else {
                     return Poll::Ready(None);
                 };
@@ -107,7 +170,7 @@ impl Stream for RequestBody {
                 self.remaining_bytes = self.remaining_bytes.saturating_sub(chunk.len());
                 Poll::Ready(Some(Ok(chunk)))
             }
-            RequestBodySource::Streaming { receiver } => match receiver.poll_recv(cx) {
+            NacelleBodySource::Streaming { receiver } => match receiver.poll_recv(cx) {
                 Poll::Ready(Some(Ok(chunk))) => {
                     self.remaining_bytes = self.remaining_bytes.saturating_sub(chunk.len());
                     Poll::Ready(Some(Ok(chunk)))
@@ -115,94 +178,5 @@ impl Stream for RequestBody {
                 other => other,
             },
         }
-    }
-}
-
-pub(crate) trait ResponseSink: Send {
-    /// Encode `chunk` into the response buffer. Must not perform I/O — callers rely on this
-    /// being synchronous and allocation-free on the hot path.
-    fn write_bytes(&mut self, chunk: Bytes) -> Result<(), NacelleError>;
-    /// Flush all buffered chunks to the underlying writer. Called exactly once per response.
-    /// Synchronous: implementations must use non-blocking I/O (e.g. unbounded channel send).
-    fn finish(&mut self) -> Result<(), NacelleError>;
-}
-
-struct ResponseWriterInner {
-    // Access discipline (upheld by the framework, not the type system):
-    //   • write_bytes — only called from within the handler future; calls are sequential
-    //     within that single task, never concurrent with finish or each other.
-    //   • finish / has_written — only called after the handler future has completed
-    //     (either directly awaited in the same task, or after join on the spawned task).
-    //
-    // Because these two phases never overlap, UnsafeCell access is sound even though
-    // ResponseWriter is Clone + Send + Sync.  The AtomicBools provide the memory-ordering
-    // fence needed when the handler runs in a spawned task (tokio task-join implies
-    // happens-before, so Relaxed ordering is sufficient for `wrote`; AcqRel on `finished`
-    // guards the sink take in finish()).
-    sink: UnsafeCell<Option<Box<dyn ResponseSink>>>,
-    finished: AtomicBool,
-    wrote: AtomicBool,
-}
-
-// Safety: see access discipline comment on ResponseWriterInner.
-unsafe impl Send for ResponseWriterInner {}
-unsafe impl Sync for ResponseWriterInner {}
-
-#[derive(Clone)]
-pub struct ResponseWriter {
-    inner: Arc<ResponseWriterInner>,
-}
-
-impl ResponseWriter {
-    pub(crate) fn new(sink: Box<dyn ResponseSink>) -> Self {
-        Self {
-            inner: Arc::new(ResponseWriterInner {
-                sink: UnsafeCell::new(Some(sink)),
-                finished: AtomicBool::new(false),
-                wrote: AtomicBool::new(false),
-            }),
-        }
-    }
-
-    pub fn write_bytes(&self, chunk: impl Into<Bytes>) -> Result<(), NacelleError> {
-        let chunk = chunk.into();
-        if chunk.is_empty() {
-            return Ok(());
-        }
-
-        if self.inner.finished.load(Ordering::Relaxed) {
-            return Err(NacelleError::ConnectionClosed);
-        }
-
-        // Safety: write_bytes is only called from within the handler future, which is
-        // sequential (no concurrent write_bytes calls).  finish() only accesses sink
-        // after the handler future has completed.  These phases never overlap.
-        let sink = unsafe { &mut *self.inner.sink.get() };
-        sink.as_mut()
-            .ok_or(NacelleError::ConnectionClosed)?
-            .write_bytes(chunk)?;
-
-        self.inner.wrote.store(true, Ordering::Relaxed);
-        Ok(())
-    }
-
-    pub fn finish(&self) -> Result<(), NacelleError> {
-        // AcqRel: Acquire sees all preceding write_bytes stores; Release makes the
-        // finished state visible to any other caller of finish (idempotency guard).
-        if self.inner.finished.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
-
-        // Safety: finished swap above guarantees this block runs at most once, and it
-        // only runs after the handler future has completed (no concurrent write_bytes).
-        let sink = unsafe { &mut *self.inner.sink.get() }.take();
-        if let Some(mut s) = sink {
-            s.finish()?;
-        }
-        Ok(())
-    }
-
-    pub fn has_written(&self) -> bool {
-        self.inner.wrote.load(Ordering::Relaxed)
     }
 }
