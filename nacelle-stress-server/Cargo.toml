@@ -15,4 +15,6 @@ nacelle = { path = "../nacelle", features = ["reference_protocol", "otel"], defa
 bytes = "1.10.1"
 mimalloc = { version = "0.1", default-features = false }
 libmimalloc-sys = { version = "0.1", features = ["extended"], default-features = false }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_yaml = "0.9.34"
 tokio = { version = "1.47.1", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync"] }

@@ -1,0 +1,4 @@
+low_memory: true
+
+limits:
+  max_in_flight_requests: 1024
