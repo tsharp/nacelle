@@ -4,7 +4,10 @@ use std::net::SocketAddr;
 use std::os::raw::c_long;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use std::time::Instant;
 
 use bytes::Bytes;
 use nacelle::{
@@ -15,6 +18,139 @@ use serde::Deserialize;
 
 pub const STRESS_OPCODE: u64 = 1;
 const DEFAULT_CONFIG_PATH: &str = "config.yaml";
+
+#[derive(Debug)]
+pub struct StressServerStats {
+    started_at: Instant,
+    accepted_connections: AtomicU64,
+    active_connections: AtomicU64,
+    completed_connections: AtomicU64,
+    failed_connections: AtomicU64,
+    active_requests: AtomicU64,
+    completed_requests: AtomicU64,
+    failed_requests: AtomicU64,
+    request_body_bytes: AtomicU64,
+    response_body_bytes: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StressServerStatsSnapshot {
+    pub uptime: Duration,
+    pub accepted_connections: u64,
+    pub active_connections: u64,
+    pub completed_connections: u64,
+    pub failed_connections: u64,
+    pub active_requests: u64,
+    pub completed_requests: u64,
+    pub failed_requests: u64,
+    pub request_body_bytes: u64,
+    pub response_body_bytes: u64,
+}
+
+impl Default for StressServerStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StressServerStats {
+    pub fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+            accepted_connections: AtomicU64::new(0),
+            active_connections: AtomicU64::new(0),
+            completed_connections: AtomicU64::new(0),
+            failed_connections: AtomicU64::new(0),
+            active_requests: AtomicU64::new(0),
+            completed_requests: AtomicU64::new(0),
+            failed_requests: AtomicU64::new(0),
+            request_body_bytes: AtomicU64::new(0),
+            response_body_bytes: AtomicU64::new(0),
+        }
+    }
+
+    pub fn record_accepted_connection(&self) {
+        self.accepted_connections.fetch_add(1, Ordering::Relaxed);
+        self.active_connections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_finished_connection(&self, failed: bool) {
+        self.completed_connections.fetch_add(1, Ordering::Relaxed);
+        if failed {
+            self.failed_connections.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_inactive_connection(&self) {
+        self.active_connections.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn start_request(self: &Arc<Self>) -> ActiveRequest {
+        self.active_requests.fetch_add(1, Ordering::Relaxed);
+        ActiveRequest {
+            stats: self.clone(),
+            finished: false,
+        }
+    }
+
+    pub fn snapshot(&self) -> StressServerStatsSnapshot {
+        StressServerStatsSnapshot {
+            uptime: self.started_at.elapsed(),
+            accepted_connections: self.accepted_connections.load(Ordering::Relaxed),
+            active_connections: self.active_connections.load(Ordering::Relaxed),
+            completed_connections: self.completed_connections.load(Ordering::Relaxed),
+            failed_connections: self.failed_connections.load(Ordering::Relaxed),
+            active_requests: self.active_requests.load(Ordering::Relaxed),
+            completed_requests: self.completed_requests.load(Ordering::Relaxed),
+            failed_requests: self.failed_requests.load(Ordering::Relaxed),
+            request_body_bytes: self.request_body_bytes.load(Ordering::Relaxed),
+            response_body_bytes: self.response_body_bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    fn record_finished_request(&self, failed: bool, request_bytes: u64, response_bytes: u64) {
+        if failed {
+            self.failed_requests.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.completed_requests.fetch_add(1, Ordering::Relaxed);
+        }
+        self.request_body_bytes
+            .fetch_add(request_bytes, Ordering::Relaxed);
+        self.response_body_bytes
+            .fetch_add(response_bytes, Ordering::Relaxed);
+    }
+
+    fn record_inactive_request(&self) {
+        self.active_requests.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+pub struct ActiveRequest {
+    stats: Arc<StressServerStats>,
+    finished: bool,
+}
+
+impl ActiveRequest {
+    pub fn record_completed(mut self, request_bytes: u64, response_bytes: u64) {
+        self.stats
+            .record_finished_request(false, request_bytes, response_bytes);
+        self.finished = true;
+    }
+
+    pub fn record_failed(mut self, request_bytes: u64) {
+        self.stats.record_finished_request(true, request_bytes, 0);
+        self.finished = true;
+    }
+}
+
+impl Drop for ActiveRequest {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.stats.record_finished_request(true, 0, 0);
+        }
+        self.stats.record_inactive_request();
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -183,6 +319,7 @@ pub fn configure_allocator(low_memory: bool) {
 
 pub fn build_server(
     config: &ServerConfig,
+    stats: Arc<StressServerStats>,
 ) -> Result<RawTcpServer<FrameRequest, LengthDelimitedProtocol, impl Handler>, NacelleError> {
     let response_payload = Bytes::from(vec![0x5A; config.response_bytes]);
     RawTcpServer::<FrameRequest, ()>::builder()
@@ -197,17 +334,33 @@ pub fn build_server(
         .runtime_state(NacelleRuntimeState::new(config.limits.clone()))
         .handler(handler_fn(move |mut request: NacelleRequest| {
             let response_payload = response_payload.clone();
+            let stats = stats.clone();
             async move {
+                let request_stats = stats.start_request();
                 let opcode = request.raw_tcp_opcode().unwrap_or_default();
+                let mut request_body_bytes = 0_u64;
                 while let Some(chunk) = request.body.next_chunk().await {
-                    let _ = chunk?;
+                    let chunk = match chunk {
+                        Ok(chunk) => chunk,
+                        Err(error) => {
+                            request_stats.record_failed(request_body_bytes);
+                            return Err(error);
+                        }
+                    };
+                    request_body_bytes =
+                        request_body_bytes.saturating_add(chunk.len() as u64);
                 }
                 if opcode != STRESS_OPCODE {
+                    request_stats.record_failed(request_body_bytes);
                     return Err(NacelleError::handler(std::io::Error::other(format!(
                         "unknown opcode {}",
                         opcode
                     ))));
                 }
+                request_stats.record_completed(
+                    request_body_bytes,
+                    response_payload.len() as u64,
+                );
                 Ok(NacelleResponse::raw_tcp_bytes(response_payload))
             }
         }))
