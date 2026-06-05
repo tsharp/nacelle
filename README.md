@@ -4,7 +4,8 @@
 
 The current transports are:
 
-- `raw_tcp` (default) — custom length-delimited frames over TCP
+- `raw_tcp` (default) — custom protocol transport over TCP
+- `reference_protocol` — optional length-delimited example protocol
 - `http` — Hyper HTTP/1 server transport
 - `tower` — adapter for `tower::Service<NacelleRequest>`
 
@@ -22,8 +23,8 @@ async fn handle(request: NacelleRequest) -> Result<NacelleResponse, NacelleError
 use std::sync::Arc;
 
 use nacelle::{
-    FrameRequest, LengthDelimitedProtocol, NacelleError, NacelleRequestMeta,
-    NacelleResponse, RawTcpServer, handler_fn,
+    FrameRequest, LengthDelimitedProtocol, NacelleError, NacelleResponse,
+    RawTcpServer, handler_fn,
 };
 
 struct MyService;
@@ -32,9 +33,7 @@ let server = RawTcpServer::<MyService, FrameRequest, ()>::builder()
     .service(MyService)
     .protocol(LengthDelimitedProtocol)
     .handler(handler_fn(|_svc: Arc<MyService>, mut request| async move {
-        let opcode = match &request.meta {
-            NacelleRequestMeta::RawTcp(meta) => meta.opcode,
-        };
+        let opcode = request.raw_tcp_opcode().unwrap_or_default();
         if opcode != 1 {
             while let Some(chunk) = request.body.next_chunk().await {
                 let _ = chunk?;
@@ -56,13 +55,13 @@ server.serve_tcp("127.0.0.1:8080".parse()?).await?;
 cargo build --release
 
 # Raw TCP echo
-cargo run --example echo -- 127.0.0.1:8080
+cargo run --features reference_protocol --example echo -- 127.0.0.1:8080
 
 # HTTP echo
 cargo run --no-default-features --features http --example http_echo -- 127.0.0.1:8080
 
 # Raw TCP and HTTP with one shared handler
-cargo run --features raw_tcp,http --example dual_echo -- 127.0.0.1:8080 127.0.0.1:8081
+cargo run --features reference_protocol,http --example dual_echo -- 127.0.0.1:8080 127.0.0.1:8081
 ```
 
 ## Stress Harness
@@ -77,7 +76,7 @@ cargo run --release --package nacelle-stress-test -- \
   --duration-secs 15
 ```
 
-The raw TCP protocol contract is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+The optional reference protocol contract is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 TLS, authentication, compression, and metrics are not implemented in this prototype.
 

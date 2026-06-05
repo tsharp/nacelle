@@ -209,7 +209,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "reference_protocol"))]
 mod tests {
     use std::sync::Arc;
     use std::time::Duration;
@@ -217,10 +217,10 @@ mod tests {
     use bytes::Bytes;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use crate::frame::{
+    use crate::handler::handler_fn;
+    use crate::reference_protocol::{
         FRAME_FLAG_END, FRAME_FLAG_ERROR, FRAME_FLAG_START, FrameRequest, LengthDelimitedProtocol,
     };
-    use crate::handler::handler_fn;
     use crate::response::{NacelleResponse, RawTcpResponseMeta};
 
     use super::*;

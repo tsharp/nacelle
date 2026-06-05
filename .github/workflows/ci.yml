@@ -17,17 +17,25 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+      - name: Clippy Raw TCP
+        run: cargo clippy -p nacelle --no-default-features --features raw_tcp --all-targets -- -D warnings
+      - name: Clippy Reference Protocol
+        run: cargo clippy -p nacelle --features reference_protocol --all-targets -- -D warnings
       - name: Clippy HTTP
         run: cargo clippy -p nacelle --no-default-features --features http --all-targets -- -D warnings
       - name: Clippy Dual
-        run: cargo clippy -p nacelle --features raw_tcp,http --all-targets -- -D warnings
+        run: cargo clippy -p nacelle --features reference_protocol,http --all-targets -- -D warnings
       - name: Clippy Tower
-        run: cargo clippy -p nacelle --features raw_tcp,http,tower --all-targets -- -D warnings
+        run: cargo clippy -p nacelle --features reference_protocol,http,tower --all-targets -- -D warnings
       - name: Test Raw TCP
         run: cargo test --workspace --all-targets
+      - name: Test Raw TCP Without Reference Protocol
+        run: cargo test -p nacelle --no-default-features --features raw_tcp --all-targets
+      - name: Test Reference Protocol
+        run: cargo test -p nacelle --features reference_protocol --all-targets
       - name: Test HTTP
         run: cargo test -p nacelle --no-default-features --features http --all-targets
       - name: Test Dual
-        run: cargo test -p nacelle --features raw_tcp,http --all-targets
+        run: cargo test -p nacelle --features reference_protocol,http --all-targets
       - name: Test Tower
-        run: cargo test -p nacelle --features raw_tcp,http,tower --all-targets
+        run: cargo test -p nacelle --features reference_protocol,http,tower --all-targets

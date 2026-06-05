@@ -6,6 +6,7 @@ edition = "2024"
 [features]
 default = ["raw_tcp"]
 raw_tcp = []
+reference_protocol = ["raw_tcp"]
 http = ["dep:http", "dep:http-body-util", "dep:hyper", "dep:hyper-util"]
 tower = ["dep:tower"]
 bench = []
@@ -28,12 +29,12 @@ criterion = "0.5.1"
 [[bench]]
 name = "critical_paths"
 harness = false
-required-features = ["bench", "raw_tcp"]
+required-features = ["bench", "reference_protocol"]
 
 [[example]]
 name = "echo"
 path = "examples/echo.rs"
-required-features = ["raw_tcp"]
+required-features = ["reference_protocol"]
 
 [[example]]
 name = "http_echo"
@@ -43,4 +44,4 @@ required-features = ["http"]
 [[example]]
 name = "dual_echo"
 path = "examples/dual_echo.rs"
-required-features = ["raw_tcp", "http"]
+required-features = ["reference_protocol", "http"]
