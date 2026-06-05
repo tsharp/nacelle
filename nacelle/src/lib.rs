@@ -21,7 +21,7 @@ pub mod util;
 
 pub use config::{NacelleConfig, RequestBodyMode};
 #[cfg(feature = "raw_tcp")]
-pub use connection::serve_connection;
+pub use connection::{serve_connection, serve_stream};
 pub use error::{BoxError, NacelleError};
 pub use handler::{Handler, HandlerFn, handler_fn};
 #[cfg(feature = "http")]

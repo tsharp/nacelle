@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::config::NacelleConfig;
-use crate::connection::serve_connection;
+use crate::connection::{serve_connection, serve_stream};
 use crate::error::NacelleError;
 use crate::handler::Handler;
 use crate::protocol::Protocol;
@@ -84,10 +84,8 @@ where
     where
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let (reader, writer) = tokio::io::split(io);
-        serve_connection(
-            reader,
-            writer,
+        serve_stream(
+            io,
             self.protocol.clone(),
             self.handler.clone(),
             self.config.clone(),

@@ -78,6 +78,71 @@ where
     result
 }
 
+/// Drive one raw TCP framed connection using a single unsplit I/O object.
+pub async fn serve_stream<Req, P, H, IO>(
+    mut io: IO,
+    protocol: Arc<P>,
+    handler: H,
+    config: NacelleConfig,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
+    let mut write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
+
+    let result: Result<(), NacelleError> = async {
+        'conn: loop {
+            if !write_buf.is_empty() {
+                io.write_all(&write_buf).await?;
+                write_buf.clear();
+                if write_buf.capacity() > config.response_buffer_capacity {
+                    write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
+                }
+            }
+
+            if read_buf.is_empty() && read_buf.capacity() > config.read_buffer_capacity {
+                read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
+            }
+
+            let bytes_read = io.read_buf(&mut read_buf).await?;
+            if bytes_read == 0 {
+                if read_buf.is_empty() {
+                    break 'conn;
+                }
+                return Err(NacelleError::UnexpectedEof);
+            }
+
+            while let Some(decoded) = protocol.decode_head(&mut read_buf, config.max_frame_len)? {
+                let error_context = protocol.error_context(&decoded.request);
+                run_request(
+                    &mut io,
+                    &mut read_buf,
+                    &mut write_buf,
+                    protocol.as_ref(),
+                    &handler,
+                    decoded,
+                    error_context,
+                    &config,
+                )
+                .await?;
+            }
+        }
+
+        Ok(())
+    }
+    .await;
+
+    if !write_buf.is_empty() {
+        let _ = io.write_all(&write_buf).await;
+    }
+
+    result
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_request<Req, P, H, R>(
     reader: &mut R,
