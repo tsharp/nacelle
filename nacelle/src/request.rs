@@ -6,6 +6,7 @@ use futures_core::Stream;
 use tokio::sync::mpsc;
 
 use crate::error::NacelleError;
+use crate::limits::MemoryReservation;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawTcpRequestMeta {
@@ -85,6 +86,7 @@ enum NacelleBodySource {
 pub struct NacelleBody {
     source: NacelleBodySource,
     remaining_bytes: usize,
+    _memory_reservation: Option<MemoryReservation>,
 }
 
 impl NacelleBody {
@@ -95,6 +97,7 @@ impl NacelleBody {
         Self {
             source: NacelleBodySource::Streaming { receiver },
             remaining_bytes,
+            _memory_reservation: None,
         }
     }
 
@@ -105,6 +108,7 @@ impl NacelleBody {
                 next_index: 0,
             },
             remaining_bytes: 0,
+            _memory_reservation: None,
         }
     }
 
@@ -117,6 +121,7 @@ impl NacelleBody {
         Self {
             source: NacelleBodySource::SingleChunk(Some(chunk)),
             remaining_bytes,
+            _memory_reservation: None,
         }
     }
 
@@ -130,6 +135,7 @@ impl NacelleBody {
         Self {
             source: NacelleBodySource::SingleChunk(Some(chunk)),
             remaining_bytes,
+            _memory_reservation: None,
         }
     }
 
@@ -141,7 +147,14 @@ impl NacelleBody {
                 next_index: 0,
             },
             remaining_bytes,
+            _memory_reservation: None,
         }
+    }
+
+    #[cfg(feature = "raw_tcp")]
+    pub(crate) fn with_memory_reservation(mut self, reservation: MemoryReservation) -> Self {
+        self._memory_reservation = Some(reservation);
+        self
     }
 
     #[cfg(feature = "raw_tcp")]
@@ -158,12 +171,14 @@ impl NacelleBody {
                     Err(Self {
                         source: NacelleBodySource::Buffered { chunks, next_index },
                         remaining_bytes: self.remaining_bytes,
+                        _memory_reservation: self._memory_reservation,
                     })
                 }
             }
             NacelleBodySource::Streaming { receiver } => Err(Self {
                 source: NacelleBodySource::Streaming { receiver },
                 remaining_bytes: self.remaining_bytes,
+                _memory_reservation: self._memory_reservation,
             }),
         }
     }

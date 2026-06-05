@@ -7,6 +7,7 @@ use crate::config::NacelleConfig;
 use crate::connection::{serve_connection, serve_stream};
 use crate::error::NacelleError;
 use crate::handler::Handler;
+use crate::limits::NacelleRuntimeState;
 use crate::protocol::Protocol;
 use crate::request::RequestMetadata;
 use crate::telemetry::NacelleTelemetry;
@@ -20,6 +21,7 @@ pub struct NacelleServer<Req, P, H = ()> {
     handler: H,
     config: NacelleConfig,
     telemetry: NacelleTelemetry,
+    runtime_state: NacelleRuntimeState,
     _request: PhantomData<fn() -> Req>,
 }
 
@@ -35,6 +37,7 @@ where
             handler: self.handler.clone(),
             config: self.config.clone(),
             telemetry: self.telemetry.clone(),
+            runtime_state: self.runtime_state.clone(),
             _request: PhantomData,
         }
     }
@@ -47,6 +50,7 @@ impl<Req> NacelleServer<Req, (), ()> {
             handler: None,
             config: NacelleConfig::default(),
             telemetry: NacelleTelemetry::default(),
+            runtime_state: NacelleRuntimeState::default(),
             _protocol: PhantomData,
             _handler: PhantomData,
             _request: PhantomData,
@@ -68,6 +72,11 @@ where
         self.protocol.as_ref()
     }
 
+    pub fn with_runtime_state(mut self, runtime_state: NacelleRuntimeState) -> Self {
+        self.runtime_state = runtime_state;
+        self
+    }
+
     pub async fn serve_halves<R, W>(&self, reader: R, writer: W) -> Result<(), NacelleError>
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -80,6 +89,7 @@ where
             self.handler.clone(),
             self.config.clone(),
             self.telemetry.clone(),
+            self.runtime_state.clone(),
         )
         .await
     }
@@ -95,6 +105,7 @@ where
             self.handler.clone(),
             self.config.clone(),
             self.telemetry.clone(),
+            self.runtime_state.clone(),
         )
         .await
     }
@@ -110,6 +121,7 @@ pub struct NacelleServerBuilder<Req, ProtocolState, HandlerState, P, H> {
     handler: Option<H>,
     config: NacelleConfig,
     telemetry: NacelleTelemetry,
+    runtime_state: NacelleRuntimeState,
     _protocol: PhantomData<ProtocolState>,
     _handler: PhantomData<HandlerState>,
     _request: PhantomData<fn() -> Req>,
@@ -127,6 +139,11 @@ impl<Req, ProtocolState, HandlerState, P, H>
         self.telemetry = telemetry;
         self
     }
+
+    pub fn runtime_state(mut self, runtime_state: NacelleRuntimeState) -> Self {
+        self.runtime_state = runtime_state;
+        self
+    }
 }
 
 impl<Req, HandlerState, P, H> NacelleServerBuilder<Req, Missing, HandlerState, P, H> {
@@ -139,6 +156,7 @@ impl<Req, HandlerState, P, H> NacelleServerBuilder<Req, Missing, HandlerState, P
             handler: self.handler,
             config: self.config,
             telemetry: self.telemetry,
+            runtime_state: self.runtime_state,
             _protocol: PhantomData,
             _handler: PhantomData,
             _request: PhantomData,
@@ -156,6 +174,7 @@ impl<Req, ProtocolState, P, H> NacelleServerBuilder<Req, ProtocolState, Missing,
             handler: Some(handler),
             config: self.config,
             telemetry: self.telemetry,
+            runtime_state: self.runtime_state,
             _protocol: PhantomData,
             _handler: PhantomData,
             _request: PhantomData,
@@ -178,6 +197,7 @@ where
             handler,
             config: self.config,
             telemetry: self.telemetry,
+            runtime_state: self.runtime_state,
             _request: PhantomData,
         })
     }
@@ -192,6 +212,7 @@ mod tests {
 
     use crate::RequestBodyMode;
     use crate::handler::handler_fn;
+    use crate::limits::{NacelleLimits, NacelleRuntimeState};
     use crate::reference_protocol::{
         FRAME_FLAG_END, FRAME_FLAG_ERROR, FRAME_FLAG_START, FrameRequest, LengthDelimitedProtocol,
     };
@@ -519,6 +540,108 @@ mod tests {
             String::from_utf8(body)
                 .expect("error body should be utf8")
                 .contains("handler boom")
+        );
+        server_task
+            .await
+            .expect("server task should join")
+            .expect("server should complete");
+    }
+
+    #[tokio::test]
+    async fn oversized_request_body_limit_writes_error_frame_and_closes() {
+        let protocol = LengthDelimitedProtocol;
+        let server = NacelleServer::<FrameRequest, ()>::builder()
+            .protocol(protocol.clone())
+            .runtime_state(NacelleRuntimeState::new(
+                NacelleLimits::default().with_max_request_body_bytes(0),
+            ))
+            .handler(handler_fn(|request: NacelleRequest| async move {
+                Ok(NacelleResponse::raw_tcp(request.body))
+            }))
+            .build()
+            .expect("server should build");
+
+        let (mut client, server_io) = tokio::io::duplex(256);
+        let server_task = tokio::spawn(async move { server.serve_io(server_io).await });
+        client
+            .write_all(
+                &protocol
+                    .encode_request_frame(42, 1, 0, b"x")
+                    .expect("frame should encode"),
+            )
+            .await
+            .expect("request should write");
+        client
+            .shutdown()
+            .await
+            .expect("client shutdown should succeed");
+
+        let (request_id, opcode, flags, body) = read_frame(&mut client)
+            .await
+            .expect("error response should decode");
+        assert_eq!((request_id, opcode), (42, 1));
+        assert_eq!(
+            flags & (FRAME_FLAG_START | FRAME_FLAG_END | FRAME_FLAG_ERROR),
+            FRAME_FLAG_START | FRAME_FLAG_END | FRAME_FLAG_ERROR
+        );
+        assert!(
+            String::from_utf8(body)
+                .expect("error body should be utf8")
+                .contains("request_body_bytes")
+        );
+
+        let error = server_task
+            .await
+            .expect("server task should join")
+            .expect_err("server should close after request body limit");
+        assert!(matches!(
+            error,
+            NacelleError::ResourceLimit("request_body_bytes")
+        ));
+    }
+
+    #[tokio::test]
+    async fn handler_timeout_becomes_error_frame() {
+        let protocol = LengthDelimitedProtocol;
+        let server = NacelleServer::<FrameRequest, ()>::builder()
+            .protocol(protocol.clone())
+            .runtime_state(NacelleRuntimeState::new(
+                NacelleLimits::default().with_handler_timeout(Duration::from_millis(1)),
+            ))
+            .handler(handler_fn(|_request: NacelleRequest| async move {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                Ok(NacelleResponse::empty_raw_tcp())
+            }))
+            .build()
+            .expect("server should build");
+
+        let (mut client, server_io) = tokio::io::duplex(256);
+        let server_task = tokio::spawn(async move { server.serve_io(server_io).await });
+        client
+            .write_all(
+                &protocol
+                    .encode_request_frame(42, 1, 0, b"")
+                    .expect("frame should encode"),
+            )
+            .await
+            .expect("request should write");
+        client
+            .shutdown()
+            .await
+            .expect("client shutdown should succeed");
+
+        let (request_id, opcode, flags, body) = read_frame(&mut client)
+            .await
+            .expect("error response should decode");
+        assert_eq!((request_id, opcode), (42, 1));
+        assert_eq!(
+            flags & (FRAME_FLAG_START | FRAME_FLAG_END | FRAME_FLAG_ERROR),
+            FRAME_FLAG_START | FRAME_FLAG_END | FRAME_FLAG_ERROR
+        );
+        assert!(
+            String::from_utf8(body)
+                .expect("error body should be utf8")
+                .contains("handler")
         );
         server_task
             .await

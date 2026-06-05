@@ -15,6 +15,7 @@ use hyper_util::rt::TokioIo;
 
 use crate::error::{BoxError, NacelleError};
 use crate::handler::Handler;
+use crate::limits::NacelleRuntimeState;
 use crate::request::{HttpRequestMeta, NacelleBody, NacelleRequest, NacelleRequestMeta};
 use crate::response::{NacelleResponse, NacelleResponseMeta};
 use crate::telemetry::{NacelleTelemetry, NacelleTransport};
@@ -24,6 +25,7 @@ type HttpBody = BoxBody<Bytes, BoxError>;
 pub struct HyperServer<H = ()> {
     handler: H,
     telemetry: NacelleTelemetry,
+    runtime_state: NacelleRuntimeState,
 }
 
 impl<H> Clone for HyperServer<H>
@@ -34,6 +36,7 @@ where
         Self {
             handler: self.handler.clone(),
             telemetry: self.telemetry.clone(),
+            runtime_state: self.runtime_state.clone(),
         }
     }
 }
@@ -46,11 +49,17 @@ where
         Self {
             handler,
             telemetry: NacelleTelemetry::default(),
+            runtime_state: NacelleRuntimeState::default(),
         }
     }
 
     pub fn with_telemetry(mut self, telemetry: NacelleTelemetry) -> Self {
         self.telemetry = telemetry;
+        self
+    }
+
+    pub fn with_runtime_state(mut self, runtime_state: NacelleRuntimeState) -> Self {
+        self.runtime_state = runtime_state;
         self
     }
 
@@ -68,8 +77,21 @@ where
             let (stream, _) = listener.accept().await?;
             let io = TokioIo::new(stream);
             let server = server.clone();
+            let connection_permit = match server.runtime_state.acquire_connection() {
+                Ok(permit) => permit,
+                Err(error) => {
+                    server.telemetry.request_failed(
+                        NacelleTransport::Http,
+                        None,
+                        std::time::Duration::ZERO,
+                        &error,
+                    );
+                    continue;
+                }
+            };
             server.telemetry.connection_opened(NacelleTransport::Http);
             tokio::spawn(async move {
+                let _connection_permit = connection_permit;
                 let service = service_fn(move |request| {
                     let server = server.clone();
                     async move { server.handle(request).await }
@@ -81,6 +103,21 @@ where
 
     async fn handle(&self, request: Request<Incoming>) -> Result<Response<HttpBody>, NacelleError> {
         let request_started = std::time::Instant::now();
+        let _request_permit = match self.runtime_state.acquire_request() {
+            Ok(permit) => permit,
+            Err(error) => {
+                self.telemetry.request_failed(
+                    NacelleTransport::Http,
+                    None,
+                    request_started.elapsed(),
+                    &error,
+                );
+                return response_to_http(
+                    NacelleResponse::http_bytes(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
+                    self.runtime_state.clone(),
+                );
+            }
+        };
         let (parts, body) = request.into_parts();
         let request = NacelleRequest {
             meta: NacelleRequestMeta::Http(HttpRequestMeta {
@@ -88,12 +125,21 @@ where
                 uri: parts.uri,
                 headers: parts.headers,
             }),
-            body: incoming_to_body(body),
+            body: incoming_to_body(body, self.runtime_state.clone()),
         };
 
-        match self.handler.call(request).await {
+        let handler_future = self.handler.call(request);
+        let handler_result = if let Some(timeout) = self.runtime_state.limits().handler_timeout {
+            tokio::time::timeout(timeout, handler_future)
+                .await
+                .map_err(|_| NacelleError::Timeout("handler"))?
+        } else {
+            handler_future.await
+        };
+
+        match handler_result {
             Ok(response) => {
-                let response = response_to_http(response);
+                let response = response_to_http(response, self.runtime_state.clone());
                 self.telemetry.request_completed(
                     NacelleTransport::Http,
                     None,
@@ -110,10 +156,13 @@ where
                     request_started.elapsed(),
                     &error,
                 );
-                let response = response_to_http(NacelleResponse::http_bytes(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    error.to_string(),
-                ));
+                let response = response_to_http(
+                    NacelleResponse::http_bytes(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        error.to_string(),
+                    ),
+                    self.runtime_state.clone(),
+                );
                 self.telemetry.request_completed(
                     NacelleTransport::Http,
                     None,
@@ -127,16 +176,37 @@ where
     }
 }
 
-fn incoming_to_body(mut incoming: Incoming) -> NacelleBody {
+fn incoming_to_body(mut incoming: Incoming, runtime_state: NacelleRuntimeState) -> NacelleBody {
     let (tx, body) = NacelleBody::channel(8);
     tokio::spawn(async move {
+        let _streaming_permit = match runtime_state.acquire_streaming_task() {
+            Ok(permit) => permit,
+            Err(error) => {
+                let _ = tx.send(Err(error)).await;
+                return;
+            }
+        };
+        let mut body_bytes = 0_usize;
         while let Some(frame) = incoming.frame().await {
             match frame {
                 Ok(frame) => {
-                    if let Some(data) = frame.data_ref()
-                        && tx.send(Ok(data.clone())).await.is_err()
-                    {
-                        break;
+                    if let Some(data) = frame.data_ref() {
+                        let Some(next) = body_bytes.checked_add(data.len()) else {
+                            let _ = tx
+                                .send(Err(NacelleError::ResourceLimit("request_body_bytes")))
+                                .await;
+                            break;
+                        };
+                        if next > runtime_state.limits().max_request_body_bytes {
+                            let _ = tx
+                                .send(Err(NacelleError::ResourceLimit("request_body_bytes")))
+                                .await;
+                            break;
+                        }
+                        body_bytes = next;
+                        if tx.send(Ok(data.clone())).await.is_err() {
+                            break;
+                        }
                     }
                 }
                 Err(error) => {
@@ -149,7 +219,10 @@ fn incoming_to_body(mut incoming: Incoming) -> NacelleBody {
     body
 }
 
-fn response_to_http(response: NacelleResponse) -> Result<Response<HttpBody>, NacelleError> {
+fn response_to_http(
+    response: NacelleResponse,
+    runtime_state: NacelleRuntimeState,
+) -> Result<Response<HttpBody>, NacelleError> {
     let (status, headers) = match response.meta {
         NacelleResponseMeta::Http(meta) => (meta.status, meta.headers),
         NacelleResponseMeta::RawTcp(_) => (StatusCode::OK, http::HeaderMap::new()),
@@ -161,18 +234,24 @@ fn response_to_http(response: NacelleResponse) -> Result<Response<HttpBody>, Nac
     };
     *builder_headers = headers;
     builder
-        .body(nacelle_body_to_http(response.body))
+        .body(nacelle_body_to_http(response.body, runtime_state))
         .map_err(NacelleError::protocol)
 }
 
-fn nacelle_body_to_http(body: NacelleBody) -> HttpBody {
-    StreamBody::new(HttpBodyStream { body })
-        .map_err(|error| -> BoxError { Box::new(error) })
-        .boxed()
+fn nacelle_body_to_http(body: NacelleBody, runtime_state: NacelleRuntimeState) -> HttpBody {
+    StreamBody::new(HttpBodyStream {
+        body,
+        runtime_state,
+        response_body_bytes: 0,
+    })
+    .map_err(|error| -> BoxError { Box::new(error) })
+    .boxed()
 }
 
 struct HttpBodyStream {
     body: NacelleBody,
+    runtime_state: NacelleRuntimeState,
+    response_body_bytes: usize,
 }
 
 impl Stream for HttpBodyStream {
@@ -181,7 +260,20 @@ impl Stream for HttpBodyStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         match Pin::new(&mut this.body).poll_next(cx) {
-            Poll::Ready(Some(Ok(chunk))) => Poll::Ready(Some(Ok(Frame::data(chunk)))),
+            Poll::Ready(Some(Ok(chunk))) => {
+                let Some(next) = this.response_body_bytes.checked_add(chunk.len()) else {
+                    return Poll::Ready(Some(Err(NacelleError::ResourceLimit(
+                        "response_body_bytes",
+                    ))));
+                };
+                if next > this.runtime_state.limits().max_response_body_bytes {
+                    return Poll::Ready(Some(Err(NacelleError::ResourceLimit(
+                        "response_body_bytes",
+                    ))));
+                }
+                this.response_body_bytes = next;
+                Poll::Ready(Some(Ok(Frame::data(chunk))))
+            }
             Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,

@@ -1,12 +1,17 @@
+#[cfg(any(feature = "raw_tcp", feature = "http"))]
 use std::net::SocketAddr;
 
 use tokio::task::JoinSet;
 
 use crate::error::NacelleError;
-use crate::telemetry::{NacelleTelemetry, NacelleTransport};
+use crate::limits::{NacelleLimits, NacelleRuntimeState};
+use crate::telemetry::NacelleTelemetry;
+#[cfg(any(feature = "raw_tcp", feature = "http"))]
+use crate::telemetry::NacelleTransport;
 
 pub struct NacelleHost {
     telemetry: NacelleTelemetry,
+    runtime_state: NacelleRuntimeState,
     tasks: JoinSet<Result<(), NacelleError>>,
 }
 
@@ -20,12 +25,23 @@ impl NacelleHost {
     pub fn new() -> Self {
         Self {
             telemetry: NacelleTelemetry::default(),
+            runtime_state: NacelleRuntimeState::default(),
             tasks: JoinSet::new(),
         }
     }
 
     pub fn with_telemetry(mut self, telemetry: NacelleTelemetry) -> Self {
         self.telemetry = telemetry;
+        self
+    }
+
+    pub fn with_limits(mut self, limits: NacelleLimits) -> Self {
+        self.runtime_state = NacelleRuntimeState::new(limits);
+        self
+    }
+
+    pub fn with_runtime_state(mut self, runtime_state: NacelleRuntimeState) -> Self {
+        self.runtime_state = runtime_state;
         self
     }
 
@@ -43,6 +59,7 @@ impl NacelleHost {
     {
         let name = name.into();
         let telemetry = self.telemetry.clone();
+        let server = server.with_runtime_state(self.runtime_state.clone());
         telemetry.listener_configured(NacelleTransport::RawTcp, &name, &addr.to_string());
         self.tasks.spawn(async move {
             let result = server.serve_tcp(addr).await;
@@ -71,6 +88,7 @@ impl NacelleHost {
     {
         let name = name.into();
         let telemetry = self.telemetry.clone();
+        let server = server.with_runtime_state(self.runtime_state.clone());
         telemetry.listener_configured(NacelleTransport::Http, &name, &addr.to_string());
         self.tasks.spawn(async move {
             let result = server.serve(addr).await;

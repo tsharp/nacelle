@@ -95,6 +95,38 @@ host.wait().await?;
 
 Custom protocols use the same `RawTcpServer::<YourRequest, ()>::builder().protocol(your_protocol)` path, so multiple raw TCP protocols can listen on different ports.
 
+## Production Limits
+
+Use one shared `NacelleRuntimeState` or `NacelleHost::with_limits(...)` to enforce global budgets across all listeners:
+
+```rust
+use std::time::Duration;
+
+let limits = NacelleLimits::default()
+    .with_max_connections(128_000)
+    .with_max_in_flight_requests(64_000)
+    .with_max_streaming_tasks(8_192)
+    .with_max_memory_bytes(8 * 1024 * 1024 * 1024)
+    .with_max_request_body_bytes(16 * 1024 * 1024)
+    .with_max_response_body_bytes(16 * 1024 * 1024)
+    .with_read_timeout(Duration::from_secs(30))
+    .with_write_timeout(Duration::from_secs(30))
+    .with_handler_timeout(Duration::from_secs(60))
+    .with_idle_timeout(Duration::from_secs(120));
+
+let mut host = NacelleHost::new()
+    .with_telemetry(telemetry)
+    .with_limits(limits);
+```
+
+For very high connection counts, size buffers deliberately. The default raw TCP read and response buffers are `64 KiB` each, which is appropriate for throughput tests but too large for `128k` idle connections. Tune `NacelleConfig::with_read_buffer_capacity(...)` and `with_response_buffer_capacity(...)` per SKU so:
+
+```text
+max_connections * (read_buffer_capacity + response_buffer_capacity)
+```
+
+fits inside the process/container memory budget with room left for handlers, backend pools, and response bodies.
+
 ## Observability
 
 Nacelle emits structured `tracing` events for listener, connection, request completion, and request failure events. Enable the `otel` feature to also record OpenTelemetry metrics:
