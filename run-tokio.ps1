@@ -70,9 +70,7 @@ Invoke-Cargo -Args (@(
     "build"
 ) + $cargoProfileArg + @(
     "--package", "nacelle-stress-server",
-    "--bin", "tokio-server",
-    "--no-default-features",
-    "--features", "tokio-runtime"
+    "--bin", "tokio-server"
 ))
 
 $serverExe = Join-Path $PSScriptRoot "target\$profile\tokio-server.exe"

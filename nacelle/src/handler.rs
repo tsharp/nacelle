@@ -28,7 +28,9 @@ pub trait Handler<Svc, Req>: Send + Sync + 'static {
 /// requires only **one** vtable dispatch (into the closure) rather than the two that would be
 /// needed with a separate wrapper struct (wrapper vtable → inner closure call).
 pub struct BoxedHandler<Svc, Req>(
-    Arc<dyn Fn(Arc<Svc>, Req, RequestBody, ResponseWriter) -> HandlerFuture + Send + Sync + 'static>,
+    Arc<
+        dyn Fn(Arc<Svc>, Req, RequestBody, ResponseWriter) -> HandlerFuture + Send + Sync + 'static,
+    >,
 );
 
 impl<Svc, Req> BoxedHandler<Svc, Req> {

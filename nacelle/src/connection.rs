@@ -3,15 +3,13 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
-
-use crate::runtime::{MaybeSend, NacelleRead, NacelleWrite};
 
 use crate::config::NacelleConfig;
 use crate::error::NacelleError;
 use crate::handler::BoxedHandler;
 use crate::protocol::{DecodedRequest, Protocol};
-use crate::registry::HandlerRegistry;
 use crate::request::{RequestBody, RequestMetadata, ResponseSink, ResponseWriter};
 
 // One pooled encode buffer per OS thread. Tokio may move tasks between worker
@@ -105,9 +103,15 @@ where
         if !self.encode_buffer.is_empty() {
             let wb = unsafe { &mut *self.write_buf };
             wb.extend_from_slice(&self.encode_buffer);
-            return_encode_buf(std::mem::take(&mut self.encode_buffer), self.max_pool_encode_buf);
+            return_encode_buf(
+                std::mem::take(&mut self.encode_buffer),
+                self.max_pool_encode_buf,
+            );
         } else {
-            return_encode_buf(std::mem::take(&mut self.encode_buffer), self.max_pool_encode_buf);
+            return_encode_buf(
+                std::mem::take(&mut self.encode_buffer),
+                self.max_pool_encode_buf,
+            );
         }
         Ok(())
     }
@@ -123,23 +127,21 @@ unsafe impl<Req: RequestMetadata, P: Protocol<Req> + Send + Sync + 'static> Send
 {
 }
 
-/// Per-connection writer task. Receives encoded response frames from concurrent
-/// request handlers and writes them to the TCP stream, coalescing multiple frames
-/// into one syscall when they arrive close together.
+/// Drive one framed connection and coalesce completed responses into writes.
 pub async fn serve_connection<Svc, Req, P, R, W>(
     mut reader: R,
     mut writer: W,
     service: Arc<Svc>,
     protocol: Arc<P>,
-    registry: Arc<HandlerRegistry<Svc, Req>>,
+    handler: BoxedHandler<Svc, Req>,
     config: NacelleConfig,
 ) -> Result<(), NacelleError>
 where
     Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
-    R: NacelleRead + MaybeSend + 'static,
-    W: NacelleWrite + MaybeSend + 'static,
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
 {
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     // Per-connection accumulation buffer: responses are appended here synchronously
@@ -187,36 +189,14 @@ where
             // connections: all pipelined requests are processed back-to-back and their
             // responses accumulate in write_buf, then flushed together above.
             while let Some(decoded) = protocol.decode_head(&mut read_buf, config.max_frame_len)? {
-                let opcode = decoded.request.opcode();
                 let error_context = protocol.error_context(&decoded.request);
-                let Some(handler) = registry.resolve(opcode) else {
-                    if can_buffer_request_body(decoded.body_len, &config) {
-                        ensure_body_buffered(&mut reader, &mut read_buf, decoded.body_len).await?;
-                        drop(buffered_request_body(
-                            &mut read_buf,
-                            decoded.body_len,
-                            config.request_body_chunk_size,
-                        ));
-                    } else {
-                        discard_body(&mut reader, &mut read_buf, decoded.body_len, &config).await?;
-                    }
-                    write_error::<Req, P>(
-                        &mut write_buf,
-                        protocol.clone(),
-                        Some(error_context),
-                        NacelleError::UnknownOpcode(opcode),
-                        config.response_buffer_capacity,
-                    )?;
-                    continue;
-                };
-
                 run_request(
                     &mut reader,
                     &mut read_buf,
                     &mut write_buf,
                     service.clone(),
                     protocol.clone(),
-                    handler,
+                    &handler,
                     decoded,
                     error_context,
                     &config,
@@ -259,7 +239,7 @@ where
     Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
-    R: NacelleRead + MaybeSend,
+    R: AsyncRead + Unpin + Send,
 {
     let request = decoded.request;
     let outcome = if decoded.body_len <= read_buf.len() {
@@ -344,23 +324,6 @@ where
     }
 }
 
-async fn ensure_body_buffered<R>(
-    reader: &mut R,
-    read_buf: &mut BytesMut,
-    body_len: usize,
-) -> Result<(), NacelleError>
-where
-    R: NacelleRead,
-{
-    while read_buf.len() < body_len {
-        let bytes_read = reader.read_buf(read_buf).await?;
-        if bytes_read == 0 {
-            return Err(NacelleError::UnexpectedEof);
-        }
-    }
-    Ok(())
-}
-
 async fn pump_request_body<R>(
     reader: &mut R,
     read_buf: &mut BytesMut,
@@ -369,7 +332,7 @@ async fn pump_request_body<R>(
     config: &NacelleConfig,
 ) -> Result<(), NacelleError>
 where
-    R: NacelleRead,
+    R: AsyncRead + Unpin,
 {
     let mut remaining = body_len;
     let mut receiver_open = true;
@@ -405,19 +368,6 @@ where
     Ok(())
 }
 
-async fn discard_body<R>(
-    reader: &mut R,
-    read_buf: &mut BytesMut,
-    body_len: usize,
-    config: &NacelleConfig,
-) -> Result<(), NacelleError>
-where
-    R: NacelleRead,
-{
-    let (tx, _rx) = mpsc::channel(1);
-    pump_request_body(reader, read_buf, body_len, &tx, config).await
-}
-
 fn buffered_request_body(
     read_buf: &mut BytesMut,
     body_len: usize,
@@ -442,10 +392,6 @@ fn buffered_request_body(
     }
 
     RequestBody::from_buffered(chunks, body_len)
-}
-
-fn can_buffer_request_body(body_len: usize, config: &NacelleConfig) -> bool {
-    body_len <= config.max_buffered_request_body_per_request
 }
 
 fn make_response_writer<Req, P>(

@@ -1,6 +1,6 @@
 # Nacelle
 
-**Nacelle is an experimental high-performance Rust runtime for building custom binary protocol servers with framed streaming request processing, opcode-based handler dispatch, and minimal head decode.**
+**Nacelle is an experimental Tokio-based Rust library for building custom binary protocol servers with framed streaming request processing, opcode-based handler dispatch, and minimal head decode.**
 
 ## Example
 
@@ -24,15 +24,19 @@ let server = NacelleServer::<MyService, FrameRequest, _>::builder()
         response_data: Bytes::from_static(b"Hello"),
     })
     .protocol(LengthDelimitedProtocol)
-    .register_handler(
-        1, // opcode
+    .handler(
         handler_fn(|svc: Arc<MyService>, 
-                    _req: FrameRequest,
+                    req: FrameRequest,
                     mut body: RequestBody,
                     response: ResponseWriter| async move {
             // Consume request body
             while let Some(chunk) = body.next_chunk().await {
                 let _ = chunk?;
+            }
+            if req.opcode != 1 {
+                return Err(NacelleError::handler(std::io::Error::other(
+                    format!("unknown opcode {}", req.opcode),
+                )));
             }
             // Write response
             response.write_bytes(svc.response_data.clone())?;
@@ -48,12 +52,12 @@ server.serve_tcp("127.0.0.1:8080".parse()?).await?;
 ## Features
 
 - `tcp` (default) — TCP listener and transport
-- `runtime` (default) — Tokio runtime integration  
-- `metrics` — Metrics collection hooks
-- `tracing` — Distributed tracing support
-- `tls` — TLS via rustls
-- `auth` — Authentication primitives
-- `compression` — Compression support
+- Tokio-only runtime support
+- Length-delimited binary frame protocol
+- Single application handler with request metadata
+- Streaming request bodies and framed responses
+
+TLS, authentication, compression, metrics, and Tower integration are not implemented in this prototype.
 
 ## Building
 
@@ -61,10 +65,20 @@ server.serve_tcp("127.0.0.1:8080".parse()?).await?;
 cargo build --release
 
 # Run stress benchmark
-cargo run --release --bin stress -- \
+cargo run --release --package nacelle-stress-server --bin tokio-server
+
+# In another shell:
+cargo run --release --package nacelle-stress-test -- \
   --connections 32 \
   --pipeline 16 \
   --duration-secs 15
+```
+
+The protocol contract is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+A runnable echo server is available with:
+
+```bash
+cargo run --example echo -- 127.0.0.1:8080
 ```
 
 ## Performance

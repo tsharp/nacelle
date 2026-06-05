@@ -1,49 +1,6 @@
-use std::sync::Arc;
-
 use bytes::{Bytes, BytesMut};
-use cascade::{
-    FrameRequest, HandlerRegistry, LengthDelimitedProtocol, Protocol, RequestBody, ResponseWriter,
-    handler_fn,
-};
 use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-
-fn registry_dispatch_benches(c: &mut Criterion) {
-    let mut group = c.benchmark_group("registry_dispatch");
-    let handler = handler_fn(
-        |_svc: Arc<()>, _req: FrameRequest, _body: RequestBody, _response: ResponseWriter| async move {
-            Ok(())
-        },
-    );
-
-    let dense = HandlerRegistry::build(
-        (0_u64..512)
-            .map(|opcode| (opcode, handler.clone()))
-            .collect(),
-        None,
-    )
-    .expect("dense registry should build");
-    let sparse = HandlerRegistry::build(
-        (0_u64..512)
-            .map(|index| (index * 1024, handler.clone()))
-            .collect(),
-        None,
-    )
-    .expect("sparse registry should build");
-
-    group.bench_function("dense_hit", |b| {
-        b.iter(|| black_box(dense.get(black_box(255))).is_some())
-    });
-    group.bench_function("dense_miss", |b| {
-        b.iter(|| black_box(dense.get(black_box(4096))).is_none())
-    });
-    group.bench_function("sparse_hit", |b| {
-        b.iter(|| black_box(sparse.get(black_box(255 * 1024))).is_some())
-    });
-    group.bench_function("sparse_miss", |b| {
-        b.iter(|| black_box(sparse.get(black_box(255 * 1024 + 1))).is_none())
-    });
-    group.finish();
-}
+use nacelle::{FrameRequest, LengthDelimitedProtocol, Protocol};
 
 fn protocol_frame_benches(c: &mut Criterion) {
     let protocol = LengthDelimitedProtocol;
@@ -130,9 +87,5 @@ fn protocol_frame_benches(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    critical_paths,
-    registry_dispatch_benches,
-    protocol_frame_benches
-);
+criterion_group!(critical_paths, protocol_frame_benches);
 criterion_main!(critical_paths);

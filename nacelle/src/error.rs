@@ -8,9 +8,6 @@ pub type BoxError = Box<dyn StdError + Send + Sync + 'static>;
 pub enum NacelleError {
     MissingService,
     MissingProtocol,
-    MissingHandler,
-    DuplicateHandler(u64),
-    UnknownOpcode(u64),
     InvalidFrame(&'static str),
     FrameTooLarge { len: usize, max: usize },
     UnexpectedEof,
@@ -36,13 +33,6 @@ impl Display for NacelleError {
         match self {
             Self::MissingService => f.write_str("service context is required"),
             Self::MissingProtocol => f.write_str("protocol is required"),
-            Self::MissingHandler => {
-                f.write_str("at least one handler or a default handler is required")
-            }
-            Self::DuplicateHandler(opcode) => {
-                write!(f, "duplicate handler registration for opcode {opcode}")
-            }
-            Self::UnknownOpcode(opcode) => write!(f, "unknown opcode {opcode}"),
             Self::InvalidFrame(message) => write!(f, "invalid frame: {message}"),
             Self::FrameTooLarge { len, max } => {
                 write!(f, "frame length {len} exceeds configured maximum {max}")
