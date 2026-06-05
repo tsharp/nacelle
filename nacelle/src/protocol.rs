@@ -2,6 +2,7 @@ use bytes::{Bytes, BytesMut};
 
 use crate::error::NacelleError;
 use crate::request::RequestMetadata;
+use crate::response::RawTcpResponseMeta;
 
 #[derive(Debug)]
 pub struct DecodedRequest<Req> {
@@ -25,6 +26,13 @@ where
     fn response_context(&self, req: &Req) -> Self::ResponseContext;
 
     fn error_context(&self, req: &Req) -> Self::ErrorContext;
+
+    fn apply_raw_tcp_response_meta(
+        &self,
+        _context: &mut Self::ResponseContext,
+        _meta: &RawTcpResponseMeta,
+    ) {
+    }
 
     fn encode_response_chunk(
         &self,

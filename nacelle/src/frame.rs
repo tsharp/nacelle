@@ -127,6 +127,19 @@ impl Protocol<FrameRequest> for LengthDelimitedProtocol {
         }
     }
 
+    fn apply_raw_tcp_response_meta(
+        &self,
+        context: &mut Self::ResponseContext,
+        meta: &crate::response::RawTcpResponseMeta,
+    ) {
+        if let Some(request_id) = meta.request_id {
+            context.request_id = request_id;
+        }
+        if let Some(opcode) = meta.opcode {
+            context.opcode = opcode;
+        }
+    }
+
     fn encode_response_chunk(
         &self,
         context: &mut Self::ResponseContext,

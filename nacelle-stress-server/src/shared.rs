@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use nacelle::{
-    FrameRequest, LengthDelimitedProtocol, NacelleConfig, NacelleError, NacelleRequestMeta,
-    NacelleResponse, RawTcpServer, handler_fn,
+    FrameRequest, LengthDelimitedProtocol, NacelleConfig, NacelleError, NacelleResponse,
+    RawTcpServer, handler_fn,
 };
 
 pub const STRESS_OPCODE: u64 = 1;
@@ -90,9 +90,7 @@ pub fn build_server(
         )
         .handler(handler_fn(
             |svc: Arc<StressService>, mut request| async move {
-                let opcode = match &request.meta {
-                    NacelleRequestMeta::RawTcp(meta) => meta.opcode,
-                };
+                let opcode = request.raw_tcp_opcode().unwrap_or_default();
                 while let Some(chunk) = request.body.next_chunk().await {
                     let _ = chunk?;
                 }

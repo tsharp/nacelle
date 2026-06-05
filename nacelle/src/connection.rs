@@ -9,7 +9,7 @@ use crate::error::NacelleError;
 use crate::handler::BoxedHandler;
 use crate::protocol::{DecodedRequest, Protocol};
 use crate::request::{NacelleBody, NacelleRequest, NacelleRequestMeta, RequestMetadata};
-use crate::response::NacelleResponse;
+use crate::response::{NacelleResponse, NacelleResponseMeta};
 
 /// Drive one raw TCP framed connection and coalesce completed responses into writes.
 pub async fn serve_connection<Svc, Req, P, R, W>(
@@ -235,6 +235,18 @@ where
     Req: RequestMetadata,
     P: Protocol<Req> + Send + Sync + 'static,
 {
+    #[cfg(not(feature = "http"))]
+    {
+        let NacelleResponseMeta::RawTcp(meta) = &response.meta;
+        protocol.apply_raw_tcp_response_meta(&mut context, meta);
+    }
+    #[cfg(feature = "http")]
+    {
+        if let NacelleResponseMeta::RawTcp(meta) = &response.meta {
+            protocol.apply_raw_tcp_response_meta(&mut context, meta);
+        }
+    }
+
     let mut pending_chunk = None;
     while let Some(chunk) = response.body.next_chunk().await {
         let chunk = chunk?;

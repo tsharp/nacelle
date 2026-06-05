@@ -48,6 +48,28 @@ pub struct NacelleRequest {
     pub body: NacelleBody,
 }
 
+impl NacelleRequest {
+    pub fn raw_tcp_meta(&self) -> Option<&RawTcpRequestMeta> {
+        match &self.meta {
+            NacelleRequestMeta::RawTcp(meta) => Some(meta),
+            #[cfg(feature = "http")]
+            NacelleRequestMeta::Http(_) => None,
+        }
+    }
+
+    pub fn raw_tcp_opcode(&self) -> Option<u64> {
+        self.raw_tcp_meta().map(|meta| meta.opcode)
+    }
+
+    #[cfg(feature = "http")]
+    pub fn http_meta(&self) -> Option<&HttpRequestMeta> {
+        match &self.meta {
+            NacelleRequestMeta::RawTcp(_) => None,
+            NacelleRequestMeta::Http(meta) => Some(meta),
+        }
+    }
+}
+
 enum NacelleBodySource {
     // Single-chunk bodies (the common case for small payloads): avoids Vec/Box heap alloc.
     SingleChunk(Option<Bytes>),

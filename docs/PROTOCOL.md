@@ -45,6 +45,8 @@ response frame.
 
 Handlers return a `NacelleResponse` with a streaming `NacelleBody`. The raw TCP
 transport encodes that response body into one or more response frames.
+By default, raw TCP responses inherit `request_id` and `opcode` from the request
+context. Applications can override either field with `RawTcpResponseMeta`.
 
 The protocol guarantees:
 

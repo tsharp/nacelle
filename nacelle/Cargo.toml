@@ -7,6 +7,7 @@ edition = "2024"
 default = ["raw_tcp"]
 raw_tcp = []
 http = ["dep:http", "dep:http-body-util", "dep:hyper", "dep:hyper-util"]
+tower = ["dep:tower"]
 bench = []
 fuzzing = []
 
@@ -18,6 +19,7 @@ http = { version = "1", optional = true }
 http-body-util = { version = "0.1", optional = true }
 hyper = { version = "1", features = ["http1", "server"], optional = true }
 hyper-util = { version = "0.1", features = ["server", "tokio"], optional = true }
+tower = { version = "0.5", features = ["util"], optional = true }
 tokio = { version = "1.47.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
@@ -37,3 +39,8 @@ required-features = ["raw_tcp"]
 name = "http_echo"
 path = "examples/http_echo.rs"
 required-features = ["http"]
+
+[[example]]
+name = "dual_echo"
+path = "examples/dual_echo.rs"
+required-features = ["raw_tcp", "http"]

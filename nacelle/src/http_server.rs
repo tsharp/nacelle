@@ -47,6 +47,13 @@ where
 
     pub async fn serve(self, addr: SocketAddr) -> Result<(), NacelleError> {
         let listener = tokio::net::TcpListener::bind(addr).await?;
+        self.serve_listener(listener).await
+    }
+
+    pub async fn serve_listener(
+        self,
+        listener: tokio::net::TcpListener,
+    ) -> Result<(), NacelleError> {
         let server = Arc::new(self);
         loop {
             let (stream, _) = listener.accept().await?;
@@ -150,4 +157,110 @@ fn empty_body() -> HttpBody {
     Full::new(Bytes::new())
         .map_err(|never: Infallible| match never {})
         .boxed()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use crate::handler::handler_fn;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn http_server_streams_request_and_response_body() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let server = HyperServer::new(
+            (),
+            handler_fn(|_svc: Arc<()>, mut request| async move {
+                assert_eq!(
+                    request.http_meta().expect("http metadata").uri.path(),
+                    "/echo"
+                );
+                let (tx, body) = NacelleBody::channel(2);
+                while let Some(chunk) = request.body.next_chunk().await {
+                    tx.send(chunk)
+                        .await
+                        .expect("response receiver should be open");
+                }
+                drop(tx);
+                Ok(NacelleResponse::http(
+                    StatusCode::CREATED,
+                    http::HeaderMap::new(),
+                    body,
+                ))
+            }),
+        );
+        let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        client
+            .write_all(
+                b"POST /echo HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Content-Length: 11\r\n\
+                  Connection: close\r\n\
+                  \r\n\
+                  hello world",
+            )
+            .await
+            .expect("request should write");
+
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("response should read");
+        let response = String::from_utf8(response).expect("response should be utf8");
+
+        assert!(response.starts_with("HTTP/1.1 201 Created"));
+        assert!(response.contains("hello world"));
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn http_handler_error_becomes_500_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let server = HyperServer::new(
+            (),
+            handler_fn(|_svc: Arc<()>, _request| async move {
+                Err(NacelleError::handler(std::io::Error::other("boom")))
+            }),
+        );
+        let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        client
+            .write_all(
+                b"GET / HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Connection: close\r\n\
+                  \r\n",
+            )
+            .await
+            .expect("request should write");
+
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("response should read");
+        let response = String::from_utf8(response).expect("response should be utf8");
+
+        assert!(response.starts_with("HTTP/1.1 500 Internal Server Error"));
+        assert!(response.contains("handler error: boom"));
+        server_task.abort();
+    }
 }
