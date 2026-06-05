@@ -1,13 +1,9 @@
-use std::sync::Arc;
-
 use bytes::BytesMut;
 use http::StatusCode;
 use nacelle::{
-    FrameRequest, HyperServer, LengthDelimitedProtocol, NacelleError, NacelleResponse,
-    RawTcpServer, handler_fn,
+    FrameRequest, HyperServer, LengthDelimitedProtocol, NacelleError, NacelleRequest,
+    NacelleResponse, RawTcpServer, handler_fn,
 };
-
-struct EchoService;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), NacelleError> {
@@ -22,7 +18,7 @@ async fn main() -> Result<(), NacelleError> {
         .parse()
         .map_err(NacelleError::protocol)?;
 
-    let handler = handler_fn(|_svc: Arc<EchoService>, mut request| async move {
+    let handler = handler_fn(|mut request: NacelleRequest| async move {
         if let Some(opcode) = request.raw_tcp_opcode()
             && opcode != 1
         {
@@ -47,12 +43,11 @@ async fn main() -> Result<(), NacelleError> {
         }
     });
 
-    let raw_tcp_server = RawTcpServer::<EchoService, FrameRequest, ()>::builder()
-        .service(EchoService)
+    let raw_tcp_server = RawTcpServer::<FrameRequest, ()>::builder()
         .protocol(LengthDelimitedProtocol)
         .handler(handler.clone())
         .build()?;
-    let http_server = HyperServer::new(EchoService, handler);
+    let http_server = HyperServer::new(handler);
 
     println!("nacelle raw TCP echo listening on {raw_tcp_addr}");
     println!("nacelle HTTP echo listening on {http_addr}");

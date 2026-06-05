@@ -1,12 +1,13 @@
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::{Buf, BytesMut};
 use nacelle::{FRAME_FLAG_END, FRAME_FLAG_ERROR, NacelleError};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpSocket;
@@ -14,6 +15,7 @@ use tokio::sync::Barrier;
 
 const STRESS_OPCODE: u64 = 1;
 const LATENCY_SAMPLE_STRIDE: u64 = 64;
+const SOCKET_BUFFER_BYTES: u32 = 4 * 1024 * 1024;
 
 /// Enables the Windows loopback fast-path (SIO_LOOPBACK_FAST_PATH) on a socket.
 ///
@@ -70,6 +72,8 @@ fn new_raw_socket(addr: &SocketAddr) -> Result<TcpSocket, std::io::Error> {
     } else {
         TcpSocket::new_v6()?
     };
+    socket.set_recv_buffer_size(SOCKET_BUFFER_BYTES)?;
+    socket.set_send_buffer_size(SOCKET_BUFFER_BYTES)?;
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawSocket;
@@ -120,11 +124,6 @@ struct ResponseSummary {
     wire_bytes: usize,
 }
 
-#[derive(Debug, Default)]
-struct PartialResponse {
-    wire_bytes: usize,
-}
-
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = parse_args(std::env::args().skip(1))?;
@@ -171,9 +170,10 @@ async fn run_worker(
     stream.set_nodelay(true)?;
     let (mut reader, mut writer) = stream.into_split();
     let payload = vec![worker_id as u8; config.payload_bytes];
-    let mut scratch = Vec::with_capacity(1024);
-    let mut inflight = HashMap::with_capacity(config.pipeline);
-    let mut partial_responses = HashMap::<u64, PartialResponse>::with_capacity(config.pipeline);
+    let mut request_frame = vec![0_u8; 24 + payload.len()];
+    request_frame[24..].copy_from_slice(&payload);
+    let mut read_buf = BytesMut::with_capacity(64 * 1024);
+    let mut inflight = VecDeque::with_capacity(config.pipeline);
     let mut result = WorkerResult::default();
     let mut next_request_id = (worker_id as u64) << 48;
 
@@ -187,18 +187,21 @@ async fn run_worker(
         let request_id = next_request_id;
         next_request_id += 1;
         result.request_wire_bytes +=
-            write_request_frame(&mut writer, request_id, STRESS_OPCODE, &payload).await? as u64;
-        inflight.insert(request_id, Instant::now());
+            write_request_frame(&mut writer, request_id, STRESS_OPCODE, &mut request_frame).await?
+                as u64;
+        inflight.push_back((request_id, Instant::now()));
     }
 
     while !inflight.is_empty() {
-        let response = read_response(&mut reader, &mut scratch, &mut partial_responses).await?;
-        let started_at =
-            inflight
-                .remove(&response.request_id)
-                .ok_or(NacelleError::InvalidFrame(
-                    "response request id was not in the in-flight map",
-                ))?;
+        let response = read_response(&mut reader, &mut read_buf).await?;
+        let (expected_request_id, started_at) = inflight.pop_front().ok_or(
+            NacelleError::InvalidFrame("response completed without an in-flight request"),
+        )?;
+        if expected_request_id != response.request_id {
+            return Err(NacelleError::InvalidFrame(
+                "response request id was not the next in-flight request",
+            ));
+        }
 
         let latency_ns = started_at.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         result.record_completion(latency_ns, response.wire_bytes as u64);
@@ -207,8 +210,9 @@ async fn run_worker(
             let request_id = next_request_id;
             next_request_id += 1;
             result.request_wire_bytes +=
-                write_request_frame(&mut writer, request_id, STRESS_OPCODE, &payload).await? as u64;
-            inflight.insert(request_id, Instant::now());
+                write_request_frame(&mut writer, request_id, STRESS_OPCODE, &mut request_frame)
+                    .await? as u64;
+            inflight.push_back((request_id, Instant::now()));
         }
     }
 
@@ -220,59 +224,58 @@ async fn write_request_frame<W>(
     writer: &mut W,
     request_id: u64,
     opcode: u64,
-    payload: &[u8],
+    frame: &mut [u8],
 ) -> Result<usize, NacelleError>
 where
     W: AsyncWrite + Unpin,
 {
-    let frame_len = 20 + payload.len();
+    let frame_len = frame.len() - 4;
     let frame_len = u32::try_from(frame_len).map_err(|_| NacelleError::FrameTooLarge {
         len: frame_len,
         max: u32::MAX as usize,
     })?;
 
-    let mut header = [0_u8; 24];
-    header[0..4].copy_from_slice(&frame_len.to_le_bytes());
-    header[4..12].copy_from_slice(&request_id.to_le_bytes());
-    header[12..20].copy_from_slice(&opcode.to_le_bytes());
-    header[20..24].copy_from_slice(&0_u32.to_le_bytes());
+    frame[0..4].copy_from_slice(&frame_len.to_le_bytes());
+    frame[4..12].copy_from_slice(&request_id.to_le_bytes());
+    frame[12..20].copy_from_slice(&opcode.to_le_bytes());
+    frame[20..24].copy_from_slice(&0_u32.to_le_bytes());
 
-    writer.write_all(&header).await?;
-    if !payload.is_empty() {
-        writer.write_all(payload).await?;
-    }
-
-    Ok(header.len() + payload.len())
+    writer.write_all(frame).await?;
+    Ok(frame.len())
 }
 
 async fn read_response<R>(
     reader: &mut R,
-    scratch: &mut Vec<u8>,
-    partial_responses: &mut HashMap<u64, PartialResponse>,
+    read_buf: &mut BytesMut,
 ) -> Result<ResponseSummary, NacelleError>
 where
     R: AsyncRead + Unpin,
 {
+    let mut partial_request_id = None;
+    let mut partial_wire_bytes = 0;
     loop {
-        let (frame_request_id, flags, frame_wire_bytes) = read_frame(reader, scratch).await?;
+        let (frame_request_id, flags, frame_wire_bytes) = read_frame(reader, read_buf).await?;
         if flags & FRAME_FLAG_ERROR != 0 {
             return Err(NacelleError::InvalidFrame(
                 "stress target returned an error frame",
             ));
         }
 
-        let partial = partial_responses.entry(frame_request_id).or_default();
-        partial.wire_bytes += frame_wire_bytes;
+        match partial_request_id {
+            Some(request_id) if request_id != frame_request_id => {
+                return Err(NacelleError::InvalidFrame(
+                    "interleaved response frames are not supported by the stress harness",
+                ));
+            }
+            None => partial_request_id = Some(frame_request_id),
+            _ => {}
+        }
+
+        partial_wire_bytes += frame_wire_bytes;
         if flags & FRAME_FLAG_END != 0 {
-            let partial =
-                partial_responses
-                    .remove(&frame_request_id)
-                    .ok_or(NacelleError::InvalidFrame(
-                        "response completed without partial response state",
-                    ))?;
             return Ok(ResponseSummary {
                 request_id: frame_request_id,
-                wire_bytes: partial.wire_bytes,
+                wire_bytes: partial_wire_bytes,
             });
         }
     }
@@ -280,34 +283,40 @@ where
 
 async fn read_frame<R>(
     reader: &mut R,
-    scratch: &mut Vec<u8>,
+    read_buf: &mut BytesMut,
 ) -> Result<(u64, u32, usize), NacelleError>
 where
     R: AsyncRead + Unpin,
 {
-    let mut len_buf = [0_u8; 4];
-    reader.read_exact(&mut len_buf).await?;
-    let frame_len = u32::from_le_bytes(len_buf) as usize;
-    if frame_len < 20 {
-        return Err(NacelleError::InvalidFrame(
-            "stress client received a truncated frame",
-        ));
-    }
+    loop {
+        if read_buf.len() >= 4 {
+            let frame_len =
+                u32::from_le_bytes(read_buf[0..4].try_into().expect("fixed width")) as usize;
+            if frame_len < 20 {
+                return Err(NacelleError::InvalidFrame(
+                    "stress client received a truncated frame",
+                ));
+            }
 
-    let mut fixed = [0_u8; 20];
-    reader.read_exact(&mut fixed).await?;
-    let request_id = u64::from_le_bytes(fixed[0..8].try_into().expect("fixed width"));
-    let _opcode = u64::from_le_bytes(fixed[8..16].try_into().expect("fixed width"));
-    let flags = u32::from_le_bytes(fixed[16..20].try_into().expect("fixed width"));
-    let body_len = frame_len - 20;
-    if scratch.len() < body_len {
-        scratch.resize(body_len, 0);
-    }
-    if body_len > 0 {
-        reader.read_exact(&mut scratch[..body_len]).await?;
-    }
+            let wire_len = 4 + frame_len;
+            if read_buf.len() >= wire_len {
+                let request_id =
+                    u64::from_le_bytes(read_buf[4..12].try_into().expect("fixed width"));
+                let _opcode = u64::from_le_bytes(read_buf[12..20].try_into().expect("fixed width"));
+                let flags = u32::from_le_bytes(read_buf[20..24].try_into().expect("fixed width"));
+                read_buf.advance(wire_len);
+                return Ok((request_id, flags, wire_len));
+            }
+        }
 
-    Ok((request_id, flags, 4 + frame_len))
+        if read_buf.capacity() - read_buf.len() < 4096 {
+            read_buf.reserve(64 * 1024);
+        }
+        let bytes_read = reader.read_buf(read_buf).await?;
+        if bytes_read == 0 {
+            return Err(NacelleError::UnexpectedEof);
+        }
+    }
 }
 
 impl WorkerResult {

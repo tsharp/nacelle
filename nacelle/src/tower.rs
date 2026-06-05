@@ -1,13 +1,12 @@
 use tower::ServiceExt;
 
 use crate::error::{BoxError, NacelleError};
-use crate::handler::{BoxedHandler, handler_fn};
+use crate::handler::{Handler, handler_fn};
 use crate::request::NacelleRequest;
 use crate::response::NacelleResponse;
 
-pub fn handler_from_tower_service<State, S, E>(service: S) -> BoxedHandler<State>
+pub fn handler_from_tower_service<S, E>(service: S) -> impl Handler
 where
-    State: Send + Sync + 'static,
     S: tower::Service<NacelleRequest, Response = NacelleResponse, Error = E>
         + Clone
         + Send
@@ -16,7 +15,7 @@ where
     S::Future: Send + 'static,
     E: Into<BoxError> + 'static,
 {
-    handler_fn(move |_state, request| {
+    handler_fn(move |request| {
         let service = service.clone();
         async move {
             service
@@ -29,8 +28,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use bytes::Bytes;
     use tower::service_fn;
 
@@ -48,20 +45,17 @@ mod tests {
             Ok::<_, NacelleError>(NacelleResponse::raw_tcp_bytes(Bytes::from(body)))
         });
 
-        let handler = handler_from_tower_service::<(), _, NacelleError>(service);
+        let handler = handler_from_tower_service::<_, NacelleError>(service);
         let response = handler
-            .call(
-                Arc::new(()),
-                NacelleRequest {
-                    meta: NacelleRequestMeta::RawTcp(RawTcpRequestMeta {
-                        request_id: Some(1),
-                        opcode: 1,
-                        flags: 0,
-                        body_len: 5,
-                    }),
-                    body: NacelleBody::bytes(Bytes::from_static(b"tower")),
-                },
-            )
+            .call(NacelleRequest {
+                meta: NacelleRequestMeta::RawTcp(RawTcpRequestMeta {
+                    request_id: Some(1),
+                    opcode: 1,
+                    flags: 0,
+                    body_len: 5,
+                }),
+                body: NacelleBody::bytes(Bytes::from_static(b"tower")),
+            })
             .await
             .expect("tower handler should succeed");
 

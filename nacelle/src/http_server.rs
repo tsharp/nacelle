@@ -14,35 +14,33 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 
 use crate::error::{BoxError, NacelleError};
-use crate::handler::BoxedHandler;
+use crate::handler::Handler;
 use crate::request::{HttpRequestMeta, NacelleBody, NacelleRequest, NacelleRequestMeta};
 use crate::response::{NacelleResponse, NacelleResponseMeta};
 
 type HttpBody = BoxBody<Bytes, BoxError>;
 
-pub struct HyperServer<Svc> {
-    service: Arc<Svc>,
-    handler: BoxedHandler<Svc>,
+pub struct HyperServer<H = ()> {
+    handler: H,
 }
 
-impl<Svc> Clone for HyperServer<Svc> {
+impl<H> Clone for HyperServer<H>
+where
+    H: Clone,
+{
     fn clone(&self) -> Self {
         Self {
-            service: self.service.clone(),
             handler: self.handler.clone(),
         }
     }
 }
 
-impl<Svc> HyperServer<Svc>
+impl<H> HyperServer<H>
 where
-    Svc: Send + Sync + 'static,
+    H: Handler,
 {
-    pub fn new(service: Svc, handler: BoxedHandler<Svc>) -> Self {
-        Self {
-            service: Arc::new(service),
-            handler,
-        }
+    pub fn new(handler: H) -> Self {
+        Self { handler }
     }
 
     pub async fn serve(self, addr: SocketAddr) -> Result<(), NacelleError> {
@@ -80,7 +78,7 @@ where
             body: incoming_to_body(body),
         };
 
-        match self.handler.call(self.service.clone(), request).await {
+        match self.handler.call(request).await {
             Ok(response) => response_to_http(response),
             Err(error) => response_to_http(NacelleResponse::http_bytes(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -161,11 +159,10 @@ fn empty_body() -> HttpBody {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::handler::handler_fn;
+    use crate::request::NacelleRequest;
 
     use super::*;
 
@@ -175,27 +172,24 @@ mod tests {
             .await
             .expect("listener should bind");
         let addr = listener.local_addr().expect("listener should have addr");
-        let server = HyperServer::new(
-            (),
-            handler_fn(|_svc: Arc<()>, mut request| async move {
-                assert_eq!(
-                    request.http_meta().expect("http metadata").uri.path(),
-                    "/echo"
-                );
-                let (tx, body) = NacelleBody::channel(2);
-                while let Some(chunk) = request.body.next_chunk().await {
-                    tx.send(chunk)
-                        .await
-                        .expect("response receiver should be open");
-                }
-                drop(tx);
-                Ok(NacelleResponse::http(
-                    StatusCode::CREATED,
-                    http::HeaderMap::new(),
-                    body,
-                ))
-            }),
-        );
+        let server = HyperServer::new(handler_fn(|mut request: NacelleRequest| async move {
+            assert_eq!(
+                request.http_meta().expect("http metadata").uri.path(),
+                "/echo"
+            );
+            let (tx, body) = NacelleBody::channel(2);
+            while let Some(chunk) = request.body.next_chunk().await {
+                tx.send(chunk)
+                    .await
+                    .expect("response receiver should be open");
+            }
+            drop(tx);
+            Ok(NacelleResponse::http(
+                StatusCode::CREATED,
+                http::HeaderMap::new(),
+                body,
+            ))
+        }));
         let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
 
         let mut client = tokio::net::TcpStream::connect(addr)
@@ -231,12 +225,9 @@ mod tests {
             .await
             .expect("listener should bind");
         let addr = listener.local_addr().expect("listener should have addr");
-        let server = HyperServer::new(
-            (),
-            handler_fn(|_svc: Arc<()>, _request| async move {
-                Err(NacelleError::handler(std::io::Error::other("boom")))
-            }),
-        );
+        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
+            Err(NacelleError::handler(std::io::Error::other("boom")))
+        }));
         let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
 
         let mut client = tokio::net::TcpStream::connect(addr)

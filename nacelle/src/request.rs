@@ -144,6 +144,30 @@ impl NacelleBody {
         }
     }
 
+    #[cfg(feature = "raw_tcp")]
+    pub(crate) fn try_into_single_chunk_or_empty(self) -> Result<Option<Bytes>, Self> {
+        match self.source {
+            NacelleBodySource::SingleChunk(chunk) => Ok(chunk),
+            NacelleBodySource::Buffered { chunks, next_index } => {
+                let remaining = chunks.len().saturating_sub(next_index);
+                if remaining == 0 {
+                    Ok(None)
+                } else if remaining == 1 {
+                    Ok(Some(chunks[next_index].clone()))
+                } else {
+                    Err(Self {
+                        source: NacelleBodySource::Buffered { chunks, next_index },
+                        remaining_bytes: self.remaining_bytes,
+                    })
+                }
+            }
+            NacelleBodySource::Streaming { receiver } => Err(Self {
+                source: NacelleBodySource::Streaming { receiver },
+                remaining_bytes: self.remaining_bytes,
+            }),
+        }
+    }
+
     pub fn remaining_bytes(&self) -> usize {
         self.remaining_bytes
     }

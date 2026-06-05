@@ -1,7 +1,8 @@
-# Nacelle Length-Delimited Protocol
+# Nacelle Reference Length-Delimited Protocol
 
-This document describes the built-in `LengthDelimitedProtocol` used by the
-prototype server. Custom protocols can implement `Protocol<Req>` directly.
+This document describes the optional `LengthDelimitedProtocol` reference
+implementation enabled by the `reference_protocol` feature. Custom raw TCP
+protocols can implement `Protocol<Req>` directly.
 
 ## Frame Layout
 

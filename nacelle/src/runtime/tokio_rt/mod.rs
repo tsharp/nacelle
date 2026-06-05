@@ -34,6 +34,8 @@ use std::sync::Arc;
 #[cfg(feature = "raw_tcp")]
 use crate::error::NacelleError;
 #[cfg(feature = "raw_tcp")]
+use crate::handler::Handler;
+#[cfg(feature = "raw_tcp")]
 use crate::protocol::Protocol;
 #[cfg(feature = "raw_tcp")]
 use crate::request::RequestMetadata;
@@ -42,14 +44,14 @@ use crate::server::NacelleServer;
 
 /// Listen on `addr` and serve each accepted TCP connection in its own task.
 #[cfg(feature = "raw_tcp")]
-pub async fn serve_tcp<Svc, Req, P>(
-    server: Arc<NacelleServer<Svc, Req, P>>,
+pub async fn serve_tcp<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
     addr: SocketAddr,
 ) -> Result<(), NacelleError>
 where
-    Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
 {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     loop {

@@ -4,9 +4,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::config::NacelleConfig;
-use crate::connection::serve_connection;
+use crate::connection::{serve_connection, serve_stream};
 use crate::error::NacelleError;
-use crate::handler::BoxedHandler;
+use crate::handler::Handler;
 use crate::protocol::Protocol;
 use crate::request::RequestMetadata;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -14,20 +14,21 @@ use tokio::io::{AsyncRead, AsyncWrite};
 pub struct Missing;
 pub struct Present;
 
-pub struct NacelleServer<Svc, Req, P> {
-    service: Arc<Svc>,
+pub struct NacelleServer<Req, P, H = ()> {
     protocol: Arc<P>,
-    handler: BoxedHandler<Svc>,
+    handler: H,
     config: NacelleConfig,
     _request: PhantomData<fn() -> Req>,
 }
 
-pub type RawTcpServer<Svc, Req, P> = NacelleServer<Svc, Req, P>;
+pub type RawTcpServer<Req, P, H = ()> = NacelleServer<Req, P, H>;
 
-impl<Svc, Req, P> Clone for NacelleServer<Svc, Req, P> {
+impl<Req, P, H> Clone for NacelleServer<Req, P, H>
+where
+    H: Clone,
+{
     fn clone(&self) -> Self {
         Self {
-            service: self.service.clone(),
             protocol: self.protocol.clone(),
             handler: self.handler.clone(),
             config: self.config.clone(),
@@ -36,14 +37,12 @@ impl<Svc, Req, P> Clone for NacelleServer<Svc, Req, P> {
     }
 }
 
-impl<Svc, Req> NacelleServer<Svc, Req, ()> {
-    pub fn builder() -> NacelleServerBuilder<Svc, Req, Missing, Missing, Missing, ()> {
+impl<Req> NacelleServer<Req, (), ()> {
+    pub fn builder() -> NacelleServerBuilder<Req, Missing, Missing, (), ()> {
         NacelleServerBuilder {
-            service: None,
             protocol: None,
             handler: None,
             config: NacelleConfig::default(),
-            _service: PhantomData,
             _protocol: PhantomData,
             _handler: PhantomData,
             _request: PhantomData,
@@ -51,18 +50,14 @@ impl<Svc, Req> NacelleServer<Svc, Req, ()> {
     }
 }
 
-impl<Svc, Req, P> NacelleServer<Svc, Req, P>
+impl<Req, P, H> NacelleServer<Req, P, H>
 where
-    Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
 {
     pub fn config(&self) -> &NacelleConfig {
         &self.config
-    }
-
-    pub fn service(&self) -> &Svc {
-        self.service.as_ref()
     }
 
     pub fn protocol(&self) -> &P {
@@ -77,7 +72,6 @@ where
         serve_connection(
             reader,
             writer,
-            self.service.clone(),
             self.protocol.clone(),
             self.handler.clone(),
             self.config.clone(),
@@ -90,11 +84,8 @@ where
     where
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let (reader, writer) = tokio::io::split(io);
-        serve_connection(
-            reader,
-            writer,
-            self.service.clone(),
+        serve_stream(
+            io,
             self.protocol.clone(),
             self.handler.clone(),
             self.config.clone(),
@@ -104,23 +95,21 @@ where
 
     #[cfg(feature = "raw_tcp")]
     pub async fn serve_tcp(&self, addr: SocketAddr) -> Result<(), NacelleError> {
-        crate::runtime::serve_tcp(Arc::<NacelleServer<Svc, Req, P>>::new(self.clone()), addr).await
+        crate::runtime::serve_tcp(Arc::<NacelleServer<Req, P, H>>::new(self.clone()), addr).await
     }
 }
 
-pub struct NacelleServerBuilder<Svc, Req, ServiceState, ProtocolState, HandlerState, P> {
-    service: Option<Arc<Svc>>,
+pub struct NacelleServerBuilder<Req, ProtocolState, HandlerState, P, H> {
     protocol: Option<Arc<P>>,
-    handler: Option<BoxedHandler<Svc>>,
+    handler: Option<H>,
     config: NacelleConfig,
-    _service: PhantomData<ServiceState>,
     _protocol: PhantomData<ProtocolState>,
     _handler: PhantomData<HandlerState>,
     _request: PhantomData<fn() -> Req>,
 }
 
-impl<Svc, Req, ServiceState, ProtocolState, HandlerState, P>
-    NacelleServerBuilder<Svc, Req, ServiceState, ProtocolState, HandlerState, P>
+impl<Req, ProtocolState, HandlerState, P, H>
+    NacelleServerBuilder<Req, ProtocolState, HandlerState, P, H>
 {
     pub fn config(mut self, config: NacelleConfig) -> Self {
         self.config = config;
@@ -128,39 +117,15 @@ impl<Svc, Req, ServiceState, ProtocolState, HandlerState, P>
     }
 }
 
-impl<Svc, Req, ProtocolState, HandlerState, P>
-    NacelleServerBuilder<Svc, Req, Missing, ProtocolState, HandlerState, P>
-{
-    pub fn service(
-        self,
-        service: Svc,
-    ) -> NacelleServerBuilder<Svc, Req, Present, ProtocolState, HandlerState, P> {
-        NacelleServerBuilder {
-            service: Some(Arc::new(service)),
-            protocol: self.protocol,
-            handler: self.handler,
-            config: self.config,
-            _service: PhantomData,
-            _protocol: PhantomData,
-            _handler: PhantomData,
-            _request: PhantomData,
-        }
-    }
-}
-
-impl<Svc, Req, ServiceState, HandlerState, P>
-    NacelleServerBuilder<Svc, Req, ServiceState, Missing, HandlerState, P>
-{
+impl<Req, HandlerState, P, H> NacelleServerBuilder<Req, Missing, HandlerState, P, H> {
     pub fn protocol<P2>(
         self,
         protocol: P2,
-    ) -> NacelleServerBuilder<Svc, Req, ServiceState, Present, HandlerState, P2> {
+    ) -> NacelleServerBuilder<Req, Present, HandlerState, P2, H> {
         NacelleServerBuilder {
-            service: self.service,
             protocol: Some(Arc::new(protocol)),
             handler: self.handler,
             config: self.config,
-            _service: PhantomData,
             _protocol: PhantomData,
             _handler: PhantomData,
             _request: PhantomData,
@@ -168,19 +133,15 @@ impl<Svc, Req, ServiceState, HandlerState, P>
     }
 }
 
-impl<Svc, Req, ServiceState, ProtocolState, P>
-    NacelleServerBuilder<Svc, Req, ServiceState, ProtocolState, Missing, P>
-{
-    pub fn handler(
+impl<Req, ProtocolState, P, H> NacelleServerBuilder<Req, ProtocolState, Missing, P, H> {
+    pub fn handler<H2>(
         self,
-        handler: BoxedHandler<Svc>,
-    ) -> NacelleServerBuilder<Svc, Req, ServiceState, ProtocolState, Present, P> {
+        handler: H2,
+    ) -> NacelleServerBuilder<Req, ProtocolState, Present, P, H2> {
         NacelleServerBuilder {
-            service: self.service,
             protocol: self.protocol,
             handler: Some(handler),
             config: self.config,
-            _service: PhantomData,
             _protocol: PhantomData,
             _handler: PhantomData,
             _request: PhantomData,
@@ -188,19 +149,17 @@ impl<Svc, Req, ServiceState, ProtocolState, P>
     }
 }
 
-impl<Svc, Req, P> NacelleServerBuilder<Svc, Req, Present, Present, Present, P>
+impl<Req, P, H> NacelleServerBuilder<Req, Present, Present, P, H>
 where
-    Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
 {
-    pub fn build(self) -> Result<NacelleServer<Svc, Req, P>, NacelleError> {
-        let service = self.service.ok_or(NacelleError::MissingService)?;
+    pub fn build(self) -> Result<NacelleServer<Req, P, H>, NacelleError> {
         let protocol = self.protocol.ok_or(NacelleError::MissingProtocol)?;
         let handler = self.handler.expect("handler state guarantees a handler");
 
         Ok(NacelleServer {
-            service,
             protocol,
             handler,
             config: self.config,
@@ -209,18 +168,19 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "reference_protocol"))]
 mod tests {
-    use std::sync::Arc;
     use std::time::Duration;
 
     use bytes::Bytes;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use crate::frame::{
+    use crate::RequestBodyMode;
+    use crate::handler::handler_fn;
+    use crate::reference_protocol::{
         FRAME_FLAG_END, FRAME_FLAG_ERROR, FRAME_FLAG_START, FrameRequest, LengthDelimitedProtocol,
     };
-    use crate::handler::handler_fn;
+    use crate::request::NacelleRequest;
     use crate::response::{NacelleResponse, RawTcpResponseMeta};
 
     use super::*;
@@ -228,15 +188,15 @@ mod tests {
     #[tokio::test]
     async fn streams_request_body_and_response_without_full_buffering() {
         let protocol = LengthDelimitedProtocol;
-        let server = NacelleServer::<(), FrameRequest, ()>::builder()
-            .service(())
+        let server = NacelleServer::<FrameRequest, ()>::builder()
             .protocol(protocol.clone())
             .config(
                 NacelleConfig::default()
                     .with_request_body_chunk_size(3)
-                    .with_request_body_channel_capacity(1),
+                    .with_request_body_channel_capacity(1)
+                    .with_request_body_mode(RequestBodyMode::Streaming),
             )
-            .handler(handler_fn(|_svc: Arc<()>, mut request| async move {
+            .handler(handler_fn(|mut request: NacelleRequest| async move {
                 let mut chunks = Vec::new();
                 while let Some(chunk) = request.body.next_chunk().await {
                     tokio::time::sleep(Duration::from_millis(5)).await;
@@ -509,10 +469,9 @@ mod tests {
     #[tokio::test]
     async fn handler_error_without_response_becomes_error_frame() {
         let protocol = LengthDelimitedProtocol;
-        let server = NacelleServer::<(), FrameRequest, ()>::builder()
-            .service(())
+        let server = NacelleServer::<FrameRequest, ()>::builder()
             .protocol(protocol.clone())
-            .handler(handler_fn(|_svc: Arc<()>, _request| async move {
+            .handler(handler_fn(|_request: NacelleRequest| async move {
                 Err(NacelleError::handler(std::io::Error::other("handler boom")))
             }))
             .build()
@@ -555,10 +514,9 @@ mod tests {
     #[tokio::test]
     async fn multiple_response_writes_become_ordered_frames() {
         let protocol = LengthDelimitedProtocol;
-        let server = NacelleServer::<(), FrameRequest, ()>::builder()
-            .service(())
+        let server = NacelleServer::<FrameRequest, ()>::builder()
             .protocol(protocol.clone())
-            .handler(handler_fn(|_svc: Arc<()>, _request| async move {
+            .handler(handler_fn(|_request: NacelleRequest| async move {
                 let (tx, body) = crate::request::NacelleBody::channel(2);
                 tx.send(Ok(Bytes::from_static(b"first")))
                     .await
@@ -609,10 +567,9 @@ mod tests {
     #[tokio::test]
     async fn raw_tcp_response_meta_can_override_response_opcode() {
         let protocol = LengthDelimitedProtocol;
-        let server = NacelleServer::<(), FrameRequest, ()>::builder()
-            .service(())
+        let server = NacelleServer::<FrameRequest, ()>::builder()
             .protocol(protocol.clone())
-            .handler(handler_fn(|_svc: Arc<()>, _request| async move {
+            .handler(handler_fn(|_request: NacelleRequest| async move {
                 Ok(NacelleResponse::raw_tcp_with_meta(
                     RawTcpResponseMeta {
                         request_id: None,
@@ -658,12 +615,11 @@ mod tests {
     fn echo_server(
         protocol: LengthDelimitedProtocol,
         config: NacelleConfig,
-    ) -> NacelleServer<(), FrameRequest, LengthDelimitedProtocol> {
-        NacelleServer::<(), FrameRequest, ()>::builder()
-            .service(())
+    ) -> NacelleServer<FrameRequest, LengthDelimitedProtocol, impl crate::handler::Handler> {
+        NacelleServer::<FrameRequest, ()>::builder()
             .protocol(protocol)
             .config(config)
-            .handler(handler_fn(|_svc: Arc<()>, request| async move {
+            .handler(handler_fn(|request: NacelleRequest| async move {
                 Ok(NacelleResponse::raw_tcp(request.body))
             }))
             .build()
@@ -673,12 +629,11 @@ mod tests {
     fn routed_echo_server(
         protocol: LengthDelimitedProtocol,
         config: NacelleConfig,
-    ) -> NacelleServer<(), FrameRequest, LengthDelimitedProtocol> {
-        NacelleServer::<(), FrameRequest, ()>::builder()
-            .service(())
+    ) -> NacelleServer<FrameRequest, LengthDelimitedProtocol, impl crate::handler::Handler> {
+        NacelleServer::<FrameRequest, ()>::builder()
             .protocol(protocol)
             .config(config)
-            .handler(handler_fn(|_svc: Arc<()>, mut request| async move {
+            .handler(handler_fn(|mut request: NacelleRequest| async move {
                 let opcode = request.raw_tcp_opcode().unwrap_or_default();
                 if opcode != 1 {
                     while let Some(chunk) = request.body.next_chunk().await {

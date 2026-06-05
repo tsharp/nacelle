@@ -6,7 +6,6 @@ pub type BoxError = Box<dyn StdError + Send + Sync + 'static>;
 
 #[derive(Debug)]
 pub enum NacelleError {
-    MissingService,
     MissingProtocol,
     InvalidFrame(&'static str),
     FrameTooLarge { len: usize, max: usize },
@@ -31,7 +30,6 @@ impl NacelleError {
 impl Display for NacelleError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::MissingService => f.write_str("service context is required"),
             Self::MissingProtocol => f.write_str("protocol is required"),
             Self::InvalidFrame(message) => write!(f, "invalid frame: {message}"),
             Self::FrameTooLarge { len, max } => {

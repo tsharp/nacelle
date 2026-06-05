@@ -94,7 +94,6 @@ impl Protocol<FrameRequest> for LengthDelimitedProtocol {
             return Ok(None);
         }
 
-        // Read header fields directly without split_to().freeze() (avoids Arc promotion).
         let request_id = u64::from_le_bytes(src[4..12].try_into().expect("slice length checked"));
         let opcode = u64::from_le_bytes(src[12..20].try_into().expect("slice length checked"));
         let flags = u32::from_le_bytes(src[20..24].try_into().expect("slice length checked"));
