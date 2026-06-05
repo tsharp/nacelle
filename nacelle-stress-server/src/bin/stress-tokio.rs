@@ -171,6 +171,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+    if n_server_threads == 1 {
+        let server_task = tokio::spawn(run_server(first_listener, server, shutdown_rx));
+        tokio::signal::ctrl_c().await?;
+        eprintln!("\nshutting down...");
+        let _ = shutdown_tx.send(true);
+        server_task.await??;
+        return Ok(());
+    }
+
     let mut server_tasks = Vec::with_capacity(n_server_threads);
     server_tasks.push(spawn_server_thread(
         first_listener,
@@ -189,7 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     tokio::signal::ctrl_c().await?;
-    eprintln!("\nshutting down…");
+    eprintln!("\nshutting down...");
     let _ = shutdown_tx.send(true);
     for task in server_tasks {
         task.join()
