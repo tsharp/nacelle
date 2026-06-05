@@ -44,15 +44,14 @@ use crate::server::NacelleServer;
 
 /// Listen on `addr` and serve each accepted TCP connection in its own task.
 #[cfg(feature = "raw_tcp")]
-pub async fn serve_tcp<Svc, Req, P, H>(
-    server: Arc<NacelleServer<Svc, Req, P, H>>,
+pub async fn serve_tcp<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
     addr: SocketAddr,
 ) -> Result<(), NacelleError>
 where
-    Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
-    H: Handler<Svc>,
+    H: Handler,
 {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     loop {

@@ -1,10 +1,6 @@
-use std::sync::Arc;
-
 use bytes::BytesMut;
 use http::StatusCode;
 use nacelle::{HyperServer, NacelleError, NacelleRequest, NacelleResponse, handler_fn};
-
-struct EchoService;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), NacelleError> {
@@ -14,18 +10,13 @@ async fn main() -> Result<(), NacelleError> {
         .parse()
         .map_err(NacelleError::protocol)?;
 
-    let server = HyperServer::new(
-        EchoService,
-        handler_fn(
-            |_svc: Arc<EchoService>, mut request: NacelleRequest| async move {
-                let mut echoed = BytesMut::new();
-                while let Some(chunk) = request.body.next_chunk().await {
-                    echoed.extend_from_slice(&chunk?);
-                }
-                Ok(NacelleResponse::http_bytes(StatusCode::OK, echoed.freeze()))
-            },
-        ),
-    );
+    let server = HyperServer::new(handler_fn(|mut request: NacelleRequest| async move {
+        let mut echoed = BytesMut::new();
+        while let Some(chunk) = request.body.next_chunk().await {
+            echoed.extend_from_slice(&chunk?);
+        }
+        Ok(NacelleResponse::http_bytes(StatusCode::OK, echoed.freeze()))
+    }));
 
     println!("nacelle HTTP echo server listening on {addr}");
     server.serve(addr).await

@@ -19,11 +19,11 @@ pub mod tower;
 #[cfg(feature = "reference_protocol")]
 pub mod util;
 
-pub use config::NacelleConfig;
+pub use config::{NacelleConfig, RequestBodyMode};
 #[cfg(feature = "raw_tcp")]
 pub use connection::serve_connection;
 pub use error::{BoxError, NacelleError};
-pub use handler::{BoxedHandler, Handler, HandlerFn, handler_fn, handler_from_trait};
+pub use handler::{Handler, HandlerFn, handler_fn};
 #[cfg(feature = "http")]
 pub use http_server::HyperServer;
 #[cfg(feature = "raw_tcp")]

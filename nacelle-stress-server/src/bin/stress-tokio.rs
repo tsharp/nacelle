@@ -3,13 +3,16 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[path = "../shared.rs"]
 mod shared;
-use shared::{StressService, build_server, configure_allocator, parse_args};
+use shared::{build_server, configure_allocator, parse_args};
 
 use std::net::SocketAddr;
+use std::thread;
 
 use nacelle::{FrameRequest, Handler, LengthDelimitedProtocol, NacelleError, RawTcpServer};
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::watch;
+
+const SOCKET_BUFFER_BYTES: u32 = 4 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Platform-specific low-latency socket helpers
@@ -57,6 +60,8 @@ fn new_raw_socket(addr: &SocketAddr) -> Result<TcpSocket, std::io::Error> {
     } else {
         TcpSocket::new_v6()?
     };
+    socket.set_recv_buffer_size(SOCKET_BUFFER_BYTES)?;
+    socket.set_send_buffer_size(SOCKET_BUFFER_BYTES)?;
     #[cfg(windows)]
     {
         use std::os::windows::io::AsRawSocket;
@@ -88,11 +93,11 @@ fn make_server_socket(
 
 async fn run_server<H>(
     listener: TcpListener,
-    server: RawTcpServer<StressService, FrameRequest, LengthDelimitedProtocol, H>,
+    server: RawTcpServer<FrameRequest, LengthDelimitedProtocol, H>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), NacelleError>
 where
-    H: Handler<StressService>,
+    H: Handler,
 {
     loop {
         tokio::select! {
@@ -117,6 +122,23 @@ where
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+
+fn spawn_server_thread<H>(
+    listener: TcpListener,
+    server: RawTcpServer<FrameRequest, LengthDelimitedProtocol, H>,
+    shutdown: watch::Receiver<bool>,
+) -> thread::JoinHandle<Result<(), NacelleError>>
+where
+    H: Handler,
+{
+    thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(NacelleError::from)?;
+        runtime.block_on(run_server(listener, server, shutdown))
+    })
+}
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -150,27 +172,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let mut server_tasks = Vec::with_capacity(n_server_threads);
-    server_tasks.push(tokio::spawn(run_server(
+    server_tasks.push(spawn_server_thread(
         first_listener,
         server.clone(),
         shutdown_rx.clone(),
-    )));
+    ));
     for _ in 1..n_server_threads {
         let socket = make_server_socket(&listen_addr, true)?;
         socket.bind(listen_addr)?;
         let listener = socket.listen(1024)?;
-        server_tasks.push(tokio::spawn(run_server(
+        server_tasks.push(spawn_server_thread(
             listener,
             server.clone(),
             shutdown_rx.clone(),
-        )));
+        ));
     }
 
     tokio::signal::ctrl_c().await?;
     eprintln!("\nshutting down…");
     let _ = shutdown_tx.send(true);
     for task in server_tasks {
-        task.await??;
+        task.join()
+            .map_err(|_| "server thread panicked")?
+            .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(error) })?;
     }
 
     Ok(())

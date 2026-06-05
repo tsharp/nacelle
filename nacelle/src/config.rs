@@ -1,3 +1,9 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestBodyMode {
+    Buffered,
+    Streaming,
+}
+
 #[derive(Debug, Clone)]
 pub struct NacelleConfig {
     pub read_buffer_capacity: usize,
@@ -5,6 +11,7 @@ pub struct NacelleConfig {
     pub max_frame_len: usize,
     pub request_body_chunk_size: usize,
     pub request_body_channel_capacity: usize,
+    pub request_body_mode: RequestBodyMode,
 }
 
 impl Default for NacelleConfig {
@@ -21,6 +28,7 @@ impl Default for NacelleConfig {
             // number of send(2) syscalls for large streaming responses.
             request_body_chunk_size: 64 * 1024,
             request_body_channel_capacity: 4,
+            request_body_mode: RequestBodyMode::Buffered,
         }
     }
 }
@@ -48,6 +56,11 @@ impl NacelleConfig {
 
     pub fn with_request_body_channel_capacity(mut self, capacity: usize) -> Self {
         self.request_body_channel_capacity = capacity.max(1);
+        self
+    }
+
+    pub fn with_request_body_mode(mut self, mode: RequestBodyMode) -> Self {
+        self.request_body_mode = mode;
         self
     }
 }

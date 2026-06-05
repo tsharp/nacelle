@@ -3,7 +3,6 @@
 use std::net::SocketAddr;
 use std::os::raw::c_long;
 use std::str::FromStr;
-use std::sync::Arc;
 
 use bytes::Bytes;
 use nacelle::{
@@ -42,11 +41,6 @@ impl Default for ServerConfig {
     }
 }
 
-#[derive(Debug)]
-pub struct StressService {
-    pub response_payload: Bytes,
-}
-
 /// mimalloc v2 option constants not yet exposed by `libmimalloc-sys`.
 /// Values match the `mi_option_e` enum in mimalloc v2 `mimalloc/types.h`.
 /// These are stable within v2 and `libmimalloc-sys` always compiles v2 unless
@@ -75,14 +69,9 @@ pub fn configure_allocator(low_memory: bool) {
 
 pub fn build_server(
     config: &ServerConfig,
-) -> Result<
-    RawTcpServer<StressService, FrameRequest, LengthDelimitedProtocol, impl Handler<StressService>>,
-    NacelleError,
-> {
-    RawTcpServer::<StressService, FrameRequest, ()>::builder()
-        .service(StressService {
-            response_payload: Bytes::from(vec![0x5A; config.response_bytes]),
-        })
+) -> Result<RawTcpServer<FrameRequest, LengthDelimitedProtocol, impl Handler>, NacelleError> {
+    let response_payload = Bytes::from(vec![0x5A; config.response_bytes]);
+    RawTcpServer::<FrameRequest, ()>::builder()
         .protocol(LengthDelimitedProtocol)
         .config(
             NacelleConfig::default()
@@ -91,8 +80,9 @@ pub fn build_server(
                 .with_request_body_chunk_size(config.request_body_chunk_size)
                 .with_request_body_channel_capacity(config.request_body_channel_capacity),
         )
-        .handler(handler_fn(
-            |svc: Arc<StressService>, mut request: NacelleRequest| async move {
+        .handler(handler_fn(move |mut request: NacelleRequest| {
+            let response_payload = response_payload.clone();
+            async move {
                 let opcode = request.raw_tcp_opcode().unwrap_or_default();
                 while let Some(chunk) = request.body.next_chunk().await {
                     let _ = chunk?;
@@ -103,9 +93,9 @@ pub fn build_server(
                         opcode
                     ))));
                 }
-                Ok(NacelleResponse::raw_tcp_bytes(svc.response_payload.clone()))
-            },
-        ))
+                Ok(NacelleResponse::raw_tcp_bytes(response_payload))
+            }
+        }))
         .build()
 }
 

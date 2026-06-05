@@ -4,7 +4,7 @@ use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-use crate::config::NacelleConfig;
+use crate::config::{NacelleConfig, RequestBodyMode};
 use crate::error::NacelleError;
 use crate::handler::Handler;
 use crate::protocol::{DecodedRequest, Protocol};
@@ -12,19 +12,17 @@ use crate::request::{NacelleBody, NacelleRequest, NacelleRequestMeta, RequestMet
 use crate::response::{NacelleResponse, NacelleResponseMeta};
 
 /// Drive one raw TCP framed connection and coalesce completed responses into writes.
-pub async fn serve_connection<Svc, Req, P, H, R, W>(
+pub async fn serve_connection<Req, P, H, R, W>(
     mut reader: R,
     mut writer: W,
-    service: Arc<Svc>,
     protocol: Arc<P>,
     handler: H,
     config: NacelleConfig,
 ) -> Result<(), NacelleError>
 where
-    Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
-    H: Handler<Svc>,
+    H: Handler,
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
@@ -59,8 +57,7 @@ where
                     &mut reader,
                     &mut read_buf,
                     &mut write_buf,
-                    service.clone(),
-                    protocol.clone(),
+                    protocol.as_ref(),
                     &handler,
                     decoded,
                     error_context,
@@ -82,22 +79,20 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_request<Svc, Req, P, H, R>(
+async fn run_request<Req, P, H, R>(
     reader: &mut R,
     read_buf: &mut BytesMut,
     write_buf: &mut BytesMut,
-    service: Arc<Svc>,
-    protocol: Arc<P>,
+    protocol: &P,
     handler: &H,
     decoded: DecodedRequest<Req>,
     error_context: P::ErrorContext,
     config: &NacelleConfig,
 ) -> Result<(), NacelleError>
 where
-    Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
-    H: Handler<Svc>,
+    H: Handler,
     R: AsyncRead + Unpin + Send,
 {
     let request = decoded.request;
@@ -105,13 +100,16 @@ where
     let outcome = if decoded.body_len <= read_buf.len() {
         let body =
             buffered_request_body(read_buf, decoded.body_len, config.request_body_chunk_size);
-        execute_handler(handler, service, request, decoded.body_len, body).await
+        execute_handler(handler, request, decoded.body_len, body).await
+    } else if config.request_body_mode == RequestBodyMode::Buffered {
+        let body = read_buffered_request_body(reader, read_buf, decoded.body_len).await?;
+        execute_handler(handler, request, decoded.body_len, body).await
     } else {
         let (body_tx, body_rx) = mpsc::channel(config.request_body_channel_capacity);
         let body = NacelleBody::new(body_rx, decoded.body_len);
         let h = handler.clone();
         let handler_task = crate::runtime::spawn(async move {
-            execute_handler(&h, service, request, decoded.body_len, body).await
+            execute_handler(&h, request, decoded.body_len, body).await
         });
 
         let pump_result =
@@ -140,23 +138,49 @@ where
     Ok(())
 }
 
-async fn execute_handler<Svc, Req, H>(
+async fn read_buffered_request_body<R>(
+    reader: &mut R,
+    read_buf: &mut BytesMut,
+    body_len: usize,
+) -> Result<NacelleBody, NacelleError>
+where
+    R: AsyncRead + Unpin,
+{
+    if body_len == 0 {
+        return Ok(NacelleBody::empty());
+    }
+
+    let mut body = BytesMut::with_capacity(body_len);
+    if !read_buf.is_empty() {
+        let take = body_len.min(read_buf.len());
+        body.extend_from_slice(&read_buf.split_to(take));
+    }
+
+    while body.len() < body_len {
+        let bytes_read = reader.read_buf(&mut body).await?;
+        if bytes_read == 0 {
+            return Err(NacelleError::UnexpectedEof);
+        }
+    }
+
+    Ok(NacelleBody::from_single_chunk(body.freeze(), body_len))
+}
+
+async fn execute_handler<Req, H>(
     handler: &H,
-    service: Arc<Svc>,
     request: Req,
     body_len: usize,
     body: NacelleBody,
 ) -> Result<NacelleResponse, NacelleError>
 where
-    Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
-    H: Handler<Svc>,
+    H: Handler,
 {
     let request = NacelleRequest {
         meta: NacelleRequestMeta::RawTcp(request.raw_tcp_meta(body_len)),
         body,
     };
-    handler.call(service, request).await
+    handler.call(request).await
 }
 
 async fn pump_request_body<R>(
@@ -229,9 +253,9 @@ fn buffered_request_body(
 }
 
 async fn encode_response_body<Req, P>(
-    protocol: Arc<P>,
+    protocol: &P,
     mut context: P::ResponseContext,
-    mut response: NacelleResponse,
+    response: NacelleResponse,
     write_buf: &mut BytesMut,
 ) -> Result<(), NacelleError>
 where
@@ -250,8 +274,21 @@ where
         }
     }
 
+    let body = response.body;
+    let mut body = match body.try_into_single_chunk_or_empty() {
+        Ok(Some(chunk)) => {
+            protocol.encode_response_terminal_chunk(&mut context, chunk, write_buf)?;
+            return Ok(());
+        }
+        Ok(None) => {
+            protocol.encode_response_end(&mut context, write_buf)?;
+            return Ok(());
+        }
+        Err(body) => body,
+    };
+
     let mut pending_chunk = None;
-    while let Some(chunk) = response.body.next_chunk().await {
+    while let Some(chunk) = body.next_chunk().await {
         let chunk = chunk?;
         if chunk.is_empty() {
             continue;
@@ -272,7 +309,7 @@ where
 
 fn write_error<Req, P>(
     write_buf: &mut BytesMut,
-    protocol: Arc<P>,
+    protocol: &P,
     context: Option<P::ErrorContext>,
     error: NacelleError,
     buffer_capacity: usize,
