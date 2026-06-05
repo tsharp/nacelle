@@ -347,8 +347,7 @@ pub fn build_server(
                             return Err(error);
                         }
                     };
-                    request_body_bytes =
-                        request_body_bytes.saturating_add(chunk.len() as u64);
+                    request_body_bytes = request_body_bytes.saturating_add(chunk.len() as u64);
                 }
                 if opcode != STRESS_OPCODE {
                     request_stats.record_failed(request_body_bytes);
@@ -357,10 +356,7 @@ pub fn build_server(
                         opcode
                     ))));
                 }
-                request_stats.record_completed(
-                    request_body_bytes,
-                    response_payload.len() as u64,
-                );
+                request_stats.record_completed(request_body_bytes, response_payload.len() as u64);
                 Ok(NacelleResponse::raw_tcp_bytes(response_payload))
             }
         }))

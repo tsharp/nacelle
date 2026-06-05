@@ -3,13 +3,15 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[path = "../shared.rs"]
 mod shared;
-use shared::{build_server, configure_allocator, parse_args, print_config};
+use shared::{
+    StressServerStats, StressServerStatsSnapshot, build_server, configure_allocator, parse_args,
+    print_config,
+};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use nacelle::{FrameRequest, Handler, LengthDelimitedProtocol, NacelleError, RawTcpServer};
 use tokio::net::{TcpListener, TcpSocket};
@@ -99,7 +101,7 @@ async fn run_server<H>(
     listener: TcpListener,
     server: RawTcpServer<FrameRequest, LengthDelimitedProtocol, H>,
     mut shutdown: watch::Receiver<bool>,
-    stats: Arc<ServerStats>,
+    stats: Arc<StressServerStats>,
 ) -> Result<(), NacelleError>
 where
     H: Handler,
@@ -136,7 +138,7 @@ fn spawn_server_thread<H>(
     listener: TcpListener,
     server: RawTcpServer<FrameRequest, LengthDelimitedProtocol, H>,
     shutdown: watch::Receiver<bool>,
-    stats: Arc<ServerStats>,
+    stats: Arc<StressServerStats>,
 ) -> thread::JoinHandle<Result<(), NacelleError>>
 where
     H: Handler,
@@ -154,68 +156,12 @@ where
 // Stats
 // ---------------------------------------------------------------------------
 
-#[derive(Debug)]
-struct ServerStats {
-    started_at: Instant,
-    accepted_connections: AtomicU64,
-    active_connections: AtomicU64,
-    completed_connections: AtomicU64,
-    failed_connections: AtomicU64,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ServerStatsSnapshot {
-    uptime: Duration,
-    accepted_connections: u64,
-    active_connections: u64,
-    completed_connections: u64,
-    failed_connections: u64,
-}
-
-impl ServerStats {
-    fn new() -> Self {
-        Self {
-            started_at: Instant::now(),
-            accepted_connections: AtomicU64::new(0),
-            active_connections: AtomicU64::new(0),
-            completed_connections: AtomicU64::new(0),
-            failed_connections: AtomicU64::new(0),
-        }
-    }
-
-    fn record_accepted_connection(&self) {
-        self.accepted_connections.fetch_add(1, Ordering::Relaxed);
-        self.active_connections.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn record_finished_connection(&self, failed: bool) {
-        self.completed_connections.fetch_add(1, Ordering::Relaxed);
-        if failed {
-            self.failed_connections.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    fn record_inactive_connection(&self) {
-        self.active_connections.fetch_sub(1, Ordering::Relaxed);
-    }
-
-    fn snapshot(&self) -> ServerStatsSnapshot {
-        ServerStatsSnapshot {
-            uptime: self.started_at.elapsed(),
-            accepted_connections: self.accepted_connections.load(Ordering::Relaxed),
-            active_connections: self.active_connections.load(Ordering::Relaxed),
-            completed_connections: self.completed_connections.load(Ordering::Relaxed),
-            failed_connections: self.failed_connections.load(Ordering::Relaxed),
-        }
-    }
-}
-
 struct ActiveConnection {
-    stats: Arc<ServerStats>,
+    stats: Arc<StressServerStats>,
 }
 
 impl ActiveConnection {
-    fn new(stats: Arc<ServerStats>) -> Self {
+    fn new(stats: Arc<StressServerStats>) -> Self {
         Self { stats }
     }
 
@@ -230,7 +176,7 @@ impl Drop for ActiveConnection {
     }
 }
 
-async fn print_periodic_stats(stats: Arc<ServerStats>, mut shutdown: watch::Receiver<bool>) {
+async fn print_periodic_stats(stats: Arc<StressServerStats>, mut shutdown: watch::Receiver<bool>) {
     let mut interval = tokio::time::interval(Duration::from_secs(5));
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     interval.tick().await;
@@ -254,10 +200,10 @@ async fn print_periodic_stats(stats: Arc<ServerStats>, mut shutdown: watch::Rece
 
 fn print_server_stats(
     kind: &str,
-    snapshot: ServerStatsSnapshot,
-    previous: Option<ServerStatsSnapshot>,
+    snapshot: StressServerStatsSnapshot,
+    previous: Option<StressServerStatsSnapshot>,
 ) {
-    let completed_per_sec = previous
+    let completed_connections_per_sec = previous
         .map(|previous| {
             let elapsed = snapshot
                 .uptime
@@ -271,6 +217,55 @@ fn print_server_stats(
         })
         .unwrap_or_else(|| {
             snapshot.completed_connections as f64 / snapshot.uptime.as_secs_f64().max(f64::EPSILON)
+        });
+    let completed_requests_per_sec = previous
+        .map(|previous| {
+            let elapsed = snapshot
+                .uptime
+                .saturating_sub(previous.uptime)
+                .as_secs_f64()
+                .max(f64::EPSILON);
+            (snapshot
+                .completed_requests
+                .saturating_sub(previous.completed_requests)) as f64
+                / elapsed
+        })
+        .unwrap_or_else(|| {
+            snapshot.completed_requests as f64 / snapshot.uptime.as_secs_f64().max(f64::EPSILON)
+        });
+    let request_mib_per_sec = previous
+        .map(|previous| {
+            let elapsed = snapshot
+                .uptime
+                .saturating_sub(previous.uptime)
+                .as_secs_f64()
+                .max(f64::EPSILON);
+            bytes_to_mib(
+                snapshot
+                    .request_body_bytes
+                    .saturating_sub(previous.request_body_bytes),
+            ) / elapsed
+        })
+        .unwrap_or_else(|| {
+            bytes_to_mib(snapshot.request_body_bytes)
+                / snapshot.uptime.as_secs_f64().max(f64::EPSILON)
+        });
+    let response_mib_per_sec = previous
+        .map(|previous| {
+            let elapsed = snapshot
+                .uptime
+                .saturating_sub(previous.uptime)
+                .as_secs_f64()
+                .max(f64::EPSILON);
+            bytes_to_mib(
+                snapshot
+                    .response_body_bytes
+                    .saturating_sub(previous.response_body_bytes),
+            ) / elapsed
+        })
+        .unwrap_or_else(|| {
+            bytes_to_mib(snapshot.response_body_bytes)
+                / snapshot.uptime.as_secs_f64().max(f64::EPSILON)
         });
     let accepted_delta = previous
         .map(|previous| {
@@ -293,9 +288,23 @@ fn print_server_stats(
                 .saturating_sub(previous.failed_connections)
         })
         .unwrap_or(snapshot.failed_connections);
+    let completed_request_delta = previous
+        .map(|previous| {
+            snapshot
+                .completed_requests
+                .saturating_sub(previous.completed_requests)
+        })
+        .unwrap_or(snapshot.completed_requests);
+    let failed_request_delta = previous
+        .map(|previous| {
+            snapshot
+                .failed_requests
+                .saturating_sub(previous.failed_requests)
+        })
+        .unwrap_or(snapshot.failed_requests);
 
     println!(
-        "nacelle-stress-server stats kind={} uptime={:.1}s active_connections={} accepted_total={} accepted_delta={} completed_total={} completed_delta={} failed_total={} failed_delta={} completed_connections_per_sec={:.2}",
+        "nacelle-stress-server stats kind={} uptime={:.1}s active_connections={} accepted_connections_total={} accepted_connections_delta={} completed_connections_total={} completed_connections_delta={} failed_connections_total={} failed_connections_delta={} completed_connections_per_sec={:.2} active_requests={} completed_requests_total={} completed_requests_delta={} failed_requests_total={} failed_requests_delta={} completed_requests_per_sec={:.2} request_body_mib_per_sec={:.2} response_body_mib_per_sec={:.2}",
         kind,
         snapshot.uptime.as_secs_f64(),
         snapshot.active_connections,
@@ -305,8 +314,20 @@ fn print_server_stats(
         completed_delta,
         snapshot.failed_connections,
         failed_delta,
-        completed_per_sec,
+        completed_connections_per_sec,
+        snapshot.active_requests,
+        snapshot.completed_requests,
+        completed_request_delta,
+        snapshot.failed_requests,
+        failed_request_delta,
+        completed_requests_per_sec,
+        request_mib_per_sec,
+        response_mib_per_sec,
     );
+}
+
+fn bytes_to_mib(bytes: u64) -> f64 {
+    bytes as f64 / 1024.0 / 1024.0
 }
 
 async fn wait_for_shutdown_signal() -> Result<(), std::io::Error> {
@@ -330,7 +351,8 @@ async fn wait_for_shutdown_signal() -> Result<(), std::io::Error> {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = parse_args(std::env::args().skip(1), "tokio")?;
     configure_allocator(config.low_memory);
-    let server = build_server(&config)?;
+    let stats = Arc::new(StressServerStats::new());
+    let server = build_server(&config, stats.clone())?;
 
     #[cfg(not(target_os = "linux"))]
     let n_server_threads = {
@@ -358,7 +380,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let stats = Arc::new(ServerStats::new());
     let stats_task = tokio::spawn(print_periodic_stats(stats.clone(), shutdown_rx.clone()));
 
     if n_server_threads == 1 {
