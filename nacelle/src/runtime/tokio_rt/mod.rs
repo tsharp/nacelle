@@ -1,4 +1,4 @@
-//! Tokio runtime backend.
+//! Tokio runtime helpers.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -6,8 +6,7 @@ use std::task::{Context, Poll};
 
 pub use tokio::task::JoinError;
 
-/// A join handle whose output is always `Result<T, JoinError>`, matching the
-/// interface of every other runtime backend in this crate.
+/// A join handle whose output is always `Result<T, JoinError>`.
 pub struct JoinHandle<T>(tokio::task::JoinHandle<T>);
 
 impl<T> Future for JoinHandle<T> {
@@ -18,7 +17,7 @@ impl<T> Future for JoinHandle<T> {
     }
 }
 
-/// Spawn a `Send + 'static` future onto the tokio multi-thread scheduler.
+/// Spawn a `Send + 'static` future onto Tokio.
 pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
 where
     F: Future + Send + 'static,
@@ -27,25 +26,22 @@ where
     JoinHandle(tokio::spawn(future))
 }
 
-// ── TCP accept loop ───────────────────────────────────────────────────────────
-
-#[cfg(feature = "tcp")]
+#[cfg(feature = "raw_tcp")]
 use std::net::SocketAddr;
-#[cfg(feature = "tcp")]
+#[cfg(feature = "raw_tcp")]
 use std::sync::Arc;
 
-#[cfg(feature = "tcp")]
+#[cfg(feature = "raw_tcp")]
 use crate::error::NacelleError;
-#[cfg(feature = "tcp")]
+#[cfg(feature = "raw_tcp")]
 use crate::protocol::Protocol;
-#[cfg(feature = "tcp")]
+#[cfg(feature = "raw_tcp")]
 use crate::request::RequestMetadata;
-#[cfg(feature = "tcp")]
+#[cfg(feature = "raw_tcp")]
 use crate::server::NacelleServer;
 
-/// Listen on `addr` and serve each accepted TCP connection using the tokio
-/// work-stealing scheduler.  Each connection is driven in its own task.
-#[cfg(feature = "tcp")]
+/// Listen on `addr` and serve each accepted TCP connection in its own task.
+#[cfg(feature = "raw_tcp")]
 pub async fn serve_tcp<Svc, Req, P>(
     server: Arc<NacelleServer<Svc, Req, P>>,
     addr: SocketAddr,

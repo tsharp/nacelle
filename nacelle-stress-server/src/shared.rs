@@ -1,4 +1,4 @@
-// Shared service/config logic used by all runtime-specific entry points.
+// Shared service/config logic for the Tokio stress server.
 
 use std::net::SocketAddr;
 use std::os::raw::c_long;
@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use nacelle::{
-    FrameRequest, LengthDelimitedProtocol, NacelleConfig, NacelleError, NacelleServer, RequestBody,
-    ResponseWriter, handler_fn,
+    FrameRequest, LengthDelimitedProtocol, NacelleConfig, NacelleError, NacelleRequestMeta,
+    NacelleResponse, RawTcpServer, handler_fn,
 };
 
 pub const STRESS_OPCODE: u64 = 1;
@@ -18,7 +18,6 @@ pub struct ServerConfig {
     pub bind: SocketAddr,
     pub server_threads: usize,
     pub response_bytes: usize,
-    pub max_concurrent_requests_per_connection: usize,
     pub read_buffer_capacity: usize,
     pub response_buffer_capacity: usize,
     pub request_body_chunk_size: usize,
@@ -34,7 +33,6 @@ impl Default for ServerConfig {
                 .map(|n| n.get())
                 .unwrap_or(1),
             response_bytes: 64,
-            max_concurrent_requests_per_connection: 8,
             read_buffer_capacity: 64 * 1024,
             response_buffer_capacity: 16 * 1024,
             request_body_chunk_size: 16 * 1024,
@@ -77,8 +75,8 @@ pub fn configure_allocator(low_memory: bool) {
 
 pub fn build_server(
     config: &ServerConfig,
-) -> Result<NacelleServer<StressService, FrameRequest, LengthDelimitedProtocol>, NacelleError> {
-    NacelleServer::<StressService, FrameRequest, ()>::builder()
+) -> Result<RawTcpServer<StressService, FrameRequest, LengthDelimitedProtocol>, NacelleError> {
+    RawTcpServer::<StressService, FrameRequest, ()>::builder()
         .service(StressService {
             response_payload: Bytes::from(vec![0x5A; config.response_bytes]),
         })
@@ -88,28 +86,25 @@ pub fn build_server(
                 .with_read_buffer_capacity(config.read_buffer_capacity)
                 .with_response_buffer_capacity(config.response_buffer_capacity)
                 .with_request_body_chunk_size(config.request_body_chunk_size)
-                .with_request_body_channel_capacity(config.request_body_channel_capacity)
-                .with_max_concurrent_requests_per_connection(
-                    config.max_concurrent_requests_per_connection,
-                ),
+                .with_request_body_channel_capacity(config.request_body_channel_capacity),
         )
-        .register_handler(
-            STRESS_OPCODE,
-            handler_fn(
-                |svc: Arc<StressService>,
-                 _req: FrameRequest,
-                 mut body: RequestBody,
-                 response: ResponseWriter| async move {
-                    while let Some(chunk) = body.next_chunk().await {
-                        let _ = chunk?;
-                    }
-                    if !svc.response_payload.is_empty() {
-                        response.write_bytes(svc.response_payload.clone())?;
-                    }
-                    Ok(())
-                },
-            ),
-        )
+        .handler(handler_fn(
+            |svc: Arc<StressService>, mut request| async move {
+                let opcode = match &request.meta {
+                    NacelleRequestMeta::RawTcp(meta) => meta.opcode,
+                };
+                while let Some(chunk) = request.body.next_chunk().await {
+                    let _ = chunk?;
+                }
+                if opcode != STRESS_OPCODE {
+                    return Err(NacelleError::handler(std::io::Error::other(format!(
+                        "unknown opcode {}",
+                        opcode
+                    ))));
+                }
+                Ok(NacelleResponse::raw_tcp_bytes(svc.response_payload.clone()))
+            },
+        ))
         .build()
 }
 
@@ -134,9 +129,6 @@ pub fn parse_args(
             }
             "--response-bytes" => {
                 config.response_bytes = parse_value(&arg, args.next())?;
-            }
-            "--max-concurrent-requests-per-connection" => {
-                config.max_concurrent_requests_per_connection = parse_value(&arg, args.next())?;
             }
             "--read-buffer" => {
                 config.read_buffer_capacity = parse_value(&arg, args.next())?;
@@ -192,8 +184,6 @@ pub fn print_help(runtime: &str) {
            --bind <addr>                             Listen address (default 127.0.0.1:7878)\n\
            --server-threads <count>                  Threads (default: logical CPUs)\n\
            --response-bytes <bytes>                  Response payload bytes per request (default 64)\n\
-           --max-concurrent-requests-per-connection <count>\n\
-                                                     Server-side overlap per connection (default 8)\n\
            --read-buffer <bytes>                     Read buffer capacity (default 65536)\n\
            --response-buffer <bytes>                 Response encode buffer capacity (default 16384)\n\
            --request-body-chunk-size <bytes>         Request body chunk size (default 16384)\n\

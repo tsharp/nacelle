@@ -1,75 +1,81 @@
 # Nacelle
 
-**Nacelle is an experimental high-performance Rust runtime for building custom binary protocol servers with framed streaming request processing, opcode-based handler dispatch, and minimal head decode.**
+**Nacelle is an experimental Tokio-based Rust library for streaming application handlers across multiple transports.**
 
-## Example
+The current transports are:
+
+- `raw_tcp` (default) — custom length-delimited frames over TCP
+- `http` — Hyper HTTP/1 server transport
+
+Both transports call the same app-facing handler shape:
+
+```rust
+async fn handle(request: NacelleRequest) -> Result<NacelleResponse, NacelleError>
+```
+
+`NacelleBody` is streaming, so handlers can consume request chunks and return response chunks without forcing full buffering.
+
+## Raw TCP Example
 
 ```rust
 use std::sync::Arc;
+
 use nacelle::{
-    NacelleServer, NacelleConfig, handler_fn,
-    RequestBody, ResponseWriter, FrameRequest,
-    LengthDelimitedProtocol, NacelleError,
+    FrameRequest, LengthDelimitedProtocol, NacelleError, NacelleRequestMeta,
+    NacelleResponse, RawTcpServer, handler_fn,
 };
-use bytes::Bytes;
 
-// Service state shared across all requests
-struct MyService {
-    response_data: Bytes,
-}
+struct MyService;
 
-// Build server with handlers
-let server = NacelleServer::<MyService, FrameRequest, _>::builder()
-    .service(MyService {
-        response_data: Bytes::from_static(b"Hello"),
-    })
+let server = RawTcpServer::<MyService, FrameRequest, ()>::builder()
+    .service(MyService)
     .protocol(LengthDelimitedProtocol)
-    .register_handler(
-        1, // opcode
-        handler_fn(|svc: Arc<MyService>, 
-                    _req: FrameRequest,
-                    mut body: RequestBody,
-                    response: ResponseWriter| async move {
-            // Consume request body
-            while let Some(chunk) = body.next_chunk().await {
+    .handler(handler_fn(|_svc: Arc<MyService>, mut request| async move {
+        let opcode = match &request.meta {
+            NacelleRequestMeta::RawTcp(meta) => meta.opcode,
+        };
+        if opcode != 1 {
+            while let Some(chunk) = request.body.next_chunk().await {
                 let _ = chunk?;
             }
-            // Write response
-            response.write_bytes(svc.response_data.clone())?;
-            Ok::<_, NacelleError>(())
-        }),
-    )
+            return Err(NacelleError::handler(std::io::Error::other(
+                format!("unknown opcode {opcode}"),
+            )));
+        }
+        Ok(NacelleResponse::raw_tcp(request.body))
+    }))
     .build()?;
 
-// Serve on TCP
 server.serve_tcp("127.0.0.1:8080".parse()?).await?;
 ```
-
-## Features
-
-- `tcp` (default) — TCP listener and transport
-- `runtime` (default) — Tokio runtime integration  
-- `metrics` — Metrics collection hooks
-- `tracing` — Distributed tracing support
-- `tls` — TLS via rustls
-- `auth` — Authentication primitives
-- `compression` — Compression support
 
 ## Building
 
 ```bash
 cargo build --release
 
-# Run stress benchmark
-cargo run --release --bin stress -- \
+# Raw TCP echo
+cargo run --example echo -- 127.0.0.1:8080
+
+# HTTP echo
+cargo run --no-default-features --features http --example http_echo -- 127.0.0.1:8080
+```
+
+## Stress Harness
+
+```bash
+cargo run --release --package nacelle-stress-server --bin tokio-server
+
+# In another shell:
+cargo run --release --package nacelle-stress-test -- \
   --connections 32 \
   --pipeline 16 \
   --duration-secs 15
 ```
 
-## Performance
+The raw TCP protocol contract is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-Built for high-throughput workloads. Includes Criterion benchmarks for frame encoding/decoding and handler dispatch.
+TLS, authentication, compression, metrics, and Tower integration are not implemented in this prototype.
 
 ## License
 

@@ -2,7 +2,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::error::NacelleError;
 use crate::protocol::{DecodedRequest, Protocol};
-use crate::request::RequestMetadata;
+use crate::request::{RawTcpRequestMeta, RequestMetadata};
 use crate::util::checked_u32_len;
 
 const HEADER_LEN: usize = 24;
@@ -22,6 +22,15 @@ pub struct FrameRequest {
 impl RequestMetadata for FrameRequest {
     fn opcode(&self) -> u64 {
         self.opcode
+    }
+
+    fn raw_tcp_meta(&self, _body_len: usize) -> RawTcpRequestMeta {
+        RawTcpRequestMeta {
+            request_id: Some(self.request_id),
+            opcode: self.opcode,
+            flags: self.flags,
+            body_len: self.body_len,
+        }
     }
 }
 

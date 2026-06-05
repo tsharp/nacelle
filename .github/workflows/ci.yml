@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Clippy HTTP
+        run: cargo clippy -p nacelle --no-default-features --features http --all-targets -- -D warnings
+      - name: Clippy Dual
+        run: cargo clippy -p nacelle --features raw_tcp,http --all-targets -- -D warnings
+      - name: Test Raw TCP
+        run: cargo test --workspace --all-targets
+      - name: Test HTTP
+        run: cargo test -p nacelle --no-default-features --features http --all-targets
+      - name: Test Dual
+        run: cargo test -p nacelle --features raw_tcp,http --all-targets
