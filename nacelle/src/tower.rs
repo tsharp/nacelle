@@ -1,11 +1,11 @@
 use tower::ServiceExt;
 
 use crate::error::{BoxError, NacelleError};
-use crate::handler::{BoxedHandler, handler_fn};
+use crate::handler::{Handler, handler_fn};
 use crate::request::NacelleRequest;
 use crate::response::NacelleResponse;
 
-pub fn handler_from_tower_service<State, S, E>(service: S) -> BoxedHandler<State>
+pub fn handler_from_tower_service<State, S, E>(service: S) -> impl Handler<State>
 where
     State: Send + Sync + 'static,
     S: tower::Service<NacelleRequest, Response = NacelleResponse, Error = E>

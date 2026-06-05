@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use nacelle::{
-    FrameRequest, LengthDelimitedProtocol, NacelleError, NacelleResponse, RawTcpServer, handler_fn,
+    FrameRequest, LengthDelimitedProtocol, NacelleError, NacelleRequest, NacelleResponse,
+    RawTcpServer, handler_fn,
 };
 
 struct EchoService;
@@ -19,7 +20,7 @@ async fn main() -> Result<(), NacelleError> {
         .service(EchoService)
         .protocol(LengthDelimitedProtocol)
         .handler(handler_fn(
-            |_svc: Arc<EchoService>, mut request| async move {
+            |_svc: Arc<EchoService>, mut request: NacelleRequest| async move {
                 let opcode = request.raw_tcp_opcode().unwrap_or_default();
                 let mut echoed = BytesMut::new();
                 while let Some(chunk) = request.body.next_chunk().await {

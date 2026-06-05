@@ -23,7 +23,7 @@ async fn handle(request: NacelleRequest) -> Result<NacelleResponse, NacelleError
 use std::sync::Arc;
 
 use nacelle::{
-    FrameRequest, LengthDelimitedProtocol, NacelleError, NacelleResponse,
+    FrameRequest, LengthDelimitedProtocol, NacelleError, NacelleRequest, NacelleResponse,
     RawTcpServer, handler_fn,
 };
 
@@ -32,7 +32,7 @@ struct MyService;
 let server = RawTcpServer::<MyService, FrameRequest, ()>::builder()
     .service(MyService)
     .protocol(LengthDelimitedProtocol)
-    .handler(handler_fn(|_svc: Arc<MyService>, mut request| async move {
+    .handler(handler_fn(|_svc: Arc<MyService>, mut request: NacelleRequest| async move {
         let opcode = request.raw_tcp_opcode().unwrap_or_default();
         if opcode != 1 {
             while let Some(chunk) = request.body.next_chunk().await {

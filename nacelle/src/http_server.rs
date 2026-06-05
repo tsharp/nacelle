@@ -14,18 +14,21 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 
 use crate::error::{BoxError, NacelleError};
-use crate::handler::BoxedHandler;
+use crate::handler::{BoxedHandler, Handler};
 use crate::request::{HttpRequestMeta, NacelleBody, NacelleRequest, NacelleRequestMeta};
 use crate::response::{NacelleResponse, NacelleResponseMeta};
 
 type HttpBody = BoxBody<Bytes, BoxError>;
 
-pub struct HyperServer<Svc> {
+pub struct HyperServer<Svc, H = BoxedHandler<Svc>> {
     service: Arc<Svc>,
-    handler: BoxedHandler<Svc>,
+    handler: H,
 }
 
-impl<Svc> Clone for HyperServer<Svc> {
+impl<Svc, H> Clone for HyperServer<Svc, H>
+where
+    H: Clone,
+{
     fn clone(&self) -> Self {
         Self {
             service: self.service.clone(),
@@ -34,11 +37,12 @@ impl<Svc> Clone for HyperServer<Svc> {
     }
 }
 
-impl<Svc> HyperServer<Svc>
+impl<Svc, H> HyperServer<Svc, H>
 where
     Svc: Send + Sync + 'static,
+    H: Handler<Svc>,
 {
-    pub fn new(service: Svc, handler: BoxedHandler<Svc>) -> Self {
+    pub fn new(service: Svc, handler: H) -> Self {
         Self {
             service: Arc::new(service),
             handler,
@@ -166,6 +170,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::handler::handler_fn;
+    use crate::request::NacelleRequest;
 
     use super::*;
 
@@ -177,7 +182,7 @@ mod tests {
         let addr = listener.local_addr().expect("listener should have addr");
         let server = HyperServer::new(
             (),
-            handler_fn(|_svc: Arc<()>, mut request| async move {
+            handler_fn(|_svc: Arc<()>, mut request: NacelleRequest| async move {
                 assert_eq!(
                     request.http_meta().expect("http metadata").uri.path(),
                     "/echo"
@@ -233,7 +238,7 @@ mod tests {
         let addr = listener.local_addr().expect("listener should have addr");
         let server = HyperServer::new(
             (),
-            handler_fn(|_svc: Arc<()>, _request| async move {
+            handler_fn(|_svc: Arc<()>, _request: NacelleRequest| async move {
                 Err(NacelleError::handler(std::io::Error::other("boom")))
             }),
         );

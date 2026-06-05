@@ -3,8 +3,8 @@ use std::sync::Arc;
 use bytes::BytesMut;
 use http::StatusCode;
 use nacelle::{
-    FrameRequest, HyperServer, LengthDelimitedProtocol, NacelleError, NacelleResponse,
-    RawTcpServer, handler_fn,
+    FrameRequest, HyperServer, LengthDelimitedProtocol, NacelleError, NacelleRequest,
+    NacelleResponse, RawTcpServer, handler_fn,
 };
 
 struct EchoService;
@@ -22,30 +22,32 @@ async fn main() -> Result<(), NacelleError> {
         .parse()
         .map_err(NacelleError::protocol)?;
 
-    let handler = handler_fn(|_svc: Arc<EchoService>, mut request| async move {
-        if let Some(opcode) = request.raw_tcp_opcode()
-            && opcode != 1
-        {
-            while let Some(chunk) = request.body.next_chunk().await {
-                let _ = chunk?;
+    let handler = handler_fn(
+        |_svc: Arc<EchoService>, mut request: NacelleRequest| async move {
+            if let Some(opcode) = request.raw_tcp_opcode()
+                && opcode != 1
+            {
+                while let Some(chunk) = request.body.next_chunk().await {
+                    let _ = chunk?;
+                }
+                return Err(NacelleError::handler(std::io::Error::other(format!(
+                    "unknown opcode {opcode}"
+                ))));
             }
-            return Err(NacelleError::handler(std::io::Error::other(format!(
-                "unknown opcode {opcode}"
-            ))));
-        }
 
-        let is_http = request.http_meta().is_some();
-        let mut echoed = BytesMut::new();
-        while let Some(chunk) = request.body.next_chunk().await {
-            echoed.extend_from_slice(&chunk?);
-        }
+            let is_http = request.http_meta().is_some();
+            let mut echoed = BytesMut::new();
+            while let Some(chunk) = request.body.next_chunk().await {
+                echoed.extend_from_slice(&chunk?);
+            }
 
-        if is_http {
-            Ok(NacelleResponse::http_bytes(StatusCode::OK, echoed.freeze()))
-        } else {
-            Ok(NacelleResponse::raw_tcp_bytes(echoed.freeze()))
-        }
-    });
+            if is_http {
+                Ok(NacelleResponse::http_bytes(StatusCode::OK, echoed.freeze()))
+            } else {
+                Ok(NacelleResponse::raw_tcp_bytes(echoed.freeze()))
+            }
+        },
+    );
 
     let raw_tcp_server = RawTcpServer::<EchoService, FrameRequest, ()>::builder()
         .service(EchoService)

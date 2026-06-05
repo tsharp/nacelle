@@ -23,7 +23,7 @@ pub use config::NacelleConfig;
 #[cfg(feature = "raw_tcp")]
 pub use connection::serve_connection;
 pub use error::{BoxError, NacelleError};
-pub use handler::{BoxedHandler, Handler, handler_fn, handler_from_trait};
+pub use handler::{BoxedHandler, Handler, HandlerFn, handler_fn, handler_from_trait};
 #[cfg(feature = "http")]
 pub use http_server::HyperServer;
 #[cfg(feature = "raw_tcp")]

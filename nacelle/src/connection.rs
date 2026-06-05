@@ -6,24 +6,25 @@ use tokio::sync::mpsc;
 
 use crate::config::NacelleConfig;
 use crate::error::NacelleError;
-use crate::handler::BoxedHandler;
+use crate::handler::Handler;
 use crate::protocol::{DecodedRequest, Protocol};
 use crate::request::{NacelleBody, NacelleRequest, NacelleRequestMeta, RequestMetadata};
 use crate::response::{NacelleResponse, NacelleResponseMeta};
 
 /// Drive one raw TCP framed connection and coalesce completed responses into writes.
-pub async fn serve_connection<Svc, Req, P, R, W>(
+pub async fn serve_connection<Svc, Req, P, H, R, W>(
     mut reader: R,
     mut writer: W,
     service: Arc<Svc>,
     protocol: Arc<P>,
-    handler: BoxedHandler<Svc>,
+    handler: H,
     config: NacelleConfig,
 ) -> Result<(), NacelleError>
 where
     Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler<Svc>,
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
@@ -81,13 +82,13 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn run_request<Svc, Req, P, R>(
+async fn run_request<Svc, Req, P, H, R>(
     reader: &mut R,
     read_buf: &mut BytesMut,
     write_buf: &mut BytesMut,
     service: Arc<Svc>,
     protocol: Arc<P>,
-    handler: &BoxedHandler<Svc>,
+    handler: &H,
     decoded: DecodedRequest<Req>,
     error_context: P::ErrorContext,
     config: &NacelleConfig,
@@ -96,6 +97,7 @@ where
     Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler<Svc>,
     R: AsyncRead + Unpin + Send,
 {
     let request = decoded.request;
@@ -138,8 +140,8 @@ where
     Ok(())
 }
 
-async fn execute_handler<Svc, Req>(
-    handler: &BoxedHandler<Svc>,
+async fn execute_handler<Svc, Req, H>(
+    handler: &H,
     service: Arc<Svc>,
     request: Req,
     body_len: usize,
@@ -148,6 +150,7 @@ async fn execute_handler<Svc, Req>(
 where
     Svc: Send + Sync + 'static,
     Req: RequestMetadata + Send + 'static,
+    H: Handler<Svc>,
 {
     let request = NacelleRequest {
         meta: NacelleRequestMeta::RawTcp(request.raw_tcp_meta(body_len)),

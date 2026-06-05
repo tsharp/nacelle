@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use nacelle::{
-    FrameRequest, LengthDelimitedProtocol, NacelleConfig, NacelleError, NacelleResponse,
-    RawTcpServer, handler_fn,
+    FrameRequest, Handler, LengthDelimitedProtocol, NacelleConfig, NacelleError, NacelleRequest,
+    NacelleResponse, RawTcpServer, handler_fn,
 };
 
 pub const STRESS_OPCODE: u64 = 1;
@@ -75,7 +75,10 @@ pub fn configure_allocator(low_memory: bool) {
 
 pub fn build_server(
     config: &ServerConfig,
-) -> Result<RawTcpServer<StressService, FrameRequest, LengthDelimitedProtocol>, NacelleError> {
+) -> Result<
+    RawTcpServer<StressService, FrameRequest, LengthDelimitedProtocol, impl Handler<StressService>>,
+    NacelleError,
+> {
     RawTcpServer::<StressService, FrameRequest, ()>::builder()
         .service(StressService {
             response_payload: Bytes::from(vec![0x5A; config.response_bytes]),
@@ -89,7 +92,7 @@ pub fn build_server(
                 .with_request_body_channel_capacity(config.request_body_channel_capacity),
         )
         .handler(handler_fn(
-            |svc: Arc<StressService>, mut request| async move {
+            |svc: Arc<StressService>, mut request: NacelleRequest| async move {
                 let opcode = request.raw_tcp_opcode().unwrap_or_default();
                 while let Some(chunk) = request.body.next_chunk().await {
                     let _ = chunk?;

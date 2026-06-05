@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::BytesMut;
 use http::StatusCode;
-use nacelle::{HyperServer, NacelleError, NacelleResponse, handler_fn};
+use nacelle::{HyperServer, NacelleError, NacelleRequest, NacelleResponse, handler_fn};
 
 struct EchoService;
 
@@ -16,13 +16,15 @@ async fn main() -> Result<(), NacelleError> {
 
     let server = HyperServer::new(
         EchoService,
-        handler_fn(|_svc: Arc<EchoService>, mut request| async move {
-            let mut echoed = BytesMut::new();
-            while let Some(chunk) = request.body.next_chunk().await {
-                echoed.extend_from_slice(&chunk?);
-            }
-            Ok(NacelleResponse::http_bytes(StatusCode::OK, echoed.freeze()))
-        }),
+        handler_fn(
+            |_svc: Arc<EchoService>, mut request: NacelleRequest| async move {
+                let mut echoed = BytesMut::new();
+                while let Some(chunk) = request.body.next_chunk().await {
+                    echoed.extend_from_slice(&chunk?);
+                }
+                Ok(NacelleResponse::http_bytes(StatusCode::OK, echoed.freeze()))
+            },
+        ),
     );
 
     println!("nacelle HTTP echo server listening on {addr}");

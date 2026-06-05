@@ -7,7 +7,7 @@ use shared::{StressService, build_server, configure_allocator, parse_args};
 
 use std::net::SocketAddr;
 
-use nacelle::{FrameRequest, LengthDelimitedProtocol, NacelleError, RawTcpServer};
+use nacelle::{FrameRequest, Handler, LengthDelimitedProtocol, NacelleError, RawTcpServer};
 use tokio::net::{TcpListener, TcpSocket};
 use tokio::sync::watch;
 
@@ -86,11 +86,14 @@ fn make_server_socket(
 // Service
 // ---------------------------------------------------------------------------
 
-async fn run_server(
+async fn run_server<H>(
     listener: TcpListener,
-    server: RawTcpServer<StressService, FrameRequest, LengthDelimitedProtocol>,
+    server: RawTcpServer<StressService, FrameRequest, LengthDelimitedProtocol, H>,
     mut shutdown: watch::Receiver<bool>,
-) -> Result<(), NacelleError> {
+) -> Result<(), NacelleError>
+where
+    H: Handler<StressService>,
+{
     loop {
         tokio::select! {
             changed = shutdown.changed() => {
