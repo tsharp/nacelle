@@ -14,6 +14,8 @@ pub mod response;
 pub mod runtime;
 #[cfg(feature = "raw_tcp")]
 pub mod server;
+#[cfg(feature = "tower")]
+pub mod tower;
 #[cfg(feature = "raw_tcp")]
 pub mod util;
 
@@ -40,3 +42,5 @@ pub use response::HttpResponseMeta;
 pub use response::{NacelleResponse, NacelleResponseMeta, RawTcpResponseMeta};
 #[cfg(feature = "raw_tcp")]
 pub use server::{NacelleServer, NacelleServerBuilder, RawTcpServer};
+#[cfg(feature = "tower")]
+pub use tower::handler_from_tower_service;

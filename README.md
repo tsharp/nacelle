@@ -6,6 +6,7 @@ The current transports are:
 
 - `raw_tcp` (default) — custom length-delimited frames over TCP
 - `http` — Hyper HTTP/1 server transport
+- `tower` — adapter for `tower::Service<NacelleRequest>`
 
 Both transports call the same app-facing handler shape:
 
@@ -59,6 +60,9 @@ cargo run --example echo -- 127.0.0.1:8080
 
 # HTTP echo
 cargo run --no-default-features --features http --example http_echo -- 127.0.0.1:8080
+
+# Raw TCP and HTTP with one shared handler
+cargo run --features raw_tcp,http --example dual_echo -- 127.0.0.1:8080 127.0.0.1:8081
 ```
 
 ## Stress Harness
@@ -75,7 +79,7 @@ cargo run --release --package nacelle-stress-test -- \
 
 The raw TCP protocol contract is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-TLS, authentication, compression, metrics, and Tower integration are not implemented in this prototype.
+TLS, authentication, compression, and metrics are not implemented in this prototype.
 
 ## License
 

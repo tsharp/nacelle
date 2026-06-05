@@ -221,8 +221,7 @@ mod tests {
         FRAME_FLAG_END, FRAME_FLAG_ERROR, FRAME_FLAG_START, FrameRequest, LengthDelimitedProtocol,
     };
     use crate::handler::handler_fn;
-    use crate::request::NacelleRequestMeta;
-    use crate::response::NacelleResponse;
+    use crate::response::{NacelleResponse, RawTcpResponseMeta};
 
     use super::*;
 
@@ -607,6 +606,55 @@ mod tests {
             .expect("server should complete");
     }
 
+    #[tokio::test]
+    async fn raw_tcp_response_meta_can_override_response_opcode() {
+        let protocol = LengthDelimitedProtocol;
+        let server = NacelleServer::<(), FrameRequest, ()>::builder()
+            .service(())
+            .protocol(protocol.clone())
+            .handler(handler_fn(|_svc: Arc<()>, _request| async move {
+                Ok(NacelleResponse::raw_tcp_with_meta(
+                    RawTcpResponseMeta {
+                        request_id: None,
+                        opcode: Some(77),
+                    },
+                    crate::request::NacelleBody::bytes(Bytes::from_static(b"override")),
+                ))
+            }))
+            .build()
+            .expect("server should build");
+
+        let (mut client, server_io) = tokio::io::duplex(256);
+        let server_task = tokio::spawn(async move { server.serve_io(server_io).await });
+        client
+            .write_all(
+                &protocol
+                    .encode_request_frame(42, 1, 0, b"")
+                    .expect("frame should encode"),
+            )
+            .await
+            .expect("request should write");
+        client
+            .shutdown()
+            .await
+            .expect("client shutdown should succeed");
+
+        let (request_id, opcode, flags, body) = read_frame(&mut client)
+            .await
+            .expect("response should decode");
+        assert_eq!(request_id, 42);
+        assert_eq!(opcode, 77);
+        assert_eq!(
+            flags & (FRAME_FLAG_START | FRAME_FLAG_END),
+            FRAME_FLAG_START | FRAME_FLAG_END
+        );
+        assert_eq!(body, b"override");
+        server_task
+            .await
+            .expect("server task should join")
+            .expect("server should complete");
+    }
+
     fn echo_server(
         protocol: LengthDelimitedProtocol,
         config: NacelleConfig,
@@ -631,11 +679,7 @@ mod tests {
             .protocol(protocol)
             .config(config)
             .handler(handler_fn(|_svc: Arc<()>, mut request| async move {
-                let opcode = match &request.meta {
-                    NacelleRequestMeta::RawTcp(meta) => meta.opcode,
-                    #[cfg(feature = "http")]
-                    NacelleRequestMeta::Http(_) => 0,
-                };
+                let opcode = request.raw_tcp_opcode().unwrap_or_default();
                 if opcode != 1 {
                     while let Some(chunk) = request.body.next_chunk().await {
                         let _ = chunk?;

@@ -3,9 +3,9 @@ use bytes::Bytes;
 use crate::request::NacelleBody;
 
 #[derive(Debug, Clone, Default)]
-pub enum RawTcpResponseMeta {
-    #[default]
-    Default,
+pub struct RawTcpResponseMeta {
+    pub request_id: Option<u64>,
+    pub opcode: Option<u64>,
 }
 
 #[cfg(feature = "http")]
@@ -30,7 +30,14 @@ pub struct NacelleResponse {
 impl NacelleResponse {
     pub fn raw_tcp(body: NacelleBody) -> Self {
         Self {
-            meta: NacelleResponseMeta::RawTcp(RawTcpResponseMeta::Default),
+            meta: NacelleResponseMeta::RawTcp(RawTcpResponseMeta::default()),
+            body,
+        }
+    }
+
+    pub fn raw_tcp_with_meta(meta: RawTcpResponseMeta, body: NacelleBody) -> Self {
+        Self {
+            meta: NacelleResponseMeta::RawTcp(meta),
             body,
         }
     }
