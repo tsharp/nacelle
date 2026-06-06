@@ -402,7 +402,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         server_task.await??;
         if let Some(stats_task) = stats_task {
             stats_task.await?;
-            print_server_stats("final", stats.snapshot(), None);
         }
         return Ok(());
     }
@@ -436,7 +435,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
     if let Some(stats_task) = stats_task {
         stats_task.await?;
-        print_server_stats("final", stats.snapshot(), None);
     }
 
     Ok(())
