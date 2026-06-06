@@ -2,8 +2,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-
 use crate::error::NacelleError;
 
 #[derive(Debug, Clone)]
@@ -132,9 +130,6 @@ pub struct NacelleRuntimeState {
 #[derive(Debug)]
 struct NacelleRuntimeStateInner {
     limits: NacelleLimits,
-    connections: Option<Arc<Semaphore>>,
-    requests: Option<Arc<Semaphore>>,
-    streaming_tasks: Option<Arc<Semaphore>>,
     active_connections: AtomicUsize,
     active_requests: AtomicUsize,
     active_streaming_tasks: AtomicUsize,
@@ -151,9 +146,6 @@ impl NacelleRuntimeState {
     pub fn new(limits: NacelleLimits) -> Self {
         Self {
             inner: Arc::new(NacelleRuntimeStateInner {
-                connections: finite_semaphore(limits.max_connections),
-                requests: finite_semaphore(limits.max_in_flight_requests),
-                streaming_tasks: finite_semaphore(limits.max_streaming_tasks),
                 limits,
                 active_connections: AtomicUsize::new(0),
                 active_requests: AtomicUsize::new(0),
@@ -167,60 +159,55 @@ impl NacelleRuntimeState {
         &self.inner.limits
     }
 
-    pub fn acquire_connection(&self) -> Result<Option<OwnedSemaphorePermit>, NacelleError> {
-        acquire(&self.inner.connections, "connections")
+    pub fn acquire_connection(&self) -> Result<TrackedPermit, NacelleError> {
+        self.acquire_connection_tracked()
     }
 
     pub fn acquire_connection_tracked(&self) -> Result<TrackedPermit, NacelleError> {
-        let permit = self.acquire_connection()?;
-        self.inner.active_connections.fetch_add(1, Ordering::AcqRel);
-        Ok(TrackedPermit::new(
-            self.clone(),
-            PermitKind::Connection,
-            permit,
-        ))
+        acquire_counter(
+            &self.inner.active_connections,
+            self.inner.limits.max_connections,
+            "connections",
+        )?;
+        Ok(TrackedPermit::new(self.clone(), PermitKind::Connection))
     }
 
-    pub fn acquire_request(&self) -> Result<Option<OwnedSemaphorePermit>, NacelleError> {
-        acquire(&self.inner.requests, "in_flight_requests")
+    pub fn acquire_request(&self) -> Result<TrackedPermit, NacelleError> {
+        self.acquire_request_tracked()
     }
 
     pub fn acquire_request_tracked(&self) -> Result<TrackedPermit, NacelleError> {
-        let permit = self.acquire_request()?;
-        self.inner.active_requests.fetch_add(1, Ordering::AcqRel);
-        Ok(TrackedPermit::new(
-            self.clone(),
-            PermitKind::Request,
-            permit,
-        ))
+        acquire_counter(
+            &self.inner.active_requests,
+            self.inner.limits.max_in_flight_requests,
+            "in_flight_requests",
+        )?;
+        Ok(TrackedPermit::new(self.clone(), PermitKind::Request))
     }
 
-    pub fn acquire_streaming_task(&self) -> Result<Option<OwnedSemaphorePermit>, NacelleError> {
-        acquire(&self.inner.streaming_tasks, "streaming_tasks")
+    pub fn acquire_streaming_task(&self) -> Result<TrackedPermit, NacelleError> {
+        self.acquire_streaming_task_tracked()
     }
 
     pub fn acquire_streaming_task_tracked(&self) -> Result<TrackedPermit, NacelleError> {
-        let permit = self.acquire_streaming_task()?;
-        self.inner
-            .active_streaming_tasks
-            .fetch_add(1, Ordering::AcqRel);
-        Ok(TrackedPermit::new(
-            self.clone(),
-            PermitKind::StreamingTask,
-            permit,
-        ))
+        acquire_counter(
+            &self.inner.active_streaming_tasks,
+            self.inner.limits.max_streaming_tasks,
+            "streaming_tasks",
+        )?;
+        Ok(TrackedPermit::new(self.clone(), PermitKind::StreamingTask))
     }
 
     pub fn active_connections(&self) -> usize {
-        self.inner.active_connections.load(Ordering::Acquire)
+        self.inner.active_connections.load(Ordering::Relaxed)
     }
 
     pub fn active_requests(&self) -> usize {
-        self.inner.active_requests.load(Ordering::Acquire)
+        self.inner.active_requests.load(Ordering::Relaxed)
     }
 
     pub fn active_streaming_tasks(&self) -> usize {
-        self.inner.active_streaming_tasks.load(Ordering::Acquire)
+        self.inner.active_streaming_tasks.load(Ordering::Relaxed)
     }
 
     pub fn memory_used_bytes(&self) -> usize {
@@ -265,26 +252,24 @@ impl NacelleRuntimeState {
     }
 }
 
-fn finite_semaphore(limit: usize) -> Option<Arc<Semaphore>> {
-    if limit == usize::MAX {
-        None
-    } else {
-        Some(Arc::new(Semaphore::new(limit)))
-    }
-}
-
-fn acquire(
-    semaphore: &Option<Arc<Semaphore>>,
+fn acquire_counter(
+    counter: &AtomicUsize,
+    limit: usize,
     name: &'static str,
-) -> Result<Option<OwnedSemaphorePermit>, NacelleError> {
-    let Some(semaphore) = semaphore else {
-        return Ok(None);
-    };
-    semaphore
-        .clone()
-        .try_acquire_owned()
-        .map(Some)
-        .map_err(|_| NacelleError::ResourceLimit(name))
+) -> Result<(), NacelleError> {
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        if current >= limit {
+            return Err(NacelleError::ResourceLimit(name));
+        }
+        let Some(next) = current.checked_add(1) else {
+            return Err(NacelleError::ResourceLimit(name));
+        };
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return Ok(()),
+            Err(observed) => current = observed,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -298,20 +283,11 @@ enum PermitKind {
 pub struct TrackedPermit {
     state: NacelleRuntimeState,
     kind: PermitKind,
-    _permit: Option<OwnedSemaphorePermit>,
 }
 
 impl TrackedPermit {
-    fn new(
-        state: NacelleRuntimeState,
-        kind: PermitKind,
-        permit: Option<OwnedSemaphorePermit>,
-    ) -> Self {
-        Self {
-            state,
-            kind,
-            _permit: permit,
-        }
+    fn new(state: NacelleRuntimeState, kind: PermitKind) -> Self {
+        Self { state, kind }
     }
 }
 
@@ -322,19 +298,19 @@ impl Drop for TrackedPermit {
                 self.state
                     .inner
                     .active_connections
-                    .fetch_sub(1, Ordering::AcqRel);
+                    .fetch_sub(1, Ordering::Relaxed);
             }
             PermitKind::Request => {
                 self.state
                     .inner
                     .active_requests
-                    .fetch_sub(1, Ordering::AcqRel);
+                    .fetch_sub(1, Ordering::Relaxed);
             }
             PermitKind::StreamingTask => {
                 self.state
                     .inner
                     .active_streaming_tasks
-                    .fetch_sub(1, Ordering::AcqRel);
+                    .fetch_sub(1, Ordering::Relaxed);
             }
         }
     }
@@ -418,5 +394,23 @@ mod tests {
         assert_eq!(state.active_requests(), 0);
         assert_eq!(state.active_streaming_tasks(), 0);
         assert_eq!(state.memory_used_bytes(), 0);
+    }
+
+    #[test]
+    fn bounded_counters_reject_at_limit_and_recover_after_drop() {
+        let state =
+            NacelleRuntimeState::new(NacelleLimits::default().with_max_in_flight_requests(1));
+
+        let request = state.acquire_request_tracked().expect("first request");
+        assert!(matches!(
+            state.acquire_request_tracked(),
+            Err(NacelleError::ResourceLimit("in_flight_requests"))
+        ));
+
+        drop(request);
+        let _request = state
+            .acquire_request_tracked()
+            .expect("request permit should recover after drop");
+        assert_eq!(state.active_requests(), 1);
     }
 }

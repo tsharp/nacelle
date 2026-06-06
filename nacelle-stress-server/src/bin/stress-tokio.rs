@@ -380,7 +380,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let stats_task = tokio::spawn(print_periodic_stats(stats.clone(), shutdown_rx.clone()));
+    let stats_task = if stats.enabled() {
+        Some(tokio::spawn(print_periodic_stats(
+            stats.clone(),
+            shutdown_rx.clone(),
+        )))
+    } else {
+        None
+    };
 
     if n_server_threads == 1 {
         let server_task = tokio::spawn(run_server(
@@ -393,8 +400,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         eprintln!("\nshutting down...");
         let _ = shutdown_tx.send(true);
         server_task.await??;
-        stats_task.await?;
-        print_server_stats("final", stats.snapshot(), None);
+        if let Some(stats_task) = stats_task {
+            stats_task.await?;
+            print_server_stats("final", stats.snapshot(), None);
+        }
         return Ok(());
     }
 
@@ -425,8 +434,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .map_err(|_| "server thread panicked")?
             .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(error) })?;
     }
-    stats_task.await?;
-    print_server_stats("final", stats.snapshot(), None);
+    if let Some(stats_task) = stats_task {
+        stats_task.await?;
+        print_server_stats("final", stats.snapshot(), None);
+    }
 
     Ok(())
 }
