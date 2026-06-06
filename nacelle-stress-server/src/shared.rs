@@ -212,6 +212,11 @@ struct LimitsConfigFile {
     write_timeout_ms: Option<u64>,
     handler_timeout_ms: Option<u64>,
     idle_timeout_ms: Option<u64>,
+    http_header_read_timeout_ms: Option<u64>,
+    http_request_body_read_timeout_ms: Option<u64>,
+    http_response_write_timeout_ms: Option<u64>,
+    http_keep_alive: Option<bool>,
+    http_max_connection_age_ms: Option<u64>,
 }
 
 impl ServerConfig {
@@ -287,6 +292,25 @@ impl ServerConfig {
         }
         if let Some(idle_timeout_ms) = file.idle_timeout_ms {
             self.limits.idle_timeout = Some(Duration::from_millis(idle_timeout_ms));
+        }
+        if let Some(http_header_read_timeout_ms) = file.http_header_read_timeout_ms {
+            self.limits.http_header_read_timeout =
+                Some(Duration::from_millis(http_header_read_timeout_ms));
+        }
+        if let Some(http_request_body_read_timeout_ms) = file.http_request_body_read_timeout_ms {
+            self.limits.http_request_body_read_timeout =
+                Some(Duration::from_millis(http_request_body_read_timeout_ms));
+        }
+        if let Some(http_response_write_timeout_ms) = file.http_response_write_timeout_ms {
+            self.limits.http_response_write_timeout =
+                Some(Duration::from_millis(http_response_write_timeout_ms));
+        }
+        if let Some(http_keep_alive) = file.http_keep_alive {
+            self.limits.http_keep_alive = http_keep_alive;
+        }
+        if let Some(http_max_connection_age_ms) = file.http_max_connection_age_ms {
+            self.limits.http_max_connection_age =
+                Some(Duration::from_millis(http_max_connection_age_ms));
         }
     }
 }
@@ -498,6 +522,23 @@ pub fn print_config(config: &ServerConfig, runtime: &str, actual_server_threads:
         "    idle_timeout_ms: {}",
         format_duration_ms(config.limits.idle_timeout)
     );
+    println!(
+        "    http_header_read_timeout_ms: {}",
+        format_duration_ms(config.limits.http_header_read_timeout)
+    );
+    println!(
+        "    http_request_body_read_timeout_ms: {}",
+        format_duration_ms(config.limits.http_request_body_read_timeout)
+    );
+    println!(
+        "    http_response_write_timeout_ms: {}",
+        format_duration_ms(config.limits.http_response_write_timeout)
+    );
+    println!("    http_keep_alive: {}", config.limits.http_keep_alive);
+    println!(
+        "    http_max_connection_age_ms: {}",
+        format_duration_ms(config.limits.http_max_connection_age)
+    );
 }
 
 fn has_cli_overrides(args: &[String]) -> bool {
@@ -619,6 +660,11 @@ limits:
   write_timeout_ms: 30000
   handler_timeout_ms: 60000
   idle_timeout_ms: 120000
+  http_header_read_timeout_ms: 5000
+  http_request_body_read_timeout_ms: 10000
+  http_response_write_timeout_ms: 15000
+  http_keep_alive: false
+  http_max_connection_age_ms: 300000
 "#;
         let file = serde_yaml::from_str::<ServerConfigFile>(yaml).unwrap();
         let mut config = ServerConfig::default();
@@ -642,6 +688,23 @@ limits:
         assert_eq!(config.limits.write_timeout, Some(Duration::from_secs(30)));
         assert_eq!(config.limits.handler_timeout, Some(Duration::from_secs(60)));
         assert_eq!(config.limits.idle_timeout, Some(Duration::from_secs(120)));
+        assert_eq!(
+            config.limits.http_header_read_timeout,
+            Some(Duration::from_secs(5))
+        );
+        assert_eq!(
+            config.limits.http_request_body_read_timeout,
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            config.limits.http_response_write_timeout,
+            Some(Duration::from_secs(15))
+        );
+        assert!(!config.limits.http_keep_alive);
+        assert_eq!(
+            config.limits.http_max_connection_age,
+            Some(Duration::from_secs(300))
+        );
     }
 
     #[test]

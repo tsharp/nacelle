@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use hyper::body::{Frame, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 
 use crate::error::{BoxError, NacelleError};
 use crate::handler::Handler;
@@ -149,7 +150,6 @@ where
                 }
                 accepted = listener.accept() => {
                     let (stream, _) = accepted?;
-            let io = TokioIo::new(stream);
             let server = server.clone();
             let connection_permit = match server.runtime_state.acquire_connection_tracked() {
                 Ok(permit) => permit,
@@ -163,14 +163,36 @@ where
             server.telemetry.connection_opened(NacelleTransport::Http);
                     connections.spawn(async move {
                 let _connection_permit = connection_permit;
+                let write_timeout = server
+                    .runtime_state
+                    .limits()
+                    .http_response_write_timeout
+                    .or(server.runtime_state.limits().write_timeout);
+                let io = TimeoutIo::new(TokioIo::new(stream), write_timeout);
+                let service_server = server.clone();
                 let service = service_fn(move |request| {
-                    let server = server.clone();
+                    let server = service_server.clone();
                     async move { server.handle(request).await }
                 });
-                        http1::Builder::new()
-                            .serve_connection(io, service)
-                            .await
-                            .map_err(NacelleError::protocol)
+                let mut builder = http1::Builder::new();
+                builder
+                    .timer(TokioTimer::new())
+                    .header_read_timeout(server.runtime_state.limits().http_header_read_timeout)
+                    .keep_alive(server.runtime_state.limits().http_keep_alive);
+                let connection = builder.serve_connection(io, service);
+                if let Some(max_age) = server.runtime_state.limits().http_max_connection_age {
+                    match tokio::time::timeout(max_age, connection).await {
+                        Ok(result) => result.map_err(NacelleError::protocol),
+                        Err(_) => {
+                            server
+                                .telemetry
+                                .timeout(NacelleTransport::Http, "http_max_connection_age");
+                            Err(NacelleError::Timeout("http_max_connection_age"))
+                        }
+                    }
+                } else {
+                    connection.await.map_err(NacelleError::protocol)
+                }
             });
                 }
             }
@@ -208,7 +230,7 @@ where
                 uri: parts.uri,
                 headers: parts.headers,
             }),
-            body: incoming_to_body(body, self.runtime_state.clone()),
+            body: incoming_to_body(body, self.runtime_state.clone(), self.telemetry.clone()),
         };
 
         let handler_future = self.handler.call(request);
@@ -259,7 +281,11 @@ where
     }
 }
 
-fn incoming_to_body(mut incoming: Incoming, runtime_state: NacelleRuntimeState) -> NacelleBody {
+fn incoming_to_body(
+    mut incoming: Incoming,
+    runtime_state: NacelleRuntimeState,
+    telemetry: NacelleTelemetry,
+) -> NacelleBody {
     let (tx, body) = NacelleBody::channel(8);
     tokio::spawn(async move {
         let _streaming_permit = match runtime_state.acquire_streaming_task_tracked() {
@@ -273,10 +299,15 @@ fn incoming_to_body(mut incoming: Incoming, runtime_state: NacelleRuntimeState) 
         loop {
             let frame = {
                 let next = incoming.frame();
-                if let Some(timeout) = runtime_state.limits().read_timeout {
+                if let Some(timeout) = runtime_state
+                    .limits()
+                    .http_request_body_read_timeout
+                    .or(runtime_state.limits().read_timeout)
+                {
                     match tokio::time::timeout(timeout, next).await {
                         Ok(frame) => frame,
                         Err(_) => {
+                            telemetry.timeout(NacelleTransport::Http, "http_body_read");
                             let _ = tx.send(Err(NacelleError::Timeout("http_body_read"))).await;
                             break;
                         }
@@ -346,6 +377,118 @@ fn nacelle_body_to_http(body: NacelleBody, runtime_state: NacelleRuntimeState) -
     })
     .map_err(|error| -> BoxError { Box::new(error) })
     .boxed()
+}
+
+struct TimeoutIo<I> {
+    inner: I,
+    write_timeout: Option<Duration>,
+    write_sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+}
+
+impl<I> TimeoutIo<I> {
+    fn new(inner: I, write_timeout: Option<Duration>) -> Self {
+        Self {
+            inner,
+            write_timeout,
+            write_sleep: None,
+        }
+    }
+
+    fn poll_write_deadline(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        let Some(timeout) = self.write_timeout else {
+            return Poll::Pending;
+        };
+        let sleep = self
+            .write_sleep
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep(timeout)));
+        match sleep.as_mut().poll(cx) {
+            Poll::Ready(()) => {
+                self.write_sleep = None;
+                Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "http response write timed out",
+                )))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<I> hyper::rt::Read for TimeoutIo<I>
+where
+    I: hyper::rt::Read + Unpin,
+{
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: hyper::rt::ReadBufCursor<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl<I> hyper::rt::Write for TimeoutIo<I>
+where
+    I: hyper::rt::Write + Unpin,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, io::Error>> {
+        if self.write_sleep.is_some() {
+            if let Poll::Ready(result) = self.poll_write_deadline(cx) {
+                return Poll::Ready(result.map(|()| 0));
+            }
+        }
+        match Pin::new(&mut self.inner).poll_write(cx, buf) {
+            Poll::Ready(result) => {
+                self.write_sleep = None;
+                Poll::Ready(result)
+            }
+            Poll::Pending => match self.poll_write_deadline(cx) {
+                Poll::Ready(result) => Poll::Ready(result.map(|()| 0)),
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<Result<usize, io::Error>> {
+        if self.write_sleep.is_some() {
+            if let Poll::Ready(result) = self.poll_write_deadline(cx) {
+                return Poll::Ready(result.map(|()| 0));
+            }
+        }
+        match Pin::new(&mut self.inner).poll_write_vectored(cx, bufs) {
+            Poll::Ready(result) => {
+                self.write_sleep = None;
+                Poll::Ready(result)
+            }
+            Poll::Pending => match self.poll_write_deadline(cx) {
+                Poll::Ready(result) => Poll::Ready(result.map(|()| 0)),
+                Poll::Pending => Poll::Pending,
+            },
+        }
+    }
 }
 
 fn log_http_connection_result(
@@ -558,6 +701,39 @@ mod tests {
             .expect("server task should join")
             .expect("server should exit cleanly");
         assert_eq!(runtime_state.active_connections(), 0);
+    }
+
+    #[tokio::test]
+    async fn http_slow_header_client_times_out() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let runtime_state = crate::limits::NacelleRuntimeState::new(
+            crate::limits::NacelleLimits::default()
+                .with_http_header_read_timeout(std::time::Duration::from_millis(25)),
+        );
+        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
+            Ok(NacelleResponse::http_bytes(StatusCode::OK, "ok"))
+        }))
+        .with_runtime_state(runtime_state.clone());
+        let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n")
+            .await
+            .expect("partial request should write");
+
+        let mut buf = [0_u8; 1];
+        let read = tokio::time::timeout(std::time::Duration::from_secs(1), client.read(&mut buf))
+            .await
+            .expect("connection should close before test timeout");
+        assert!(read.is_err() || read.expect("read result should be available") == 0);
+        wait_for_active_connections(&runtime_state, 0).await;
+        server_task.abort();
     }
 
     #[tokio::test]

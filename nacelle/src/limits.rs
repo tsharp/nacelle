@@ -18,6 +18,11 @@ pub struct NacelleLimits {
     pub write_timeout: Option<Duration>,
     pub handler_timeout: Option<Duration>,
     pub idle_timeout: Option<Duration>,
+    pub http_header_read_timeout: Option<Duration>,
+    pub http_request_body_read_timeout: Option<Duration>,
+    pub http_response_write_timeout: Option<Duration>,
+    pub http_keep_alive: bool,
+    pub http_max_connection_age: Option<Duration>,
 }
 
 impl Default for NacelleLimits {
@@ -33,6 +38,11 @@ impl Default for NacelleLimits {
             write_timeout: Some(Duration::from_secs(30)),
             handler_timeout: Some(Duration::from_secs(60)),
             idle_timeout: Some(Duration::from_secs(120)),
+            http_header_read_timeout: Some(Duration::from_secs(30)),
+            http_request_body_read_timeout: Some(Duration::from_secs(30)),
+            http_response_write_timeout: Some(Duration::from_secs(30)),
+            http_keep_alive: true,
+            http_max_connection_age: None,
         }
     }
 }
@@ -85,6 +95,31 @@ impl NacelleLimits {
 
     pub fn with_idle_timeout(mut self, timeout: Duration) -> Self {
         self.idle_timeout = Some(timeout);
+        self
+    }
+
+    pub fn with_http_header_read_timeout(mut self, timeout: Duration) -> Self {
+        self.http_header_read_timeout = Some(timeout);
+        self
+    }
+
+    pub fn with_http_request_body_read_timeout(mut self, timeout: Duration) -> Self {
+        self.http_request_body_read_timeout = Some(timeout);
+        self
+    }
+
+    pub fn with_http_response_write_timeout(mut self, timeout: Duration) -> Self {
+        self.http_response_write_timeout = Some(timeout);
+        self
+    }
+
+    pub fn with_http_keep_alive(mut self, keep_alive: bool) -> Self {
+        self.http_keep_alive = keep_alive;
+        self
+    }
+
+    pub fn with_http_max_connection_age(mut self, max_age: Duration) -> Self {
+        self.http_max_connection_age = Some(max_age);
         self
     }
 }
@@ -344,6 +379,10 @@ mod tests {
         assert!(limits.write_timeout.is_some());
         assert!(limits.handler_timeout.is_some());
         assert!(limits.idle_timeout.is_some());
+        assert!(limits.http_header_read_timeout.is_some());
+        assert!(limits.http_request_body_read_timeout.is_some());
+        assert!(limits.http_response_write_timeout.is_some());
+        assert!(limits.http_keep_alive);
     }
 
     #[test]

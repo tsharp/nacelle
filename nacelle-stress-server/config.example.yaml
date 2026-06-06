@@ -18,3 +18,8 @@ limits:
   write_timeout_ms: 30000
   handler_timeout_ms: 60000
   idle_timeout_ms: 120000
+  http_header_read_timeout_ms: 30000
+  http_request_body_read_timeout_ms: 30000
+  http_response_write_timeout_ms: 30000
+  http_keep_alive: true
+  http_max_connection_age_ms: null
