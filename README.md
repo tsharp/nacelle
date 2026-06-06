@@ -134,9 +134,23 @@ Nacelle emits structured `tracing` events for listener, connection, request comp
 - `nacelle.connections`
 - `nacelle.requests`
 - `nacelle.request_errors`
+- `nacelle.rejections`
+- `nacelle.timeouts`
+- `nacelle.shutdown_events`
+- `nacelle.connection_aborts`
 - `nacelle.request_bytes`
 - `nacelle.response_bytes`
 - `nacelle.request_duration_ms`
+
+Production notes:
+
+- [HTTP hardening](docs/http-hardening.md)
+- [Production configuration](docs/production-configuration.md)
+- [Production checklist](docs/production-checklist.md)
+- [Stress testing](docs/stress-testing.md)
+- [Security scanning](docs/security-scanning.md)
+- [Performance tuning](docs/performance-tuning.md)
+- [API stability](docs/api-stability.md)
 
 Exporter/subscriber setup stays in the application so production can choose OTLP, stdout, Prometheus, or another pipeline.
 

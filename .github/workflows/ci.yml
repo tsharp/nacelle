@@ -43,3 +43,15 @@ jobs:
         run: cargo test -p nacelle --features reference_protocol,http,tower --all-targets
       - name: Test OTel
         run: cargo test -p nacelle --features reference_protocol,http,tower,otel --all-targets
+      - name: Test Stress Server
+        run: cargo test -p nacelle-stress-server --all-targets
+      - name: Ensure deprecated YAML stack is absent
+        run: |
+          ! cargo tree -i serde_yaml
+          ! cargo tree -i unsafe-libyaml
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - name: Audit
+        run: cargo audit

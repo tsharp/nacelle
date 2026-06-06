@@ -69,3 +69,12 @@ request context is available. Unknown opcode handling is application policy.
 
 The server enforces `NacelleConfig::max_frame_len` against `frame_len`.
 Buffer sizes and request-body chunking are configured through `NacelleConfig`.
+Runtime budgets, timeouts, and active counters are configured through
+`NacelleLimits` / `NacelleRuntimeState`.
+
+Raw TCP request handling is sequential per connection. Pipelined frames can sit
+in the socket/read buffer, but Nacelle does not run multiple handlers
+concurrently for one raw TCP connection. Streaming request bodies use
+`request_body_channel_capacity` for backpressure between socket reads and the
+handler, and declared streaming body bytes are reserved against the memory
+budget until the streaming request finishes.
