@@ -1,0 +1,5 @@
+low_memory: true
+
+limits:
+  # 32 MiB
+  max_memory_bytes: 33554432

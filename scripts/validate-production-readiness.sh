@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cargo fmt --all -- --check
+cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test -p nacelle --features reference_protocol,http,tower,otel --all-targets
+cargo clippy -p nacelle --features reference_protocol,http,tower,otel --all-targets -- -D warnings
+cargo test -p nacelle --no-default-features --features http --all-targets
+cargo test -p nacelle --no-default-features --all-targets
+cargo test -p nacelle-stress-server --all-targets
+cargo tree -i serde_yaml && {
+  echo "serde_yaml is still present" >&2
+  exit 1
+} || true
+cargo tree -i unsafe-libyaml && {
+  echo "unsafe-libyaml is still present" >&2
+  exit 1
+} || true
+if command -v cargo-audit >/dev/null 2>&1; then
+  cargo audit
+else
+  echo "cargo-audit not installed; skipping audit" >&2
+fi

@@ -11,6 +11,8 @@ pub enum NacelleError {
     FrameTooLarge { len: usize, max: usize },
     UnexpectedEof,
     ConnectionClosed,
+    ResourceLimit(&'static str),
+    Timeout(&'static str),
     Io(io::Error),
     Protocol(BoxError),
     Handler(BoxError),
@@ -37,6 +39,8 @@ impl Display for NacelleError {
             }
             Self::UnexpectedEof => f.write_str("connection closed before the frame completed"),
             Self::ConnectionClosed => f.write_str("connection closed"),
+            Self::ResourceLimit(name) => write!(f, "resource limit exceeded: {name}"),
+            Self::Timeout(name) => write!(f, "operation timed out: {name}"),
             Self::Io(error) => write!(f, "i/o error: {error}"),
             Self::Protocol(error) => write!(f, "protocol error: {error}"),
             Self::Handler(error) => write!(f, "handler error: {error}"),

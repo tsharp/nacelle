@@ -477,11 +477,14 @@ fn print_summary(config: &StressConfig, result: &WorkerResult, elapsed: Duration
         );
     }
     println!(
-        "configured_inflight  {}",
+        "client_configured_inflight  {}",
         config.connections * config.pipeline
     );
-    println!("implied_inflight     {:.1}", implied_inflight);
-    println!("queue_floor_latency  {:.2} µs", little_law_latency_us);
+    println!("client_implied_inflight     {:.1}", implied_inflight);
+    println!(
+        "client_queue_floor_latency  {:.2} µs",
+        little_law_latency_us
+    );
     if config.pipeline > 1 {
         println!(
             "latency_note         saturation mode; use --pipeline 1 for established-connection RTT"
