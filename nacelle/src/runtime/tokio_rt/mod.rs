@@ -139,14 +139,14 @@ where
                 continue;
             }
             accepted = listener.accept() => {
-                let (stream, _) = accepted?;
+                let (stream, peer_addr) = accepted?;
         let _ = stream.set_nodelay(true);
-        let connection_permit = match server.runtime_state().acquire_connection_tracked() {
+        let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
             Ok(permit) => permit,
-            Err(_error) => {
+            Err(error) => {
                 server
                     .telemetry()
-                    .connection_rejected(NacelleTransport::RawTcp, "connections");
+                    .connection_rejected(NacelleTransport::RawTcp, connection_rejection_reason(&error));
                 continue;
             }
         };
@@ -182,6 +182,14 @@ fn log_connection_result(result: Option<Result<Result<(), NacelleError>, tokio::
         Some(Err(error)) => {
             tracing::warn!(target: "nacelle", transport = "raw_tcp", error = %error, "connection task failed");
         }
+    }
+}
+
+#[cfg(feature = "raw_tcp")]
+fn connection_rejection_reason(error: &NacelleError) -> &'static str {
+    match error {
+        NacelleError::ResourceLimit(reason) => reason,
+        _ => "connections",
     }
 }
 

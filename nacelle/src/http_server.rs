@@ -214,14 +214,17 @@ where
                     continue;
                 }
                 accepted = listener.accept() => {
-                    let (stream, _) = accepted?;
+                    let (stream, peer_addr) = accepted?;
                     let server = server.clone();
-                    let connection_permit = match server.runtime_state.acquire_connection_tracked() {
+                    let connection_permit = match server
+                        .runtime_state
+                        .acquire_connection_for_peer(peer_addr.ip())
+                    {
                         Ok(permit) => permit,
-                        Err(_error) => {
+                        Err(error) => {
                             server
                                 .telemetry
-                                .connection_rejected(NacelleTransport::Http, "connections");
+                                .connection_rejected(NacelleTransport::Http, connection_rejection_reason(&error));
                             continue;
                         }
                     };
@@ -326,15 +329,18 @@ where
                     continue;
                 }
                 accepted = listener.accept() => {
-                    let (stream, _) = accepted?;
+                    let (stream, peer_addr) = accepted?;
                     let server = server.clone();
                     let acceptor = acceptor.clone();
-                    let connection_permit = match server.runtime_state.acquire_connection_tracked() {
+                    let connection_permit = match server
+                        .runtime_state
+                        .acquire_connection_for_peer(peer_addr.ip())
+                    {
                         Ok(permit) => permit,
-                        Err(_error) => {
+                        Err(error) => {
                             server
                                 .telemetry
-                                .connection_rejected(NacelleTransport::Http, "connections");
+                                .connection_rejected(NacelleTransport::Http, connection_rejection_reason(&error));
                             continue;
                         }
                     };
@@ -680,6 +686,13 @@ fn host_allowed(allowed_hosts: &[String], request: &Request<Incoming>) -> bool {
     allowed_hosts
         .iter()
         .any(|allowed| allowed == &host || allowed == host_without_port)
+}
+
+fn connection_rejection_reason(error: &NacelleError) -> &'static str {
+    match error {
+        NacelleError::ResourceLimit(reason) => reason,
+        _ => "connections",
+    }
 }
 
 async fn run_http_connection<H, I>(
@@ -1451,6 +1464,49 @@ mod tests {
             event.kind == crate::NacelleTelemetryEventKind::RequestRejected
                 && matches!(event.reason, Some("header_count" | "header_bytes"))
         }));
+    }
+
+    #[tokio::test]
+    async fn http_per_peer_connection_limit_rejects_second_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let runtime_state = crate::limits::NacelleRuntimeState::new(
+            crate::limits::NacelleLimits::default().with_max_connections_per_peer(1),
+        );
+        let sink = Arc::new(crate::NacelleInMemoryTelemetrySink::new());
+        let telemetry = NacelleTelemetry::new().with_sink(sink.clone());
+        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
+            Ok(NacelleResponse::http_bytes(StatusCode::OK, "ok"))
+        }))
+        .with_runtime_state(runtime_state.clone())
+        .with_telemetry(telemetry);
+        let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+        let held = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("held client should connect");
+        wait_for_active_connections(&runtime_state, 1).await;
+
+        let mut rejected = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("second client should connect before rejection");
+        let mut buf = [0_u8; 1];
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(1), rejected.read(&mut buf))
+            .await
+            .expect("rejected connection should close promptly");
+
+        assert_eq!(runtime_state.active_connections(), 1);
+        assert!(sink.events().iter().any(|event| {
+            event.kind == crate::NacelleTelemetryEventKind::ConnectionRejected
+                && event.reason == Some("peer_connections")
+        }));
+
+        drop(rejected);
+        drop(held);
+        wait_for_active_connections(&runtime_state, 0).await;
+        server_task.abort();
     }
 
     async fn wait_for_active_connections(

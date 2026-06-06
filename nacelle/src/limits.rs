@@ -1,5 +1,7 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::error::NacelleError;
@@ -9,6 +11,7 @@ pub struct NacelleLimits {
     pub max_connections: usize,
     pub max_in_flight_requests: usize,
     pub max_streaming_tasks: usize,
+    pub max_connections_per_peer: Option<usize>,
     pub max_memory_bytes: usize,
     pub max_request_body_bytes: usize,
     pub max_response_body_bytes: usize,
@@ -29,6 +32,7 @@ impl Default for NacelleLimits {
             max_connections: 16_384,
             max_in_flight_requests: 65_536,
             max_streaming_tasks: 8_192,
+            max_connections_per_peer: None,
             max_memory_bytes: 512 * 1024 * 1024,
             max_request_body_bytes: 16 * 1024 * 1024,
             max_response_body_bytes: 16 * 1024 * 1024,
@@ -58,6 +62,11 @@ impl NacelleLimits {
 
     pub fn with_max_streaming_tasks(mut self, max: usize) -> Self {
         self.max_streaming_tasks = max.max(1);
+        self
+    }
+
+    pub fn with_max_connections_per_peer(mut self, max: usize) -> Self {
+        self.max_connections_per_peer = Some(max.max(1));
         self
     }
 
@@ -133,6 +142,7 @@ struct NacelleRuntimeStateInner {
     active_connections: AtomicUsize,
     active_requests: AtomicUsize,
     active_streaming_tasks: AtomicUsize,
+    peer_connections: Mutex<HashMap<IpAddr, usize>>,
     memory_used: AtomicUsize,
 }
 
@@ -150,6 +160,7 @@ impl NacelleRuntimeState {
                 active_connections: AtomicUsize::new(0),
                 active_requests: AtomicUsize::new(0),
                 active_streaming_tasks: AtomicUsize::new(0),
+                peer_connections: Mutex::new(HashMap::new()),
                 memory_used: AtomicUsize::new(0),
             }),
         }
@@ -169,7 +180,28 @@ impl NacelleRuntimeState {
             self.inner.limits.max_connections,
             "connections",
         )?;
-        Ok(TrackedPermit::new(self.clone(), PermitKind::Connection))
+        Ok(TrackedPermit::new(
+            self.clone(),
+            PermitKind::Connection { peer: None },
+        ))
+    }
+
+    pub fn acquire_connection_for_peer(&self, peer: IpAddr) -> Result<TrackedPermit, NacelleError> {
+        acquire_counter(
+            &self.inner.active_connections,
+            self.inner.limits.max_connections,
+            "connections",
+        )?;
+        if let Err(error) = self.acquire_peer_connection(peer) {
+            self.inner
+                .active_connections
+                .fetch_sub(1, Ordering::Relaxed);
+            return Err(error);
+        }
+        Ok(TrackedPermit::new(
+            self.clone(),
+            PermitKind::Connection { peer: Some(peer) },
+        ))
     }
 
     pub fn acquire_request(&self) -> Result<TrackedPermit, NacelleError> {
@@ -250,6 +282,41 @@ impl NacelleRuntimeState {
             self.inner.memory_used.fetch_sub(bytes, Ordering::AcqRel);
         }
     }
+
+    fn acquire_peer_connection(&self, peer: IpAddr) -> Result<(), NacelleError> {
+        let Some(limit) = self.inner.limits.max_connections_per_peer else {
+            return Ok(());
+        };
+        let mut peers = self
+            .inner
+            .peer_connections
+            .lock()
+            .expect("peer connection map poisoned");
+        let current = peers.get(&peer).copied().unwrap_or(0);
+        if current >= limit {
+            return Err(NacelleError::ResourceLimit("peer_connections"));
+        }
+        peers.insert(peer, current + 1);
+        Ok(())
+    }
+
+    fn release_peer_connection(&self, peer: IpAddr) {
+        if self.inner.limits.max_connections_per_peer.is_none() {
+            return;
+        }
+        let mut peers = self
+            .inner
+            .peer_connections
+            .lock()
+            .expect("peer connection map poisoned");
+        match peers.get_mut(&peer) {
+            Some(count) if *count > 1 => *count -= 1,
+            Some(_) => {
+                peers.remove(&peer);
+            }
+            None => {}
+        }
+    }
 }
 
 fn acquire_counter(
@@ -274,7 +341,7 @@ fn acquire_counter(
 
 #[derive(Debug, Clone, Copy)]
 enum PermitKind {
-    Connection,
+    Connection { peer: Option<IpAddr> },
     Request,
     StreamingTask,
 }
@@ -294,11 +361,14 @@ impl TrackedPermit {
 impl Drop for TrackedPermit {
     fn drop(&mut self) {
         match self.kind {
-            PermitKind::Connection => {
+            PermitKind::Connection { peer } => {
                 self.state
                     .inner
                     .active_connections
                     .fetch_sub(1, Ordering::Relaxed);
+                if let Some(peer) = peer {
+                    self.state.release_peer_connection(peer);
+                }
             }
             PermitKind::Request => {
                 self.state
@@ -412,5 +482,26 @@ mod tests {
             .acquire_request_tracked()
             .expect("request permit should recover after drop");
         assert_eq!(state.active_requests(), 1);
+    }
+
+    #[test]
+    fn per_peer_connection_limit_rejects_and_recovers_after_drop() {
+        let peer = "127.0.0.1".parse().expect("valid ip");
+        let state =
+            NacelleRuntimeState::new(NacelleLimits::default().with_max_connections_per_peer(1));
+
+        let connection = state
+            .acquire_connection_for_peer(peer)
+            .expect("first peer connection");
+        assert!(matches!(
+            state.acquire_connection_for_peer(peer),
+            Err(NacelleError::ResourceLimit("peer_connections"))
+        ));
+
+        drop(connection);
+        let _connection = state
+            .acquire_connection_for_peer(peer)
+            .expect("peer connection should recover after drop");
+        assert_eq!(state.active_connections(), 1);
     }
 }
