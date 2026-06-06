@@ -1,6 +1,6 @@
-# Nacelle Documentation
+# nacelle documentation
 
-Nacelle is an experimental Tokio-based Rust library for streaming application
+nacelle is an experimental Tokio-based Rust library for streaming application
 handlers across raw TCP and HTTP transports.
 
 Use this documentation site for application integration, operational limits,

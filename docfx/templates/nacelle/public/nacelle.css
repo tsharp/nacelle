@@ -21,13 +21,43 @@ body {
   line-height: 1.65;
 }
 
-.navbar-brand {
-  font-weight: 700;
-  letter-spacing: 0;
+#autocollapse .container-xxl {
+  gap: 0.8rem;
 }
 
+.navbar {
+  min-height: 60px;
+  padding-block: 0.45rem;
+}
+
+.navbar-brand {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-weight: 700;
+  gap: 0.6rem;
+  letter-spacing: 0;
+  line-height: 1;
+  margin-right: 1.15rem;
+  min-width: 0;
+  padding: 0.2rem 0;
+  text-transform: lowercase;
+}
+
+#logo,
 .navbar-brand img {
   border-radius: 8px;
+  flex: 0 0 34px;
+  height: 34px;
+  margin: 0;
+  max-height: 34px;
+  object-fit: contain;
+  padding: 0;
+  width: 34px;
+}
+
+#navbar {
+  min-width: 0;
 }
 
 article h1,

@@ -32,11 +32,11 @@
       "docfx/templates/nacelle"
     ],
     "globalMetadata": {
-      "_appName": "Nacelle",
-      "_appTitle": "Nacelle Docs",
+      "_appName": "nacelle",
+      "_appTitle": "nacelle docs",
       "_appLogoPath": "assets/nacelle-mark.svg",
       "_appFaviconPath": "assets/nacelle-mark.svg",
-      "_appFooter": "Nacelle documentation. Built with DocFX.",
+      "_appFooter": "nacelle documentation. Built with DocFX.",
       "_disableContribution": true,
       "_enableSearch": true,
       "_description": "Documentation for Nacelle, an experimental Tokio-based Rust library for streaming application handlers across multiple transports."
