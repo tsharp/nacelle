@@ -150,6 +150,22 @@ where
         )
         .await
     }
+
+    #[cfg(feature = "raw_tcp")]
+    pub async fn serve_tcp_with_shutdown_timeout(
+        &self,
+        addr: SocketAddr,
+        shutdown: crate::lifecycle::NacelleShutdownToken,
+        drain_timeout: std::time::Duration,
+    ) -> Result<(), NacelleError> {
+        crate::runtime::serve_tcp_with_shutdown_timeout(
+            Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
+            addr,
+            shutdown,
+            drain_timeout,
+        )
+        .await
+    }
 }
 
 pub struct NacelleServerBuilder<Req, ProtocolState, HandlerState, P, H> {

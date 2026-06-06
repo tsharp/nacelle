@@ -1,6 +1,11 @@
 use tokio::sync::watch;
 
 #[derive(Debug, Clone)]
+pub(crate) struct NacelleDrainDeadline {
+    millis: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[derive(Debug, Clone)]
 pub struct NacelleShutdown {
     sender: watch::Sender<bool>,
 }
@@ -14,6 +19,37 @@ impl Default for NacelleShutdown {
     fn default() -> Self {
         Self::new()
     }
+}
+
+impl Default for NacelleDrainDeadline {
+    fn default() -> Self {
+        Self::new(std::time::Duration::from_secs(30))
+    }
+}
+
+impl NacelleDrainDeadline {
+    pub(crate) fn new(timeout: std::time::Duration) -> Self {
+        Self {
+            millis: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(duration_millis(
+                timeout,
+            ))),
+        }
+    }
+
+    pub(crate) fn set(&self, timeout: std::time::Duration) {
+        self.millis.store(
+            duration_millis(timeout),
+            std::sync::atomic::Ordering::Release,
+        );
+    }
+
+    pub(crate) fn get(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.millis.load(std::sync::atomic::Ordering::Acquire))
+    }
+}
+
+fn duration_millis(timeout: std::time::Duration) -> u64 {
+    timeout.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 impl NacelleShutdown {

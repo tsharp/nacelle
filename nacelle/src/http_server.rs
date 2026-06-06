@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures_core::Stream;
@@ -15,7 +16,7 @@ use hyper_util::rt::TokioIo;
 
 use crate::error::{BoxError, NacelleError};
 use crate::handler::Handler;
-use crate::lifecycle::NacelleShutdownToken;
+use crate::lifecycle::{NacelleDrainDeadline, NacelleShutdownToken};
 use crate::limits::NacelleRuntimeState;
 use crate::request::{HttpRequestMeta, NacelleBody, NacelleRequest, NacelleRequestMeta};
 use crate::response::{NacelleResponse, NacelleResponseMeta};
@@ -74,8 +75,29 @@ where
         addr: SocketAddr,
         shutdown: NacelleShutdownToken,
     ) -> Result<(), NacelleError> {
+        self.serve_with_shutdown_timeout(addr, shutdown, Duration::from_secs(30))
+            .await
+    }
+
+    pub async fn serve_with_shutdown_timeout(
+        self,
+        addr: SocketAddr,
+        shutdown: NacelleShutdownToken,
+        drain_timeout: Duration,
+    ) -> Result<(), NacelleError> {
+        self.serve_with_shutdown_deadline(addr, shutdown, NacelleDrainDeadline::new(drain_timeout))
+            .await
+    }
+
+    pub(crate) async fn serve_with_shutdown_deadline(
+        self,
+        addr: SocketAddr,
+        shutdown: NacelleShutdownToken,
+        drain_deadline: NacelleDrainDeadline,
+    ) -> Result<(), NacelleError> {
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        self.serve_listener_with_shutdown(listener, shutdown).await
+        self.serve_listener_with_shutdown_deadline(listener, shutdown, drain_deadline)
+            .await
     }
 
     pub async fn serve_listener(
@@ -89,15 +111,44 @@ where
     pub async fn serve_listener_with_shutdown(
         self,
         listener: tokio::net::TcpListener,
+        shutdown: NacelleShutdownToken,
+    ) -> Result<(), NacelleError> {
+        self.serve_listener_with_shutdown_timeout(listener, shutdown, Duration::from_secs(30))
+            .await
+    }
+
+    pub async fn serve_listener_with_shutdown_timeout(
+        self,
+        listener: tokio::net::TcpListener,
+        shutdown: NacelleShutdownToken,
+        drain_timeout: Duration,
+    ) -> Result<(), NacelleError> {
+        self.serve_listener_with_shutdown_deadline(
+            listener,
+            shutdown,
+            NacelleDrainDeadline::new(drain_timeout),
+        )
+        .await
+    }
+
+    pub(crate) async fn serve_listener_with_shutdown_deadline(
+        self,
+        listener: tokio::net::TcpListener,
         mut shutdown: NacelleShutdownToken,
+        drain_deadline: NacelleDrainDeadline,
     ) -> Result<(), NacelleError> {
         let server = Arc::new(self);
+        let mut connections = tokio::task::JoinSet::new();
         loop {
-            let (stream, _) = tokio::select! {
+            tokio::select! {
                 biased;
                 _ = shutdown.changed() => break,
-                accepted = listener.accept() => accepted?,
-            };
+                joined = connections.join_next(), if !connections.is_empty() => {
+                    log_http_connection_result(joined);
+                    continue;
+                }
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted?;
             let io = TokioIo::new(stream);
             let server = server.clone();
             let connection_permit = match server.runtime_state.acquire_connection_tracked() {
@@ -113,15 +164,22 @@ where
                 }
             };
             server.telemetry.connection_opened(NacelleTransport::Http);
-            tokio::spawn(async move {
+                    connections.spawn(async move {
                 let _connection_permit = connection_permit;
                 let service = service_fn(move |request| {
                     let server = server.clone();
                     async move { server.handle(request).await }
                 });
-                let _ = http1::Builder::new().serve_connection(io, service).await;
+                        http1::Builder::new()
+                            .serve_connection(io, service)
+                            .await
+                            .map_err(NacelleError::protocol)
             });
+                }
+            }
         }
+        tracing::info!(target: "nacelle", transport = "http", "listener stopped accepting");
+        drain_http_connection_tasks(connections, drain_deadline.get()).await;
         Ok(())
     }
 
@@ -289,6 +347,43 @@ fn nacelle_body_to_http(body: NacelleBody, runtime_state: NacelleRuntimeState) -
     .boxed()
 }
 
+fn log_http_connection_result(
+    result: Option<Result<Result<(), NacelleError>, tokio::task::JoinError>>,
+) {
+    match result {
+        Some(Ok(Ok(()))) | None => {}
+        Some(Ok(Err(error))) => {
+            tracing::debug!(target: "nacelle", transport = "http", error = %error, "connection finished with error");
+        }
+        Some(Err(error)) => {
+            tracing::warn!(target: "nacelle", transport = "http", error = %error, "connection task failed");
+        }
+    }
+}
+
+async fn drain_http_connection_tasks(
+    mut connections: tokio::task::JoinSet<Result<(), NacelleError>>,
+    drain_timeout: Duration,
+) {
+    let drain = async {
+        while let Some(result) = connections.join_next().await {
+            log_http_connection_result(Some(result));
+        }
+    };
+
+    if tokio::time::timeout(drain_timeout, drain).await.is_ok() {
+        tracing::info!(target: "nacelle", transport = "http", "connection drain completed");
+        return;
+    }
+
+    let aborted = connections.len();
+    tracing::warn!(target: "nacelle", transport = "http", aborted, "connection drain timed out; aborting active tasks");
+    connections.abort_all();
+    while let Some(result) = connections.join_next().await {
+        log_http_connection_result(Some(result));
+    }
+}
+
 struct HttpBodyStream {
     body: NacelleBody,
     runtime_state: NacelleRuntimeState,
@@ -413,6 +508,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_shutdown_aborts_after_drain_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let runtime_state = crate::limits::NacelleRuntimeState::default();
+        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok(NacelleResponse::http_bytes(StatusCode::OK, "ok"))
+        }))
+        .with_runtime_state(runtime_state.clone());
+        let (shutdown, token) = crate::lifecycle::NacelleShutdown::pair();
+        let server_task = tokio::spawn(async move {
+            server
+                .serve_listener_with_shutdown_timeout(
+                    listener,
+                    token,
+                    std::time::Duration::from_millis(10),
+                )
+                .await
+        });
+
+        let _client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        wait_for_active_connections(&runtime_state, 1).await;
+
+        shutdown.shutdown();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), server_task)
+            .await
+            .expect("server should stop before test timeout")
+            .expect("server task should join")
+            .expect("server should exit cleanly");
+        assert_eq!(runtime_state.active_connections(), 0);
+    }
+
+    #[tokio::test]
     async fn http_handler_error_becomes_500_response() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -446,5 +579,21 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 500 Internal Server Error"));
         assert!(response.contains("handler error: boom"));
         server_task.abort();
+    }
+
+    async fn wait_for_active_connections(
+        runtime_state: &crate::limits::NacelleRuntimeState,
+        expected: usize,
+    ) {
+        for _ in 0..100 {
+            if runtime_state.active_connections() == expected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!(
+            "active connections did not reach {expected}; observed {}",
+            runtime_state.active_connections()
+        );
     }
 }
