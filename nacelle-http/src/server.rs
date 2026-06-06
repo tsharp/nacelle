@@ -360,7 +360,6 @@ where
         drain_deadline: NacelleDrainDeadline,
     ) -> Result<(), NacelleError> {
         let server = Arc::new(self);
-        let acceptor = tokio_rustls::TlsAcceptor::from(tls_config.server_config());
         let handshake_timeout = tls_config.handshake_timeout();
         let mut connections = tokio::task::JoinSet::new();
         loop {
@@ -374,7 +373,6 @@ where
                 accepted = listener.accept() => {
                     let (stream, peer_addr) = accepted?;
                     let server = server.clone();
-                    let acceptor = acceptor.clone();
                     let connection_permit = match server
                         .runtime_state
                         .acquire_connection_for_peer(peer_addr.ip())
@@ -388,6 +386,7 @@ where
                         }
                     };
                     server.telemetry.connection_opened(NacelleTransport::Http);
+                    let acceptor = tokio_rustls::TlsAcceptor::from(tls_config.server_config());
                     connections.spawn(async move {
                         let tls_stream = match tokio::time::timeout(
                             handshake_timeout,

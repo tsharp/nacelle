@@ -1,7 +1,7 @@
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use rustls::ServerConfig;
@@ -17,7 +17,7 @@ pub struct NacelleGeneratedTlsConfig {
 
 #[derive(Debug, Clone)]
 pub struct NacelleTlsConfig {
-    server_config: Arc<ServerConfig>,
+    server_config: Arc<RwLock<Arc<ServerConfig>>>,
     handshake_timeout: Duration,
 }
 
@@ -30,14 +30,14 @@ impl NacelleTlsConfig {
     pub fn from_server_config(mut server_config: ServerConfig) -> Self {
         ensure_http1_alpn(&mut server_config);
         Self {
-            server_config: Arc::new(server_config),
+            server_config: Arc::new(RwLock::new(Arc::new(server_config))),
             handshake_timeout: Duration::from_secs(10),
         }
     }
 
     pub fn from_server_config_arc(server_config: Arc<ServerConfig>) -> Self {
         Self {
-            server_config,
+            server_config: Arc::new(RwLock::new(server_config)),
             handshake_timeout: Duration::from_secs(10),
         }
     }
@@ -94,13 +94,57 @@ impl NacelleTlsConfig {
         self
     }
 
+    pub fn replace_server_config(&self, mut server_config: ServerConfig) {
+        ensure_http1_alpn(&mut server_config);
+        self.replace_server_config_arc(Arc::new(server_config));
+    }
+
+    pub fn replace_server_config_arc(&self, server_config: Arc<ServerConfig>) {
+        *self
+            .server_config
+            .write()
+            .expect("TLS server config lock poisoned") = server_config;
+    }
+
+    pub fn reload_from_der(
+        &self,
+        certificates: Vec<CertificateDer<'static>>,
+        private_key: PrivateKeyDer<'static>,
+    ) -> io::Result<()> {
+        let config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certificates, private_key)
+            .map_err(io::Error::other)?;
+        self.replace_server_config(config);
+        Ok(())
+    }
+
+    pub fn reload_from_pem(&self, certificates: &[u8], private_key: &[u8]) -> io::Result<()> {
+        let certificates = parse_pem_certificates(certificates)?;
+        let private_key = parse_pem_private_key(private_key)?;
+        self.reload_from_der(certificates, private_key)
+    }
+
+    pub fn reload_from_pem_files(
+        &self,
+        certificate_path: impl AsRef<Path>,
+        private_key_path: impl AsRef<Path>,
+    ) -> io::Result<()> {
+        let certificates = fs::read(certificate_path)?;
+        let private_key = fs::read(private_key_path)?;
+        self.reload_from_pem(&certificates, &private_key)
+    }
+
     pub fn provider(&self) -> NacelleTlsProvider {
         NacelleTlsProvider::Rustls
     }
 
     #[doc(hidden)]
     pub fn server_config(&self) -> Arc<ServerConfig> {
-        self.server_config.clone()
+        self.server_config
+            .read()
+            .expect("TLS server config lock poisoned")
+            .clone()
     }
 
     #[doc(hidden)]
@@ -183,6 +227,14 @@ mod tests {
         let generated = NacelleTlsConfig::self_signed(["localhost"]).expect("self-signed config");
         assert!(generated.certificate_pem.contains("BEGIN CERTIFICATE"));
         assert!(generated.private_key_pem.contains("BEGIN PRIVATE KEY"));
+        assert_eq!(generated.tls_config.provider(), NacelleTlsProvider::Rustls);
+        generated
+            .tls_config
+            .reload_from_pem(
+                generated.certificate_pem.as_bytes(),
+                generated.private_key_pem.as_bytes(),
+            )
+            .expect("generated certificate should reload");
         assert!(
             generated
                 .tls_config
