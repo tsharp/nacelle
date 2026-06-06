@@ -132,7 +132,11 @@ fits inside the process/container memory budget with room left for handlers, bac
 Nacelle emits structured `tracing` events for listener, connection, request completion, and request failure events. Enable the `otel` feature to also record OpenTelemetry metrics:
 
 - `nacelle.connections`
+- `nacelle.connections.active`
 - `nacelle.requests`
+- `nacelle.requests.active`
+- `nacelle.streaming_tasks.active`
+- `nacelle.memory.used_bytes`
 - `nacelle.request_errors`
 - `nacelle.rejections`
 - `nacelle.timeouts`
@@ -144,6 +148,9 @@ Nacelle emits structured `tracing` events for listener, connection, request comp
 
 Production notes:
 
+- [Usage guide](docs/usage.md)
+- [Architecture](docs/architecture.md)
+- [Operations](docs/operations.md)
 - [HTTP hardening](docs/http-hardening.md)
 - [Production configuration](docs/production-configuration.md)
 - [Production checklist](docs/production-checklist.md)

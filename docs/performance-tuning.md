@@ -8,6 +8,10 @@ Suggested local benchmark:
 cargo bench -p nacelle --features bench,reference_protocol
 ```
 
+The `runtime_limits` benchmark group covers connection/request permit
+acquire/drop and memory reservation overhead. Watch it closely after changes to
+`NacelleRuntimeState`.
+
 Suggested RPS comparison:
 
 ```bash
