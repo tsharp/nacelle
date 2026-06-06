@@ -1,6 +1,9 @@
 use bytes::{Bytes, BytesMut};
-use criterion::{BatchSize, BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use nacelle::{FrameRequest, LengthDelimitedProtocol, Protocol};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
+use nacelle::{
+    FrameRequest, LengthDelimitedProtocol, NacelleLimits, NacelleRuntimeState, Protocol,
+};
+use std::hint::black_box;
 
 fn protocol_frame_benches(c: &mut Criterion) {
     let protocol = LengthDelimitedProtocol;
@@ -87,5 +90,47 @@ fn protocol_frame_benches(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(critical_paths, protocol_frame_benches);
+fn runtime_limit_benches(c: &mut Criterion) {
+    let state = NacelleRuntimeState::new(
+        NacelleLimits::default()
+            .with_max_connections(128_000)
+            .with_max_in_flight_requests(128_000)
+            .with_max_streaming_tasks(128_000)
+            .with_max_memory_bytes(8 * 1024 * 1024 * 1024),
+    );
+
+    let mut group = c.benchmark_group("runtime_limits");
+    group.bench_function("request_permit_acquire_drop", |b| {
+        b.iter(|| {
+            let permit = black_box(&state)
+                .acquire_request_tracked()
+                .expect("request permit");
+            black_box(&permit);
+            drop(permit);
+        })
+    });
+    group.bench_function("connection_permit_acquire_drop", |b| {
+        b.iter(|| {
+            let permit = black_box(&state)
+                .acquire_connection_tracked()
+                .expect("connection permit");
+            black_box(&permit);
+            drop(permit);
+        })
+    });
+    group.bench_function("memory_reserve_drop_1k", |b| {
+        b.iter(|| {
+            let reservation = black_box(&state).reserve_memory(1024).expect("memory");
+            black_box(&reservation);
+            drop(reservation);
+        })
+    });
+    group.finish();
+}
+
+criterion_group!(
+    critical_paths,
+    protocol_frame_benches,
+    runtime_limit_benches
+);
 criterion_main!(critical_paths);
