@@ -7,6 +7,8 @@ The current transports are:
 - `raw_tcp` (default) — custom protocol transport over TCP
 - `reference_protocol` — optional length-delimited example protocol
 - `http` — Hyper HTTP/1 server transport
+- `tls` — Rustls-backed TLS termination for HTTP
+- `tls-self-signed` — optional self-signed TLS generation for local load tests and auto-deploy flows
 - `otel` — OpenTelemetry metrics API integration
 - `tower` — adapter for `tower::Service<NacelleRequest>`
 
@@ -199,6 +201,9 @@ cargo run --features reference_protocol --example echo -- 127.0.0.1:8080
 # HTTP echo
 cargo run --no-default-features --features http --example http_echo -- 127.0.0.1:8080
 
+# HTTPS echo with an ephemeral self-signed certificate
+cargo run --no-default-features --features tls-self-signed --example tls_http_echo -- 127.0.0.1:8443
+
 # Raw TCP and HTTP with one shared handler and one host
 cargo run --features reference_protocol,http --example dual_echo -- 127.0.0.1:8080 127.0.0.1:8081
 ```
@@ -223,7 +228,7 @@ cargo run --release --package nacelle-stress-test -- \
 
 The optional reference protocol contract is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-TLS, authentication, and compression are not implemented in this prototype.
+Authentication and compression are not implemented in this prototype.
 
 ## License
 

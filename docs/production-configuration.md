@@ -5,7 +5,9 @@ Start from `NacelleLimits::default()` and tune downward for smaller machines. Av
 Recommended presets:
 
 - Internal service: keep defaults, set body limits to the largest expected payload, and run behind process supervision.
-- Internet-facing behind proxy: cap connections and requests to the container budget, keep 30 second header/body/write timeouts, and let the proxy own TLS and coarse traffic filtering.
+- Internet-facing behind proxy: cap connections and requests to the container budget, keep 30 second header/body/write timeouts, and let the proxy own coarse traffic filtering or certificate automation when desired.
+- Direct HTTPS listener: enable `tls`, load certificate/key material through `NacelleTlsConfig`, set a short TLS handshake timeout, configure `max_connections_per_peer`, and attach `NacelleHttpPolicy` with Host, method, URI, and header limits.
+- Local load-test/autodeploy HTTPS: enable `tls-self-signed` and call `NacelleTlsConfig::self_signed(...)`; do not treat generated certificates as a public trust or rotation strategy.
 - High concurrency: reduce raw TCP buffer capacities before raising `max_connections`.
 
 Memory budget:
@@ -26,4 +28,7 @@ Dangerous configurations:
 - unbounded connections with large per-connection buffers
 - large body limits without a process/container memory limit
 - disabled timeouts on internet-facing listeners
+- direct internet-facing HTTP without Host/header/method/URI policy
+- direct internet-facing listeners without per-peer connection caps
+- generated self-signed certificates used as a long-lived public-edge certificate strategy
 - high keep-alive connection counts without proxy-level idle limits

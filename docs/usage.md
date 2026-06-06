@@ -41,8 +41,39 @@ let server = HyperServer::new(handler_fn(|request: NacelleRequest| async move {
 server.serve("127.0.0.1:8081".parse()?).await?;
 ```
 
-HTTP deployments should generally sit behind a TLS-terminating proxy or load
-balancer. Nacelle still enforces request, body, timeout, and connection limits.
+Enable the `tls` feature to terminate HTTPS directly through Rustls:
+
+```rust
+let tls = NacelleTlsConfig::from_pem_files("cert.pem", "key.pem")?;
+server.serve_tls("127.0.0.1:8443".parse()?, tls).await?;
+```
+
+Enable `tls-self-signed` for local load tests or auto-deploy flows that need an
+immediate self-signed certificate:
+
+```rust
+let generated = NacelleTlsConfig::self_signed(["localhost", "127.0.0.1"])?;
+server.serve_tls(addr, generated.tls_config).await?;
+```
+
+For HTTP edge policy, attach `NacelleHttpPolicy` to reject unwanted requests
+before the handler runs:
+
+```rust
+let policy = NacelleHttpPolicy::new()
+    .with_allowed_hosts(["api.example.com"])
+    .with_allowed_methods([http::Method::GET, http::Method::POST])
+    .with_max_uri_len(4096)
+    .with_max_header_count(64)
+    .with_max_header_bytes(16 * 1024);
+
+let server = HyperServer::new(handler).with_http_policy(policy);
+```
+
+HTTP deployments may still sit behind a proxy or load balancer for coarse
+traffic filtering. Nacelle enforces request, body, timeout, TLS handshake,
+connection, optional per-peer connection caps, and optional
+Host/header/method/URI policy in-process.
 
 ## Multi-Listener Host
 
@@ -51,11 +82,19 @@ limit budget.
 
 ```rust
 let limits = NacelleLimits::default().with_max_connections(16_384);
+let limits = limits.with_max_connections_per_peer(512);
 let mut host = NacelleHost::new().with_limits(limits);
 host.enable_raw_tcp("raw", raw_server_addr, raw_server)
     .enable_http("http", http_addr, http_server);
 
 host.wait().await?;
+```
+
+With the `tls` feature enabled, use `enable_http_tls` for a host-managed HTTPS
+listener:
+
+```rust
+host.enable_http_tls("https", https_addr, http_server, tls_config);
 ```
 
 For graceful shutdown, call `shutdown_and_wait_timeout`. Listeners stop
@@ -73,9 +112,11 @@ host.shutdown_and_wait_timeout(Duration::from_secs(30)).await?;
 - active connections
 - in-flight requests
 - streaming body tasks
+- optional per-peer connections
 - memory reservations
 - request and response body size
 - raw and HTTP timeouts
+- TLS handshake timeout when `tls` is enabled
 
 Use explicit limits in production. Avoid `usize::MAX` outside benchmarks.
 
