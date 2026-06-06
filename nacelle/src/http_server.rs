@@ -298,13 +298,13 @@ fn incoming_to_body(
 ) -> NacelleBody {
     let (tx, body) = NacelleBody::channel(8);
     tokio::spawn(async move {
-        if let Some(body_len_hint) = body_len_hint {
-            if body_len_hint > runtime_state.limits().max_request_body_bytes {
-                let _ = tx
-                    .send(Err(NacelleError::ResourceLimit("request_body_bytes")))
-                    .await;
-                return;
-            }
+        if let Some(body_len_hint) = body_len_hint
+            && body_len_hint > runtime_state.limits().max_request_body_bytes
+        {
+            let _ = tx
+                .send(Err(NacelleError::ResourceLimit("request_body_bytes")))
+                .await;
+            return;
         }
         let _body_reservation = match body_len_hint {
             Some(bytes) => match runtime_state.reserve_memory(bytes) {
@@ -464,10 +464,10 @@ where
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<Result<usize, io::Error>> {
-        if self.write_sleep.is_some() {
-            if let Poll::Ready(result) = self.poll_write_deadline(cx) {
-                return Poll::Ready(result.map(|()| 0));
-            }
+        if self.write_sleep.is_some()
+            && let Poll::Ready(result) = self.poll_write_deadline(cx)
+        {
+            return Poll::Ready(result.map(|()| 0));
         }
         match Pin::new(&mut self.inner).poll_write(cx, buf) {
             Poll::Ready(result) => {
@@ -501,10 +501,10 @@ where
         cx: &mut Context<'_>,
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<Result<usize, io::Error>> {
-        if self.write_sleep.is_some() {
-            if let Poll::Ready(result) = self.poll_write_deadline(cx) {
-                return Poll::Ready(result.map(|()| 0));
-            }
+        if self.write_sleep.is_some()
+            && let Poll::Ready(result) = self.poll_write_deadline(cx)
+        {
+            return Poll::Ready(result.map(|()| 0));
         }
         match Pin::new(&mut self.inner).poll_write_vectored(cx, bufs) {
             Poll::Ready(result) => {

@@ -43,6 +43,7 @@ impl NacelleDrainDeadline {
         );
     }
 
+    #[allow(dead_code)]
     pub(crate) fn get(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.millis.load(std::sync::atomic::Ordering::Acquire))
     }
