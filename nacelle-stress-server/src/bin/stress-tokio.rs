@@ -351,7 +351,7 @@ async fn wait_for_shutdown_signal() -> Result<(), std::io::Error> {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config = parse_args(std::env::args().skip(1), "tokio")?;
     configure_allocator(config.low_memory);
-    let stats = Arc::new(StressServerStats::new());
+    let stats = Arc::new(StressServerStats::new(config.stats_enabled));
     let server = build_server(&config, stats.clone())?;
 
     #[cfg(not(target_os = "linux"))]

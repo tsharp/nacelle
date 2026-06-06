@@ -15,6 +15,11 @@ cargo run --release --package nacelle-stress-server --bin tokio-server -- --conf
 cargo run --release --package nacelle-stress-test -- --connections 128 --pipeline 64 --duration-secs 30
 ```
 
+The stress server defaults `stats_enabled = false` to avoid contended global
+per-request atomics in peak throughput runs. Add `--stats` or set
+`stats_enabled = true` when validating server-side counters rather than maximum
+RPS.
+
 Guardrails:
 
 - keep shutdown task tracking at the connection/listener boundary

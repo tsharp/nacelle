@@ -21,6 +21,7 @@ const DEFAULT_CONFIG_PATH: &str = "config.toml";
 
 #[derive(Debug)]
 pub struct StressServerStats {
+    enabled: bool,
     started_at: Instant,
     accepted_connections: AtomicU64,
     active_connections: AtomicU64,
@@ -49,13 +50,14 @@ pub struct StressServerStatsSnapshot {
 
 impl Default for StressServerStats {
     fn default() -> Self {
-        Self::new()
+        Self::new(false)
     }
 }
 
 impl StressServerStats {
-    pub fn new() -> Self {
+    pub fn new(enabled: bool) -> Self {
         Self {
+            enabled,
             started_at: Instant::now(),
             accepted_connections: AtomicU64::new(0),
             active_connections: AtomicU64::new(0),
@@ -69,12 +71,22 @@ impl StressServerStats {
         }
     }
 
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
     pub fn record_accepted_connection(&self) {
+        if !self.enabled {
+            return;
+        }
         self.accepted_connections.fetch_add(1, Ordering::Relaxed);
         self.active_connections.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_finished_connection(&self, failed: bool) {
+        if !self.enabled {
+            return;
+        }
         self.completed_connections.fetch_add(1, Ordering::Relaxed);
         if failed {
             self.failed_connections.fetch_add(1, Ordering::Relaxed);
@@ -82,6 +94,9 @@ impl StressServerStats {
     }
 
     pub fn record_inactive_connection(&self) {
+        if !self.enabled {
+            return;
+        }
         self.active_connections.fetch_sub(1, Ordering::Relaxed);
     }
 
@@ -109,6 +124,9 @@ impl StressServerStats {
     }
 
     fn record_finished_request(&self, failed: bool, request_bytes: u64, response_bytes: u64) {
+        if !self.enabled {
+            return;
+        }
         if failed {
             self.failed_requests.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -121,6 +139,9 @@ impl StressServerStats {
     }
 
     fn record_inactive_request(&self) {
+        if !self.enabled {
+            return;
+        }
         self.active_requests.fetch_sub(1, Ordering::Relaxed);
     }
 }
@@ -163,6 +184,7 @@ pub struct ServerConfig {
     pub request_body_chunk_size: usize,
     pub request_body_channel_capacity: usize,
     pub low_memory: bool,
+    pub stats_enabled: bool,
     pub limits: nacelle::NacelleLimits,
 }
 
@@ -180,6 +202,7 @@ impl Default for ServerConfig {
             request_body_chunk_size: 16 * 1024,
             request_body_channel_capacity: 8,
             low_memory: false,
+            stats_enabled: false,
             limits: nacelle::NacelleLimits::default(),
         }
     }
@@ -196,6 +219,7 @@ struct ServerConfigFile {
     request_body_chunk_size: Option<usize>,
     request_body_channel_capacity: Option<usize>,
     low_memory: Option<bool>,
+    stats_enabled: Option<bool>,
     limits: Option<LimitsConfigFile>,
 }
 
@@ -256,6 +280,9 @@ impl ServerConfig {
         }
         if let Some(low_memory) = file.low_memory {
             self.low_memory = low_memory;
+        }
+        if let Some(stats_enabled) = file.stats_enabled {
+            self.stats_enabled = stats_enabled;
         }
         if let Some(limits) = file.limits {
             self.apply_limits_file(limits);
@@ -346,6 +373,7 @@ pub fn build_server(
     stats: Arc<StressServerStats>,
 ) -> Result<RawTcpServer<FrameRequest, LengthDelimitedProtocol, impl Handler>, NacelleError> {
     let response_payload = Bytes::from(vec![0x5A; config.response_bytes]);
+    let stats_enabled = stats.enabled();
     RawTcpServer::<FrameRequest, ()>::builder()
         .protocol(LengthDelimitedProtocol)
         .config(
@@ -360,6 +388,20 @@ pub fn build_server(
             let response_payload = response_payload.clone();
             let stats = stats.clone();
             async move {
+                if !stats_enabled {
+                    let opcode = request.raw_tcp_opcode().unwrap_or_default();
+                    while let Some(chunk) = request.body.next_chunk().await {
+                        let _ = chunk?;
+                    }
+                    if opcode != STRESS_OPCODE {
+                        return Err(NacelleError::handler(std::io::Error::other(format!(
+                            "unknown opcode {}",
+                            opcode
+                        ))));
+                    }
+                    return Ok(NacelleResponse::raw_tcp_bytes(response_payload));
+                }
+
                 let request_stats = stats.start_request();
                 let opcode = request.raw_tcp_opcode().unwrap_or_default();
                 let mut request_body_bytes = 0_u64;
@@ -448,6 +490,9 @@ fn parse_args_with_default_config(
             "--low-memory" => {
                 config.low_memory = true;
             }
+            "--stats" => {
+                config.stats_enabled = true;
+            }
             other => {
                 return Err(format!("unknown argument: {other}").into());
             }
@@ -487,6 +532,7 @@ pub fn print_config(config: &ServerConfig, runtime: &str, actual_server_threads:
         config.request_body_channel_capacity
     );
     println!("  low_memory: {}", config.low_memory);
+    println!("  stats_enabled: {}", config.stats_enabled);
     println!("  limits:");
     println!("    max_connections: {}", config.limits.max_connections);
     println!(
@@ -625,6 +671,8 @@ pub fn print_help(runtime: &str) {
                                                      Equivalent env vars (no recompile required):\n\
                                                        MIMALLOC_PURGE_DELAY=0\n\
                                                        MIMALLOC_ARENA_EAGER_COMMIT=0\n\
+           --stats                                   Enable server-side per-request atomic counters.\n\
+                                                     Leave disabled for peak throughput benchmarks.\n\
          \n\
          Config:\n\
            If ./config.toml exists, it is loaded automatically. Explicit\n\
@@ -649,6 +697,7 @@ response_buffer_capacity = 2048
 request_body_chunk_size = 1024
 request_body_channel_capacity = 2
 low_memory = true
+stats_enabled = true
 
 [limits]
 max_connections = 128000
@@ -679,6 +728,7 @@ http_max_connection_age_ms = 300000
         assert_eq!(config.request_body_chunk_size, 1024);
         assert_eq!(config.request_body_channel_capacity, 2);
         assert!(config.low_memory);
+        assert!(config.stats_enabled);
         assert_eq!(config.limits.max_connections, 128_000);
         assert_eq!(config.limits.max_in_flight_requests, 64_000);
         assert_eq!(config.limits.max_streaming_tasks, 8_192);
