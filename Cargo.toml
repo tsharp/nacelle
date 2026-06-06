@@ -1,5 +1,12 @@
 [workspace]
-members = ["nacelle", "nacelle-stress-test", "nacelle-stress-server"]
+members = [
+    "nacelle-core",
+    "nacelle-tcp",
+    "nacelle-http",
+    "nacelle",
+    "nacelle-stress-test",
+    "nacelle-stress-server",
+]
 resolver = "2"
 
 [profile.release]

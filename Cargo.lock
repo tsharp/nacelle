@@ -750,6 +750,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "nacelle-core"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "http",
+ "opentelemetry",
+ "pem",
+ "rcgen",
+ "rustls",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "nacelle-http"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "nacelle-core",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+]
+
+[[package]]
 name = "nacelle-stress-server"
 version = "0.1.0"
 dependencies = [
@@ -770,6 +801,16 @@ dependencies = [
  "mimalloc",
  "nacelle",
  "tokio",
+]
+
+[[package]]
+name = "nacelle-tcp"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "nacelle-core",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
