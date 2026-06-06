@@ -165,6 +165,12 @@ dotnet tool restore
 dotnet docfx docfx.json
 ```
 
+On Windows, the same build can be run with:
+
+```powershell
+.\scripts\build-docs.ps1
+```
+
 Internal readiness plans, assessments, and checklists live under `docs/internal`
 and are excluded from the generated DocFX site.
 
