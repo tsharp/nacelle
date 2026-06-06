@@ -76,6 +76,8 @@ pub use telemetry::{
     NacelleInMemoryTelemetrySink, NacelleTelemetry, NacelleTelemetryEvent,
     NacelleTelemetryEventKind, NacelleTelemetrySink, NacelleTransport,
 };
+#[cfg(feature = "tls-self-signed")]
+pub use tls::NacelleGeneratedTlsConfig;
 #[cfg(feature = "tls")]
 pub use tls::NacelleTlsConfig;
 #[cfg(feature = "tower")]

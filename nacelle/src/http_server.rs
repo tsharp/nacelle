@@ -1170,6 +1170,59 @@ mod tests {
         server_task.abort();
     }
 
+    #[cfg(feature = "tls-self-signed")]
+    #[tokio::test]
+    async fn http_tls_self_signed_server_accepts_request() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let generated =
+            crate::tls::NacelleTlsConfig::self_signed(["localhost"]).expect("self-signed tls");
+        let certificate = rustls_pemfile::certs(&mut generated.certificate_pem.as_bytes())
+            .next()
+            .expect("certificate should be present")
+            .expect("certificate should parse");
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).expect("root cert should add");
+        let client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
+        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
+            Ok(NacelleResponse::http_bytes(StatusCode::OK, "tls ok"))
+        }));
+        let server_task = tokio::spawn(async move {
+            server
+                .serve_tls_listener(listener, generated.tls_config)
+                .await
+        });
+
+        let stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        let server_name =
+            rustls::pki_types::ServerName::try_from("localhost").expect("valid server name");
+        let mut client = connector
+            .connect(server_name, stream)
+            .await
+            .expect("tls should connect");
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("request should write");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("response should read");
+        let response = String::from_utf8(response).expect("response should be utf8");
+
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("tls ok"));
+        server_task.abort();
+    }
+
     async fn wait_for_active_connections(
         runtime_state: &crate::limits::NacelleRuntimeState,
         expected: usize,
