@@ -831,6 +831,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_trickle_request_body_times_out() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let runtime_state = crate::limits::NacelleRuntimeState::new(
+            crate::limits::NacelleLimits::default()
+                .with_http_request_body_read_timeout(std::time::Duration::from_millis(20)),
+        );
+        let server = HyperServer::new(handler_fn(|mut request: NacelleRequest| async move {
+            while let Some(chunk) = request.body.next_chunk().await {
+                let _ = chunk?;
+            }
+            Ok(NacelleResponse::http_bytes(StatusCode::OK, "ok"))
+        }))
+        .with_runtime_state(runtime_state);
+        let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        client
+            .write_all(
+                b"POST / HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Content-Length: 11\r\n\
+                  Connection: close\r\n\
+                  \r\n",
+            )
+            .await
+            .expect("headers should write");
+
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.read_to_end(&mut response),
+        )
+        .await
+        .expect("server should respond before test timeout")
+        .expect("response should read");
+        let response = String::from_utf8(response).expect("response should be utf8");
+        assert!(response.starts_with("HTTP/1.1 500 Internal Server Error"));
+        assert!(response.contains("http_body_read"));
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn http_slow_response_reader_times_out_or_drains() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let runtime_state = crate::limits::NacelleRuntimeState::new(
+            crate::limits::NacelleLimits::default()
+                .with_http_response_write_timeout(std::time::Duration::from_millis(20)),
+        );
+        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
+            let (tx, body) = NacelleBody::channel(1);
+            tokio::spawn(async move {
+                let chunk = Bytes::from(vec![0x5A; 16 * 1024]);
+                for _ in 0..512 {
+                    if tx.send(Ok(chunk.clone())).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            Ok(NacelleResponse::http(
+                StatusCode::OK,
+                http::HeaderMap::new(),
+                body,
+            ))
+        }))
+        .with_runtime_state(runtime_state.clone());
+        let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("request should write");
+        let mut headers = [0_u8; 128];
+        let _ = client
+            .read(&mut headers)
+            .await
+            .expect("response headers should start");
+
+        wait_for_active_connections(&runtime_state, 0).await;
+        drop(client);
+        server_task.abort();
+    }
+
+    #[tokio::test]
     async fn http_handler_error_becomes_500_response() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await

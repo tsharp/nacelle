@@ -762,6 +762,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_tcp_trickle_body_times_out() {
+        let protocol = LengthDelimitedProtocol;
+        let server = NacelleServer::<FrameRequest, ()>::builder()
+            .protocol(protocol)
+            .runtime_state(NacelleRuntimeState::new(
+                NacelleLimits::default().with_read_timeout(Duration::from_millis(20)),
+            ))
+            .handler(handler_fn(|mut request: NacelleRequest| async move {
+                while let Some(chunk) = request.body.next_chunk().await {
+                    let _ = chunk?;
+                }
+                Ok(NacelleResponse::empty_raw_tcp())
+            }))
+            .build()
+            .expect("server should build");
+
+        let (mut client, server_io) = tokio::io::duplex(256);
+        let server_task = tokio::spawn(async move { server.serve_io(server_io).await });
+        let mut head = Vec::new();
+        head.extend_from_slice(&24_u32.to_le_bytes());
+        head.extend_from_slice(&42_u64.to_le_bytes());
+        head.extend_from_slice(&1_u64.to_le_bytes());
+        head.extend_from_slice(&0_u32.to_le_bytes());
+        client.write_all(&head).await.expect("head should write");
+
+        let error = tokio::time::timeout(Duration::from_secs(1), server_task)
+            .await
+            .expect("server should time out before test timeout")
+            .expect("server task should join")
+            .expect_err("server should reject trickle body");
+        assert!(matches!(error, NacelleError::Timeout("request_body_read")));
+    }
+
+    #[tokio::test]
     async fn multiple_response_writes_become_ordered_frames() {
         let protocol = LengthDelimitedProtocol;
         let server = NacelleServer::<FrameRequest, ()>::builder()

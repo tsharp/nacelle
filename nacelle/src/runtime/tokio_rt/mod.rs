@@ -231,6 +231,9 @@ mod tests {
     use crate::handler::handler_fn;
     use crate::reference_protocol::{FrameRequest, LengthDelimitedProtocol};
     use crate::response::NacelleResponse;
+    use crate::telemetry::{
+        NacelleInMemoryTelemetrySink, NacelleTelemetry, NacelleTelemetryEventKind,
+    };
 
     #[tokio::test]
     async fn raw_tcp_shutdown_aborts_after_drain_deadline() {
@@ -270,6 +273,67 @@ mod tests {
             .expect("server task should join")
             .expect("server should exit cleanly");
         assert_eq!(runtime_state.active_connections(), 0);
+    }
+
+    #[tokio::test]
+    async fn raw_tcp_connection_flood_is_bounded() {
+        let runtime_state = crate::limits::NacelleRuntimeState::new(
+            crate::limits::NacelleLimits::default().with_max_connections(1),
+        );
+        let telemetry_sink = Arc::new(NacelleInMemoryTelemetrySink::new());
+        let telemetry = NacelleTelemetry::new().with_sink(telemetry_sink.clone());
+        let server = crate::server::NacelleServer::<FrameRequest, ()>::builder()
+            .protocol(LengthDelimitedProtocol)
+            .runtime_state(runtime_state.clone())
+            .telemetry(telemetry)
+            .handler(handler_fn(|request: crate::NacelleRequest| async move {
+                Ok(NacelleResponse::raw_tcp(request.body))
+            }))
+            .build()
+            .expect("server should build");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let (shutdown, token) = crate::lifecycle::NacelleShutdown::pair();
+        let server_task = tokio::spawn(serve_tcp_listener_with_shutdown_deadline(
+            Arc::new(server),
+            listener,
+            token,
+            NacelleDrainDeadline::new(Duration::from_millis(10)),
+        ));
+
+        let held = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("held client should connect");
+        wait_for_active_connections(&runtime_state, 1).await;
+
+        let mut rejected_clients = Vec::new();
+        for _ in 0..16 {
+            rejected_clients.push(
+                tokio::net::TcpStream::connect(addr)
+                    .await
+                    .expect("extra client should connect before rejection"),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(runtime_state.active_connections(), 1);
+        assert!(telemetry_sink.events().iter().any(|event| {
+            event.kind == NacelleTelemetryEventKind::ConnectionRejected
+                && event.reason == Some("connections")
+        }));
+
+        drop(rejected_clients);
+        drop(held);
+        wait_for_active_connections(&runtime_state, 0).await;
+
+        shutdown.shutdown();
+        tokio::time::timeout(Duration::from_secs(1), server_task)
+            .await
+            .expect("server should stop before test timeout")
+            .expect("server task should join")
+            .expect("server should exit cleanly");
     }
 
     async fn wait_for_active_connections(
