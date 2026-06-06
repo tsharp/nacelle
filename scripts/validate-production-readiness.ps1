@@ -6,6 +6,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p nacelle --features reference_protocol,http,tower,otel --all-targets
 cargo clippy -p nacelle --features reference_protocol,http,tower,otel --all-targets -- -D warnings
 cargo test -p nacelle --no-default-features --features http --all-targets
+cargo test -p nacelle --no-default-features --features tls --all-targets
+cargo test -p nacelle --no-default-features --features tls-self-signed --all-targets
+cargo clippy -p nacelle --features reference_protocol,http,tower,otel,tls-self-signed --all-targets -- -D warnings
 cargo test -p nacelle --no-default-features --all-targets
 cargo test -p nacelle-stress-server --all-targets
 
