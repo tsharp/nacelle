@@ -1,10 +1,11 @@
-# Nacelle Documentation
+# Nacelle Documentation Notes
 
 Nacelle is an experimental Tokio-based Rust library for streaming application
 handlers across raw TCP and HTTP transports.
 
-Use this documentation for application integration, operational limits,
-transport behavior, and production validation.
+Use these Markdown notes for application integration, operational limits,
+transport behavior, and production validation. Generated API reference is built
+with `cargo doc`.
 
 ## Start Here
 
@@ -24,5 +25,4 @@ transport behavior, and production validation.
 - [Performance tuning](performance-tuning.md)
 - [API stability](api-stability.md)
 
-Internal readiness plans and assessments live under `docs/internal` and are not
-included in the generated DocFX site.
+Internal readiness plans and assessments live under `docs/internal`.

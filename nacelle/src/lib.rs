@@ -1,3 +1,24 @@
+//! Streaming application handlers across raw TCP and HTTP transports.
+//!
+//! Nacelle centers application code around one async handler shape:
+//!
+//! ```rust,no_run
+//! # use nacelle::{NacelleError, NacelleRequest, NacelleResponse};
+//! async fn handle(request: NacelleRequest) -> Result<NacelleResponse, NacelleError> {
+//!     Ok(NacelleResponse::raw_tcp(request.body))
+//! }
+//! ```
+//!
+//! Use [`handler_fn`] for simple services, [`RawTcpServer`] for custom raw TCP
+//! protocols, [`HyperServer`] for HTTP/1, and [`NacelleHost`] when one process
+//! owns several listeners with shared limits.
+//!
+//! Production deployments should configure [`NacelleLimits`] explicitly and
+//! attach [`NacelleTelemetry`] to expose low-cardinality lifecycle, request,
+//! rejection, timeout, and byte-accounting events.
+//!
+//! Additional operational notes live in the repository `docs/` directory.
+
 pub mod config;
 #[cfg(feature = "raw_tcp")]
 pub mod connection;
