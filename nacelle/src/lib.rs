@@ -53,7 +53,7 @@ pub use error::{BoxError, NacelleError};
 pub use handler::{Handler, HandlerFn, handler_fn};
 pub use host::NacelleHost;
 #[cfg(feature = "http")]
-pub use http_server::HyperServer;
+pub use http_server::{HyperServer, NacelleHttpPolicy};
 pub use lifecycle::{NacelleShutdown, NacelleShutdownToken};
 pub use limits::{MemoryReservation, NacelleLimits, NacelleRuntimeState};
 #[cfg(feature = "raw_tcp")]

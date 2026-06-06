@@ -13,7 +13,7 @@ use http_body_util::{BodyExt, Full, StreamBody, combinators::BoxBody};
 use hyper::body::{Body, Frame, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode};
+use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -33,6 +33,55 @@ pub struct HyperServer<H = ()> {
     handler: H,
     telemetry: NacelleTelemetry,
     runtime_state: NacelleRuntimeState,
+    http_policy: NacelleHttpPolicy,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NacelleHttpPolicy {
+    allowed_hosts: Option<Vec<String>>,
+    allowed_methods: Option<Vec<Method>>,
+    max_uri_len: Option<usize>,
+    max_header_count: Option<usize>,
+    max_header_bytes: Option<usize>,
+}
+
+impl NacelleHttpPolicy {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_allowed_hosts(
+        mut self,
+        hosts: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.allowed_hosts = Some(
+            hosts
+                .into_iter()
+                .map(|host| host.into().trim_end_matches('.').to_ascii_lowercase())
+                .collect(),
+        );
+        self
+    }
+
+    pub fn with_allowed_methods(mut self, methods: impl IntoIterator<Item = Method>) -> Self {
+        self.allowed_methods = Some(methods.into_iter().collect());
+        self
+    }
+
+    pub fn with_max_uri_len(mut self, max: usize) -> Self {
+        self.max_uri_len = Some(max);
+        self
+    }
+
+    pub fn with_max_header_count(mut self, max: usize) -> Self {
+        self.max_header_count = Some(max);
+        self
+    }
+
+    pub fn with_max_header_bytes(mut self, max: usize) -> Self {
+        self.max_header_bytes = Some(max);
+        self
+    }
 }
 
 impl<H> Clone for HyperServer<H>
@@ -44,6 +93,7 @@ where
             handler: self.handler.clone(),
             telemetry: self.telemetry.clone(),
             runtime_state: self.runtime_state.clone(),
+            http_policy: self.http_policy.clone(),
         }
     }
 }
@@ -60,6 +110,7 @@ where
             handler,
             telemetry,
             runtime_state,
+            http_policy: NacelleHttpPolicy::default(),
         }
     }
 
@@ -72,6 +123,11 @@ where
     pub fn with_runtime_state(mut self, runtime_state: NacelleRuntimeState) -> Self {
         self.telemetry.register_runtime_state(runtime_state.clone());
         self.runtime_state = runtime_state;
+        self
+    }
+
+    pub fn with_http_policy(mut self, http_policy: NacelleHttpPolicy) -> Self {
+        self.http_policy = http_policy;
         self
     }
 
@@ -315,6 +371,15 @@ where
 
     async fn handle(&self, request: Request<Incoming>) -> Result<Response<HttpBody>, NacelleError> {
         let request_started = std::time::Instant::now();
+        if let Some(rejection) = validate_http_policy(&self.http_policy, &request) {
+            self.telemetry
+                .request_rejected(NacelleTransport::Http, rejection.reason);
+            return response_to_http(
+                NacelleResponse::http_bytes(rejection.status, rejection.reason),
+                self.runtime_state.clone(),
+                self.telemetry.clone(),
+            );
+        }
         let _request_permit = match self.runtime_state.acquire_request_tracked() {
             Ok(permit) => permit,
             Err(error) => {
@@ -531,6 +596,90 @@ fn nacelle_body_to_http(
     })
     .map_err(|error| -> BoxError { Box::new(error) })
     .boxed()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HttpRejection {
+    status: StatusCode,
+    reason: &'static str,
+}
+
+fn validate_http_policy(
+    policy: &NacelleHttpPolicy,
+    request: &Request<Incoming>,
+) -> Option<HttpRejection> {
+    if let Some(max_uri_len) = policy.max_uri_len
+        && request.uri().to_string().len() > max_uri_len
+    {
+        return Some(HttpRejection {
+            status: StatusCode::URI_TOO_LONG,
+            reason: "uri_too_long",
+        });
+    }
+
+    if let Some(methods) = &policy.allowed_methods
+        && !methods.iter().any(|method| method == request.method())
+    {
+        return Some(HttpRejection {
+            status: StatusCode::METHOD_NOT_ALLOWED,
+            reason: "method_not_allowed",
+        });
+    }
+
+    if let Some(max_header_count) = policy.max_header_count
+        && request.headers().len() > max_header_count
+    {
+        return Some(HttpRejection {
+            status: StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            reason: "header_count",
+        });
+    }
+
+    if let Some(max_header_bytes) = policy.max_header_bytes {
+        let header_bytes = request
+            .headers()
+            .iter()
+            .try_fold(0_usize, |total, (name, value)| {
+                total
+                    .checked_add(name.as_str().len())?
+                    .checked_add(value.as_bytes().len())
+            });
+        if header_bytes.is_none_or(|bytes| bytes > max_header_bytes) {
+            return Some(HttpRejection {
+                status: StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                reason: "header_bytes",
+            });
+        }
+    }
+
+    if let Some(hosts) = &policy.allowed_hosts
+        && !host_allowed(hosts, request)
+    {
+        return Some(HttpRejection {
+            status: StatusCode::MISDIRECTED_REQUEST,
+            reason: "host",
+        });
+    }
+
+    None
+}
+
+fn host_allowed(allowed_hosts: &[String], request: &Request<Incoming>) -> bool {
+    let Some(host) = request
+        .headers()
+        .get(http::header::HOST)
+        .and_then(|host| host.to_str().ok())
+    else {
+        return false;
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let host_without_port = host
+        .split_once(':')
+        .map(|(host, _port)| host)
+        .unwrap_or(host.as_str());
+    allowed_hosts
+        .iter()
+        .any(|allowed| allowed == &host || allowed == host_without_port)
 }
 
 async fn run_http_connection<H, I>(
@@ -1223,6 +1372,87 @@ mod tests {
         server_task.abort();
     }
 
+    #[tokio::test]
+    async fn http_policy_rejects_disallowed_host_before_handler() {
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_for_handler = called.clone();
+        let (response, events) = http_policy_response(
+            NacelleHttpPolicy::new().with_allowed_hosts(["example.com"]),
+            handler_fn(move |_request: NacelleRequest| {
+                let called_for_handler = called_for_handler.clone();
+                async move {
+                    called_for_handler.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(NacelleResponse::http_bytes(StatusCode::OK, "handler"))
+                }
+            }),
+            b"GET / HTTP/1.1\r\nHost: wrong.example\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+
+        assert!(response.starts_with("HTTP/1.1 421 Misdirected Request"));
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(events.iter().any(|event| {
+            event.kind == crate::NacelleTelemetryEventKind::RequestRejected
+                && event.reason == Some("host")
+        }));
+    }
+
+    #[tokio::test]
+    async fn http_policy_rejects_disallowed_method_before_handler() {
+        let (response, events) = http_policy_response(
+            NacelleHttpPolicy::new().with_allowed_methods([Method::GET]),
+            handler_fn(|_request: NacelleRequest| async move {
+                Ok(NacelleResponse::http_bytes(StatusCode::OK, "handler"))
+            }),
+            b"POST / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+
+        assert!(response.starts_with("HTTP/1.1 405 Method Not Allowed"));
+        assert!(events.iter().any(|event| {
+            event.kind == crate::NacelleTelemetryEventKind::RequestRejected
+                && event.reason == Some("method_not_allowed")
+        }));
+    }
+
+    #[tokio::test]
+    async fn http_policy_rejects_long_uri_before_handler() {
+        let (response, events) = http_policy_response(
+            NacelleHttpPolicy::new().with_max_uri_len(4),
+            handler_fn(|_request: NacelleRequest| async move {
+                Ok(NacelleResponse::http_bytes(StatusCode::OK, "handler"))
+            }),
+            b"GET /too-long HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+
+        assert!(response.starts_with("HTTP/1.1 414 URI Too Long"));
+        assert!(events.iter().any(|event| {
+            event.kind == crate::NacelleTelemetryEventKind::RequestRejected
+                && event.reason == Some("uri_too_long")
+        }));
+    }
+
+    #[tokio::test]
+    async fn http_policy_rejects_header_count_and_bytes_before_handler() {
+        let (response, events) = http_policy_response(
+            NacelleHttpPolicy::new()
+                .with_max_header_count(1)
+                .with_max_header_bytes(16),
+            handler_fn(|_request: NacelleRequest| async move {
+                Ok(NacelleResponse::http_bytes(StatusCode::OK, "handler"))
+            }),
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nX-Long: abcdefghijklmnop\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+
+        assert!(response.starts_with("HTTP/1.1 431 Request Header Fields Too Large"));
+        assert!(events.iter().any(|event| {
+            event.kind == crate::NacelleTelemetryEventKind::RequestRejected
+                && matches!(event.reason, Some("header_count" | "header_bytes"))
+        }));
+    }
+
     async fn wait_for_active_connections(
         runtime_state: &crate::limits::NacelleRuntimeState,
         expected: usize,
@@ -1250,5 +1480,44 @@ mod tests {
             "memory did not reach {expected}; observed {}",
             runtime_state.memory_used_bytes()
         );
+    }
+
+    async fn http_policy_response<H>(
+        policy: NacelleHttpPolicy,
+        handler: H,
+        request: &[u8],
+    ) -> (String, Vec<crate::NacelleTelemetryEvent>)
+    where
+        H: Handler,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let sink = Arc::new(crate::NacelleInMemoryTelemetrySink::new());
+        let telemetry = NacelleTelemetry::new().with_sink(sink.clone());
+        let server = HyperServer::new(handler)
+            .with_telemetry(telemetry)
+            .with_http_policy(policy);
+        let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        client
+            .write_all(request)
+            .await
+            .expect("request should write");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("response should read");
+        server_task.abort();
+
+        (
+            String::from_utf8(response).expect("response should be utf8"),
+            sink.events(),
+        )
     }
 }

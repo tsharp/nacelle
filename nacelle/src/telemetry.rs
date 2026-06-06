@@ -25,6 +25,7 @@ pub enum NacelleTelemetryEventKind {
     ListenerFailed,
     ConnectionOpened,
     ConnectionRejected,
+    RequestRejected,
     RequestCompleted,
     RequestFailed,
     ResponseBodyBytes,
@@ -178,6 +179,29 @@ impl NacelleTelemetry {
         );
         self.record(NacelleTelemetryEvent {
             kind: NacelleTelemetryEventKind::ConnectionRejected,
+            transport: Some(transport),
+            reason: Some(reason),
+            count: 1,
+        });
+        #[cfg(feature = "otel")]
+        self.metrics.rejection_count.add(
+            1,
+            &[
+                opentelemetry::KeyValue::new("transport", transport.as_str()),
+                opentelemetry::KeyValue::new("reason", reason),
+            ],
+        );
+    }
+
+    pub fn request_rejected(&self, transport: NacelleTransport, reason: &'static str) {
+        tracing::warn!(
+            target: "nacelle",
+            transport = transport.as_str(),
+            reason,
+            "request rejected"
+        );
+        self.record(NacelleTelemetryEvent {
+            kind: NacelleTelemetryEventKind::RequestRejected,
             transport: Some(transport),
             reason: Some(reason),
             count: 1,
@@ -489,6 +513,7 @@ mod tests {
         let telemetry = NacelleTelemetry::new().with_sink(sink.clone());
 
         telemetry.connection_rejected(NacelleTransport::RawTcp, "connections");
+        telemetry.request_rejected(NacelleTransport::Http, "host");
         telemetry.timeout(NacelleTransport::RawTcp, "request_body_read");
         telemetry.shutdown_requested();
         telemetry.shutdown_event(
@@ -501,13 +526,15 @@ mod tests {
             events.iter().map(|event| event.kind).collect::<Vec<_>>(),
             vec![
                 NacelleTelemetryEventKind::ConnectionRejected,
+                NacelleTelemetryEventKind::RequestRejected,
                 NacelleTelemetryEventKind::Timeout,
                 NacelleTelemetryEventKind::ShutdownRequested,
                 NacelleTelemetryEventKind::DrainCompleted,
             ]
         );
         assert_eq!(events[0].reason, Some("connections"));
-        assert_eq!(events[1].reason, Some("request_body_read"));
-        assert_eq!(events[2].transport, None);
+        assert_eq!(events[1].reason, Some("host"));
+        assert_eq!(events[2].reason, Some("request_body_read"));
+        assert_eq!(events[3].transport, None);
     }
 }
