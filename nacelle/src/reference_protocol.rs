@@ -1,9 +1,9 @@
 use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::error::NacelleError;
-use crate::protocol::{DecodedRequest, Protocol};
-use crate::request::{RawTcpRequestMeta, RequestMetadata};
 use crate::util::checked_u32_len;
+use nacelle_core::error::NacelleError;
+use nacelle_core::request::{RawTcpRequestMeta, RequestMetadata};
+use nacelle_tcp::protocol::{DecodedRequest, Protocol};
 
 const HEADER_LEN: usize = 24;
 const FIXED_FRAME_FIELDS_LEN: usize = HEADER_LEN - 4;
@@ -129,7 +129,7 @@ impl Protocol<FrameRequest> for LengthDelimitedProtocol {
     fn apply_raw_tcp_response_meta(
         &self,
         context: &mut Self::ResponseContext,
-        meta: &crate::response::RawTcpResponseMeta,
+        meta: &nacelle_core::response::RawTcpResponseMeta,
     ) {
         if let Some(request_id) = meta.request_id {
             context.request_id = request_id;

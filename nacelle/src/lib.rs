@@ -19,66 +19,55 @@
 //!
 //! Additional operational notes live in the repository `docs/` directory.
 
-pub mod config;
+pub use nacelle_core::{config, error, handler, lifecycle, limits, request, response, telemetry};
 #[cfg(feature = "raw_tcp")]
-pub mod connection;
-pub mod error;
-pub mod handler;
+pub use nacelle_tcp::{connection, protocol, server};
+
 pub mod host;
 #[cfg(feature = "http")]
-pub mod http_server;
-pub mod lifecycle;
-pub mod limits;
-#[cfg(feature = "raw_tcp")]
-pub mod protocol;
+pub use nacelle_http::server as http_server;
 #[cfg(feature = "reference_protocol")]
 pub mod reference_protocol;
-pub mod request;
-pub mod response;
-pub mod runtime;
-#[cfg(feature = "raw_tcp")]
-pub mod server;
-pub mod telemetry;
+pub mod runtime {
+    pub use nacelle_core::runtime::*;
+    #[cfg(feature = "raw_tcp")]
+    pub use nacelle_tcp::runtime::{
+        serve_tcp, serve_tcp_listener_with_shutdown_deadline, serve_tcp_with_shutdown,
+        serve_tcp_with_shutdown_deadline, serve_tcp_with_shutdown_timeout,
+    };
+}
 #[cfg(feature = "tls")]
-pub mod tls;
+pub use nacelle_core::tls;
 #[cfg(feature = "tower")]
-pub mod tower;
+pub use nacelle_core::tower;
 #[cfg(feature = "reference_protocol")]
 pub mod util;
 
-pub use config::{NacelleConfig, RequestBodyMode};
-#[cfg(feature = "raw_tcp")]
-pub use connection::{serve_connection, serve_stream};
-pub use error::{BoxError, NacelleError};
-pub use handler::{Handler, HandlerFn, handler_fn};
 pub use host::NacelleHost;
+#[cfg(feature = "tls-self-signed")]
+pub use nacelle_core::NacelleGeneratedTlsConfig;
+#[cfg(feature = "tls")]
+pub use nacelle_core::NacelleTlsConfig;
+#[cfg(feature = "tower")]
+pub use nacelle_core::handler_from_tower_service;
+pub use nacelle_core::{
+    BoxError, Handler, HandlerFn, MemoryReservation, NacelleBody, NacelleConfig, NacelleError,
+    NacelleInMemoryTelemetrySink, NacelleLimits, NacelleRequest, NacelleRequestMeta,
+    NacelleResponse, NacelleResponseMeta, NacelleRuntimeState, NacelleShutdown,
+    NacelleShutdownToken, NacelleTelemetry, NacelleTelemetryEvent, NacelleTelemetryEventKind,
+    NacelleTelemetrySink, NacelleTransport, RawTcpRequestMeta, RawTcpResponseMeta, RequestBodyMode,
+    RequestMetadata, TrackedPermit, handler_fn,
+};
 #[cfg(feature = "http")]
-pub use http_server::{HyperServer, NacelleHttpPolicy};
-pub use lifecycle::{NacelleShutdown, NacelleShutdownToken};
-pub use limits::{MemoryReservation, NacelleLimits, NacelleRuntimeState};
+pub use nacelle_core::{HttpRequestMeta, HttpResponseMeta};
+#[cfg(feature = "http")]
+pub use nacelle_http::{HyperServer, NacelleHttpPolicy};
 #[cfg(feature = "raw_tcp")]
-pub use protocol::{DecodedRequest, Protocol};
+pub use nacelle_tcp::{
+    DecodedRequest, NacelleServer, NacelleServerBuilder, Protocol, RawTcpServer, serve_connection,
+    serve_stream,
+};
 #[cfg(feature = "reference_protocol")]
 pub use reference_protocol::{
     FRAME_FLAG_END, FRAME_FLAG_ERROR, FRAME_FLAG_START, FrameRequest, LengthDelimitedProtocol,
 };
-#[cfg(feature = "http")]
-pub use request::HttpRequestMeta;
-pub use request::{
-    NacelleBody, NacelleRequest, NacelleRequestMeta, RawTcpRequestMeta, RequestMetadata,
-};
-#[cfg(feature = "http")]
-pub use response::HttpResponseMeta;
-pub use response::{NacelleResponse, NacelleResponseMeta, RawTcpResponseMeta};
-#[cfg(feature = "raw_tcp")]
-pub use server::{NacelleServer, NacelleServerBuilder, RawTcpServer};
-pub use telemetry::{
-    NacelleInMemoryTelemetrySink, NacelleTelemetry, NacelleTelemetryEvent,
-    NacelleTelemetryEventKind, NacelleTelemetrySink, NacelleTransport,
-};
-#[cfg(feature = "tls-self-signed")]
-pub use tls::NacelleGeneratedTlsConfig;
-#[cfg(feature = "tls")]
-pub use tls::NacelleTlsConfig;
-#[cfg(feature = "tower")]
-pub use tower::handler_from_tower_service;

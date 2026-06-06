@@ -732,21 +732,12 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "criterion",
- "futures-core",
  "http",
- "http-body-util",
- "hyper",
- "hyper-util",
- "mimalloc",
- "opentelemetry",
- "pem",
+ "nacelle-core",
+ "nacelle-http",
+ "nacelle-tcp",
  "proptest",
- "rcgen",
- "rustls",
  "tokio",
- "tokio-rustls",
- "tower",
- "tracing",
 ]
 
 [[package]]

@@ -1,30 +1,4 @@
-//! Tokio runtime helpers.
-
-use std::future::Future;
-use std::pin::Pin;
-use std::task::{Context, Poll};
-
-pub use tokio::task::JoinError;
-
-/// A join handle whose output is always `Result<T, JoinError>`.
-pub struct JoinHandle<T>(tokio::task::JoinHandle<T>);
-
-impl<T> Future for JoinHandle<T> {
-    type Output = Result<T, JoinError>;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.0).poll(cx)
-    }
-}
-
-/// Spawn a `Send + 'static` future onto Tokio.
-pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
-    JoinHandle(tokio::spawn(future))
-}
+//! Tokio raw TCP listener helpers.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -88,7 +62,8 @@ where
     .await
 }
 
-pub(crate) async fn serve_tcp_with_shutdown_deadline<Req, P, H>(
+#[doc(hidden)]
+pub async fn serve_tcp_with_shutdown_deadline<Req, P, H>(
     server: Arc<NacelleServer<Req, P, H>>,
     addr: SocketAddr,
     shutdown: NacelleShutdownToken,
@@ -103,7 +78,8 @@ where
     serve_tcp_listener_with_shutdown_deadline(server, listener, shutdown, drain_deadline).await
 }
 
-pub(crate) async fn serve_tcp_listener_with_shutdown_deadline<Req, P, H>(
+#[doc(hidden)]
+pub async fn serve_tcp_listener_with_shutdown_deadline<Req, P, H>(
     server: Arc<NacelleServer<Req, P, H>>,
     listener: tokio::net::TcpListener,
     mut shutdown: NacelleShutdownToken,

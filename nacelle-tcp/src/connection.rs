@@ -511,7 +511,9 @@ where
     Req: RequestMetadata,
     P: Protocol<Req> + Send + Sync + 'static,
 {
-    let NacelleResponseMeta::RawTcp(meta) = &response.meta;
+    let NacelleResponseMeta::RawTcp(meta) = &response.meta else {
+        return Err(NacelleError::InvalidFrame("non_raw_tcp_response"));
+    };
     protocol.apply_raw_tcp_response_meta(&mut context, meta);
 
     let body = response.body;
