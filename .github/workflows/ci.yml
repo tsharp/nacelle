@@ -19,6 +19,8 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Clippy Raw TCP
         run: cargo clippy -p nacelle --no-default-features --features raw_tcp --all-targets -- -D warnings
+      - name: Clippy Raw TCP TLS
+        run: cargo clippy -p nacelle-tcp --features tls-self-signed --all-targets -- -D warnings
       - name: Clippy Reference Protocol
         run: cargo clippy -p nacelle --features reference_protocol --all-targets -- -D warnings
       - name: Clippy HTTP
@@ -29,10 +31,16 @@ jobs:
         run: cargo clippy -p nacelle --features reference_protocol,http,tower --all-targets -- -D warnings
       - name: Clippy OTel
         run: cargo clippy -p nacelle --features reference_protocol,http,tower,otel --all-targets -- -D warnings
+      - name: Clippy All Features
+        run: cargo clippy -p nacelle --features reference_protocol,http,tower,otel,tls-self-signed --all-targets -- -D warnings
       - name: Test Raw TCP
         run: cargo test --workspace --all-targets
       - name: Test Raw TCP Without Reference Protocol
         run: cargo test -p nacelle --no-default-features --features raw_tcp --all-targets
+      - name: Test Raw TCP TLS
+        run: cargo test -p nacelle-tcp --features tls-self-signed --all-targets
+      - name: Test Reference Protocol TLS
+        run: cargo test -p nacelle --features reference_protocol,tls-self-signed --all-targets
       - name: Test Reference Protocol
         run: cargo test -p nacelle --features reference_protocol --all-targets
       - name: Test HTTP

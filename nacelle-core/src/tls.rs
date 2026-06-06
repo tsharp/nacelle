@@ -228,6 +228,9 @@ mod tests {
                 generated.private_key_pem.as_bytes(),
             )
             .expect("generated certificate should reload");
-        assert_eq!(generated.tls_config.handshake_timeout(), Duration::from_secs(10));
+        assert_eq!(
+            generated.tls_config.handshake_timeout(),
+            Duration::from_secs(10)
+        );
     }
 }

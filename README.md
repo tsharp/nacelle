@@ -7,7 +7,7 @@ The current transports are:
 - `raw_tcp` (default) — custom protocol transport over TCP
 - `reference_protocol` — optional length-delimited example protocol
 - `http` — Hyper HTTP/1 server transport
-- `tls` — Rustls-backed TLS termination for HTTP
+- `tls` — Rustls-backed TLS termination for HTTP and raw TCP
 - `tls-self-signed` — optional self-signed TLS generation for local load tests and auto-deploy flows
 - `otel` — OpenTelemetry metrics API integration
 - `tower` — adapter for `tower::Service<NacelleRequest>`
@@ -28,6 +28,10 @@ The workspace is split by responsibility:
 - `nacelle-tcp` owns the raw TCP transport and protocol trait.
 - `nacelle-http` owns the Hyper HTTP/1 transport and HTTP edge policy.
 - `nacelle` is the convenience crate that re-exports the transport crates and owns the reference length-delimited protocol.
+
+TLS is shared core infrastructure. Rustls is the implemented provider today;
+`NacelleTlsProvider` keeps the provider boundary visible so a future OpenSSL
+backend can plug in without changing the HTTP or raw TCP listener APIs.
 
 ## Raw TCP Example
 
@@ -212,6 +216,9 @@ cargo run --no-default-features --features http --example http_echo -- 127.0.0.1
 
 # HTTPS echo with an ephemeral self-signed certificate
 cargo run --no-default-features --features http,tls-self-signed --example tls_http_echo -- 127.0.0.1:8443
+
+# Raw TCP echo with an ephemeral self-signed certificate
+cargo run --features reference_protocol,tls-self-signed --example tls_echo -- 127.0.0.1:8443
 
 # Raw TCP and HTTP with one shared handler and one host
 cargo run --features reference_protocol,http --example dual_echo -- 127.0.0.1:8080 127.0.0.1:8081

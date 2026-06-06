@@ -2,6 +2,13 @@
 name = "nacelle-stress-server"
 version = "0.1.0"
 edition = "2024"
+description = "Stress server binary for exercising Nacelle raw TCP throughput and runtime limits."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../README.md"
+keywords = ["networking", "tokio", "benchmark"]
+categories = ["asynchronous", "network-programming"]
 
 [[bin]]
 name = "tokio-server"

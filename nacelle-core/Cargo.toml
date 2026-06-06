@@ -2,6 +2,13 @@
 name = "nacelle-core"
 version = "0.1.0"
 edition = "2024"
+description = "Shared request, response, body, limits, lifecycle, telemetry, and TLS primitives for Nacelle."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../README.md"
+keywords = ["networking", "tokio", "async"]
+categories = ["asynchronous", "network-programming"]
 
 [features]
 default = []

@@ -2,6 +2,13 @@
 name = "nacelle-stress-test"
 version = "0.1.0"
 edition = "2024"
+description = "Stress client binary for measuring Nacelle raw TCP throughput and latency."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../README.md"
+keywords = ["networking", "tokio", "benchmark"]
+categories = ["asynchronous", "network-programming"]
 
 [[bin]]
 name = "nacelle-stress-test"

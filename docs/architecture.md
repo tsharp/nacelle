@@ -13,6 +13,12 @@ The reference protocol intentionally stays out of `nacelle-core` and
 `nacelle-tcp`; it is a batteries-included implementation exported by the
 umbrella `nacelle` crate.
 
+TLS lives in `nacelle-core` because it is shared by raw TCP and HTTP. The
+transport crates consume `NacelleTlsConfig` and create per-connection acceptors
+from the current config, which lets certificate reloads affect new handshakes.
+Rustls is the current provider; `NacelleTlsProvider` preserves the provider seam
+for future OpenSSL support.
+
 ## Request Flow
 
 ```text
@@ -28,6 +34,11 @@ listener
 Raw TCP uses the `nacelle-tcp` `Protocol<Req>` trait to decode request heads and encode response
 frames. HTTP uses `nacelle-http` with Hyper HTTP/1 and maps requests into the same
 `NacelleRequest` / `NacelleResponse` shape.
+
+HTTP-specific edge policy remains in `nacelle-http`: Host, method, URI/header
+shape checks, per-peer request rate limits, access logging, and security header
+injection. Raw TCP keeps protocol semantics in the protocol implementation and
+shared lifecycle/limit enforcement in core.
 
 ## Runtime State
 

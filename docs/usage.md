@@ -34,6 +34,14 @@ Raw TCP processes requests sequentially per connection. This preserves response
 ordering and keeps per-connection concurrency predictable. Use multiple
 connections when clients need parallelism.
 
+Enable `tls` to terminate raw TCP over Rustls with the same shared TLS config
+used by HTTP:
+
+```rust
+let tls = NacelleTlsConfig::from_pem_files("cert.pem", "key.pem")?;
+server.serve_tcp_tls("127.0.0.1:8443".parse()?, tls).await?;
+```
+
 ## HTTP
 
 The HTTP transport is HTTP/1 through Hyper.
@@ -53,6 +61,15 @@ let tls = NacelleTlsConfig::from_pem_files("cert.pem", "key.pem")?;
 server.serve_tls("127.0.0.1:8443".parse()?, tls).await?;
 ```
 
+`NacelleTlsConfig` is transport-neutral and does not inject HTTP-specific ALPN
+into raw TCP listeners. Existing listeners pick up certificate/key reloads for
+new handshakes:
+
+```rust
+let tls = NacelleTlsConfig::from_pem_files("cert.pem", "key.pem")?;
+tls.reload_from_pem_files("next-cert.pem", "next-key.pem")?;
+```
+
 Enable `tls-self-signed` for local load tests or auto-deploy flows that need an
 immediate self-signed certificate:
 
@@ -70,15 +87,19 @@ let policy = NacelleHttpPolicy::new()
     .with_allowed_methods([http::Method::GET, http::Method::POST])
     .with_max_uri_len(4096)
     .with_max_header_count(64)
-    .with_max_header_bytes(16 * 1024);
+    .with_max_header_bytes(16 * 1024)
+    .with_max_requests_per_peer_per_second(1_000)
+    .with_default_security_headers();
 
-let server = HyperServer::new(handler).with_http_policy(policy);
+let server = HyperServer::new(handler)
+    .with_http_policy(policy)
+    .with_access_log(true);
 ```
 
 HTTP deployments may still sit behind a proxy or load balancer for coarse
 traffic filtering. Nacelle enforces request, body, timeout, TLS handshake,
-connection, optional per-peer connection caps, and optional
-Host/header/method/URI policy in-process.
+connection, optional per-peer connection/request caps, optional security
+headers, and optional Host/header/method/URI policy in-process.
 
 ## Multi-Listener Host
 
@@ -96,10 +117,11 @@ host.wait().await?;
 ```
 
 With the `tls` feature enabled, use `enable_http_tls` for a host-managed HTTPS
-listener:
+listener, or `enable_raw_tcp_tls` for a host-managed raw TCP TLS listener:
 
 ```rust
 host.enable_http_tls("https", https_addr, http_server, tls_config);
+host.enable_raw_tcp_tls("raw-tls", raw_tls_addr, raw_server, raw_tls_config);
 ```
 
 For graceful shutdown, call `shutdown_and_wait_timeout`. Listeners stop
@@ -130,3 +152,7 @@ Use explicit limits in production. Avoid `usize::MAX` outside benchmarks.
 `NacelleTelemetry` emits tracing events by default and OpenTelemetry metrics when
 the `otel` feature is enabled. Attach an in-memory sink in tests when you need to
 assert rejection, timeout, shutdown, or byte-accounting events.
+
+When `HyperServer::with_access_log(true)` is enabled, HTTP requests also emit
+structured `nacelle::access` tracing events with transport, method, URI, status,
+request bytes, elapsed microseconds, and low-cardinality rejection reason.

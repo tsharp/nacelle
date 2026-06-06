@@ -6,6 +6,8 @@
 
 **Current status:** Nacelle is production-capable for controlled, internal, or proxy-protected deployments with explicit limits, shutdown, transport timeouts, telemetry, validation, and flat-memory soak behavior. The latest reported Linux soak ran for one hour at approximately 1.81M RPS, with stable memory, p99 latency around 3.5 ms, and clean shutdown. Direct public edge readiness is a separate higher bar.
 
+**Implementation checkpoint:** Raw TCP and HTTP now both support shared Rustls TLS through `NacelleTlsConfig`; self-signed certificate generation is opt-in through `tls-self-signed`; certificate reloads update future handshakes; HTTP policy now includes security headers, structured access logs, and per-peer fixed-window request limits. TLS remains transport-neutral in `nacelle-core`, and `NacelleTlsProvider` keeps room for a future OpenSSL backend without changing listener APIs.
+
 ## Edge Readiness Definition
 
 Nacelle should be considered direct-edge ready only when it can safely accept untrusted internet traffic by itself and provide:

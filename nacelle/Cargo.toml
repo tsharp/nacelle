@@ -2,6 +2,13 @@
 name = "nacelle"
 version = "0.1.0"
 edition = "2024"
+description = "Convenience crate for Nacelle streaming handlers, transport re-exports, and the reference raw TCP protocol."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../README.md"
+keywords = ["networking", "tokio", "http", "tcp"]
+categories = ["asynchronous", "network-programming"]
 
 [features]
 default = ["raw_tcp"]
@@ -46,6 +53,11 @@ required-features = ["http"]
 name = "tls_http_echo"
 path = "examples/tls_http_echo.rs"
 required-features = ["http", "tls-self-signed"]
+
+[[example]]
+name = "tls_echo"
+path = "examples/tls_echo.rs"
+required-features = ["reference_protocol", "tls-self-signed"]
 
 [[example]]
 name = "dual_echo"
