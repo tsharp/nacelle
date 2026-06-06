@@ -158,10 +158,11 @@ Production notes:
 - [Performance tuning](docs/performance-tuning.md)
 - [API stability](docs/api-stability.md)
 
-Generate Rust API documentation with `cargo doc`:
+Generate the Markdown documentation site with DocFX:
 
 ```bash
-cargo doc --workspace --all-features --no-deps
+dotnet tool restore
+dotnet docfx docfx.json
 ```
 
 On Windows, the same build can be run with:
@@ -170,8 +171,20 @@ On Windows, the same build can be run with:
 .\scripts\build-docs.ps1
 ```
 
+Generate Rust API reference with `cargo doc`:
+
+```bash
+cargo doc --workspace --all-features --no-deps
+```
+
+Or on Windows:
+
+```powershell
+.\scripts\build-rustdoc.ps1
+```
+
 Internal readiness plans, assessments, and checklists live under `docs/internal`
-and are excluded from published API documentation.
+and are excluded from the generated DocFX site.
 
 Exporter/subscriber setup stays in the application so production can choose OTLP, stdout, Prometheus, or another pipeline.
 
