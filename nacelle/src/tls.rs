@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, BufReader};
+use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,10 +49,8 @@ impl NacelleTlsConfig {
     }
 
     pub fn from_pem(certificates: &[u8], private_key: &[u8]) -> io::Result<Self> {
-        let certificates = rustls_pemfile::certs(&mut BufReader::new(certificates))
-            .collect::<Result<Vec<_>, _>>()?;
-        let private_key = rustls_pemfile::private_key(&mut BufReader::new(private_key))?
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing private key"))?;
+        let certificates = parse_pem_certificates(certificates)?;
+        let private_key = parse_pem_private_key(private_key)?;
         Self::from_der(certificates, private_key)
     }
 
@@ -108,6 +106,53 @@ fn ensure_http1_alpn(config: &mut ServerConfig) {
     {
         config.alpn_protocols.push(b"http/1.1".to_vec());
     }
+}
+
+pub(crate) fn parse_pem_certificates(input: &[u8]) -> io::Result<Vec<CertificateDer<'static>>> {
+    let certificates = parse_pem_blocks(input)?
+        .into_iter()
+        .filter(|block| block.tag() == "CERTIFICATE")
+        .map(|block| CertificateDer::from(block.into_contents()))
+        .collect::<Vec<_>>();
+    if certificates.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "missing certificate",
+        ));
+    }
+    Ok(certificates)
+}
+
+fn parse_pem_private_key(input: &[u8]) -> io::Result<PrivateKeyDer<'static>> {
+    for block in parse_pem_blocks(input)? {
+        let tag = block.tag();
+        match tag {
+            "PRIVATE KEY" | "RSA PRIVATE KEY" | "EC PRIVATE KEY" => {
+                return PrivateKeyDer::try_from(block.into_contents()).map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!("invalid private key: {error}"),
+                    )
+                });
+            }
+            "ENCRYPTED PRIVATE KEY" => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "encrypted private keys are not supported",
+                ));
+            }
+            _ => {}
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "missing private key",
+    ))
+}
+
+fn parse_pem_blocks(input: &[u8]) -> io::Result<Vec<pem::Pem>> {
+    pem::parse_many(input)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))
 }
 
 #[cfg(test)]

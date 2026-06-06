@@ -1341,10 +1341,9 @@ mod tests {
         let addr = listener.local_addr().expect("listener should have addr");
         let generated =
             crate::tls::NacelleTlsConfig::self_signed(["localhost"]).expect("self-signed tls");
-        let certificate = rustls_pemfile::certs(&mut generated.certificate_pem.as_bytes())
-            .next()
-            .expect("certificate should be present")
-            .expect("certificate should parse");
+        let certificate = crate::tls::parse_pem_certificates(generated.certificate_pem.as_bytes())
+            .expect("certificate should parse")
+            .remove(0);
         let mut roots = rustls::RootCertStore::empty();
         roots.add(certificate).expect("root cert should add");
         let client_config = rustls::ClientConfig::builder()

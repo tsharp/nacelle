@@ -8,7 +8,7 @@ default = ["raw_tcp"]
 raw_tcp = []
 reference_protocol = ["raw_tcp"]
 http = ["dep:http", "dep:http-body-util", "dep:hyper", "dep:hyper-util"]
-tls = ["http", "dep:rustls", "dep:tokio-rustls", "dep:rustls-pemfile"]
+tls = ["http", "dep:pem", "dep:rustls", "dep:tokio-rustls"]
 tls-self-signed = ["tls", "dep:rcgen"]
 otel = ["dep:opentelemetry"]
 tower = ["dep:tower"]
@@ -29,7 +29,7 @@ tokio = { version = "1.47.1", features = ["io-util", "macros", "net", "rt", "rt-
 tracing = "0.1.44"
 rustls = { version = "0.23.40", optional = true }
 tokio-rustls = { version = "0.26.4", optional = true }
-rustls-pemfile = { version = "2.2.0", optional = true }
+pem = { version = "3.0.6", optional = true }
 rcgen = { version = "0.14.8", optional = true }
 
 [dev-dependencies]
