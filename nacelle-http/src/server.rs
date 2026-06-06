@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_core::Stream;
+use http::header::{HeaderName, HeaderValue};
 use http_body_util::{BodyExt, Full, StreamBody, combinators::BoxBody};
 use hyper::body::{Body, Frame, Incoming};
 use hyper::server::conn::http1;
@@ -34,6 +35,7 @@ pub struct HyperServer<H = ()> {
     telemetry: NacelleTelemetry,
     runtime_state: NacelleRuntimeState,
     http_policy: NacelleHttpPolicy,
+    access_log_enabled: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -43,6 +45,7 @@ pub struct NacelleHttpPolicy {
     max_uri_len: Option<usize>,
     max_header_count: Option<usize>,
     max_header_bytes: Option<usize>,
+    security_headers: Vec<(HeaderName, HeaderValue)>,
 }
 
 impl NacelleHttpPolicy {
@@ -82,6 +85,36 @@ impl NacelleHttpPolicy {
         self.max_header_bytes = Some(max);
         self
     }
+
+    pub fn with_security_header(mut self, name: HeaderName, value: HeaderValue) -> Self {
+        self.security_headers.push((name, value));
+        self
+    }
+
+    pub fn with_default_security_headers(self) -> Self {
+        self.with_security_header(
+            http::header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        )
+        .with_security_header(
+            HeaderName::from_static("x-frame-options"),
+            HeaderValue::from_static("deny"),
+        )
+        .with_security_header(
+            HeaderName::from_static("referrer-policy"),
+            HeaderValue::from_static("no-referrer"),
+        )
+        .with_security_header(
+            HeaderName::from_static("cross-origin-resource-policy"),
+            HeaderValue::from_static("same-origin"),
+        )
+    }
+
+    pub fn with_strict_transport_security(mut self, value: HeaderValue) -> Self {
+        self.security_headers
+            .push((http::header::STRICT_TRANSPORT_SECURITY, value));
+        self
+    }
 }
 
 impl<H> Clone for HyperServer<H>
@@ -94,6 +127,7 @@ where
             telemetry: self.telemetry.clone(),
             runtime_state: self.runtime_state.clone(),
             http_policy: self.http_policy.clone(),
+            access_log_enabled: self.access_log_enabled,
         }
     }
 }
@@ -111,6 +145,7 @@ where
             telemetry,
             runtime_state,
             http_policy: NacelleHttpPolicy::default(),
+            access_log_enabled: false,
         }
     }
 
@@ -128,6 +163,11 @@ where
 
     pub fn with_http_policy(mut self, http_policy: NacelleHttpPolicy) -> Self {
         self.http_policy = http_policy;
+        self
+    }
+
+    pub fn with_access_log(mut self, enabled: bool) -> Self {
+        self.access_log_enabled = enabled;
         self
     }
 
@@ -380,13 +420,24 @@ where
 
     async fn handle(&self, request: Request<Incoming>) -> Result<Response<HttpBody>, NacelleError> {
         let request_started = std::time::Instant::now();
+        let method = request.method().clone();
+        let uri = request.uri().clone();
         if let Some(rejection) = validate_http_policy(&self.http_policy, &request) {
             self.telemetry
                 .request_rejected(NacelleTransport::Http, rejection.reason);
+            self.access_log(
+                &method,
+                &uri,
+                rejection.status,
+                0,
+                request_started.elapsed(),
+                Some(rejection.reason),
+            );
             return response_to_http(
                 NacelleResponse::http_bytes(rejection.status, rejection.reason),
                 self.runtime_state.clone(),
                 self.telemetry.clone(),
+                &self.http_policy,
             );
         }
         let _request_permit = match self.runtime_state.acquire_request_tracked() {
@@ -398,10 +449,19 @@ where
                     request_started.elapsed(),
                     &error,
                 );
+                self.access_log(
+                    &method,
+                    &uri,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    0,
+                    request_started.elapsed(),
+                    Some("in_flight_requests"),
+                );
                 return response_to_http(
                     NacelleResponse::http_bytes(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
                     self.runtime_state.clone(),
                     self.telemetry.clone(),
+                    &self.http_policy,
                 );
             }
         };
@@ -438,8 +498,22 @@ where
         match handler_result {
             Ok(response) => {
                 let request_bytes = request_body_bytes.load(Ordering::Relaxed);
-                let response =
-                    response_to_http(response, self.runtime_state.clone(), self.telemetry.clone());
+                let response = response_to_http(
+                    response,
+                    self.runtime_state.clone(),
+                    self.telemetry.clone(),
+                    &self.http_policy,
+                );
+                if let Ok(response) = &response {
+                    self.access_log(
+                        &method,
+                        &uri,
+                        response.status(),
+                        request_bytes,
+                        request_started.elapsed(),
+                        None,
+                    );
+                }
                 self.telemetry.request_completed(
                     NacelleTransport::Http,
                     None,
@@ -464,7 +538,18 @@ where
                     ),
                     self.runtime_state.clone(),
                     self.telemetry.clone(),
+                    &self.http_policy,
                 );
+                if let Ok(response) = &response {
+                    self.access_log(
+                        &method,
+                        &uri,
+                        response.status(),
+                        request_bytes,
+                        request_started.elapsed(),
+                        Some("handler"),
+                    );
+                }
                 self.telemetry.request_completed(
                     NacelleTransport::Http,
                     None,
@@ -475,6 +560,31 @@ where
                 response
             }
         }
+    }
+
+    fn access_log(
+        &self,
+        method: &Method,
+        uri: &http::Uri,
+        status: StatusCode,
+        request_bytes: usize,
+        elapsed: Duration,
+        reason: Option<&'static str>,
+    ) {
+        if !self.access_log_enabled {
+            return;
+        }
+        tracing::info!(
+            target: "nacelle::access",
+            transport = "http",
+            method = %method,
+            uri = %uri,
+            status = status.as_u16(),
+            request_bytes,
+            elapsed_us = elapsed.as_micros() as u64,
+            reason,
+            "http access"
+        );
     }
 }
 
@@ -572,6 +682,7 @@ fn response_to_http(
     response: NacelleResponse,
     runtime_state: NacelleRuntimeState,
     telemetry: NacelleTelemetry,
+    policy: &NacelleHttpPolicy,
 ) -> Result<Response<HttpBody>, NacelleError> {
     let (status, headers) = match response.meta {
         NacelleResponseMeta::Http(meta) => (meta.status, meta.headers),
@@ -583,6 +694,7 @@ fn response_to_http(
         return Err(NacelleError::protocol("failed to build response headers"));
     };
     *builder_headers = headers;
+    apply_security_headers(builder_headers, policy);
     builder
         .body(nacelle_body_to_http(
             response.body,
@@ -590,6 +702,14 @@ fn response_to_http(
             telemetry,
         ))
         .map_err(NacelleError::protocol)
+}
+
+fn apply_security_headers(headers: &mut http::HeaderMap, policy: &NacelleHttpPolicy) {
+    for (name, value) in &policy.security_headers {
+        if !headers.contains_key(name) {
+            headers.insert(name.clone(), value.clone());
+        }
+    }
 }
 
 fn nacelle_body_to_http(
@@ -1467,6 +1587,37 @@ mod tests {
             event.kind == nacelle_core::NacelleTelemetryEventKind::RequestRejected
                 && matches!(event.reason, Some("header_count" | "header_bytes"))
         }));
+    }
+
+    #[tokio::test]
+    async fn http_policy_adds_security_headers_to_normal_and_rejected_responses() {
+        let policy = NacelleHttpPolicy::new()
+            .with_default_security_headers()
+            .with_allowed_hosts(["example.com"]);
+
+        let (normal_response, _events) = http_policy_response(
+            policy.clone(),
+            handler_fn(|_request: NacelleRequest| async move {
+                Ok(NacelleResponse::http_bytes(StatusCode::OK, "handler"))
+            }),
+            b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(normal_response.starts_with("HTTP/1.1 200 OK"));
+        assert!(normal_response.contains("x-content-type-options: nosniff"));
+        assert!(normal_response.contains("x-frame-options: deny"));
+
+        let (rejected_response, _events) = http_policy_response(
+            policy,
+            handler_fn(|_request: NacelleRequest| async move {
+                Ok(NacelleResponse::http_bytes(StatusCode::OK, "handler"))
+            }),
+            b"GET / HTTP/1.1\r\nHost: wrong.example\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(rejected_response.starts_with("HTTP/1.1 421 Misdirected Request"));
+        assert!(rejected_response.contains("x-content-type-options: nosniff"));
+        assert!(rejected_response.contains("x-frame-options: deny"));
     }
 
     #[tokio::test]
