@@ -55,6 +55,7 @@ impl NacelleHost {
     }
 
     pub fn shutdown(&self) {
+        self.telemetry.shutdown_requested();
         self.shutdown.shutdown();
     }
 
@@ -147,6 +148,7 @@ impl NacelleHost {
         drain_timeout: std::time::Duration,
     ) -> Result<(), NacelleError> {
         self.drain_deadline.set(drain_timeout);
+        self.telemetry.shutdown_requested();
         self.shutdown.shutdown();
         while let Some(result) = self.tasks.join_next().await {
             result??;

@@ -72,6 +72,10 @@ where
         &self.runtime_state
     }
 
+    pub fn telemetry(&self) -> &NacelleTelemetry {
+        &self.telemetry
+    }
+
     pub fn protocol(&self) -> &P {
         self.protocol.as_ref()
     }

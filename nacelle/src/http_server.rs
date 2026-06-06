@@ -20,7 +20,7 @@ use crate::lifecycle::{NacelleDrainDeadline, NacelleShutdownToken};
 use crate::limits::NacelleRuntimeState;
 use crate::request::{HttpRequestMeta, NacelleBody, NacelleRequest, NacelleRequestMeta};
 use crate::response::{NacelleResponse, NacelleResponseMeta};
-use crate::telemetry::{NacelleTelemetry, NacelleTransport};
+use crate::telemetry::{NacelleTelemetry, NacelleTelemetryEventKind, NacelleTransport};
 
 type HttpBody = BoxBody<Bytes, BoxError>;
 
@@ -153,13 +153,10 @@ where
             let server = server.clone();
             let connection_permit = match server.runtime_state.acquire_connection_tracked() {
                 Ok(permit) => permit,
-                Err(error) => {
-                    server.telemetry.request_failed(
-                        NacelleTransport::Http,
-                        None,
-                        std::time::Duration::ZERO,
-                        &error,
-                    );
+                Err(_error) => {
+                    server
+                        .telemetry
+                        .connection_rejected(NacelleTransport::Http, "connections");
                     continue;
                 }
             };
@@ -178,8 +175,12 @@ where
                 }
             }
         }
-        tracing::info!(target: "nacelle", transport = "http", "listener stopped accepting");
-        drain_http_connection_tasks(connections, drain_deadline.get()).await;
+        server.telemetry.shutdown_event(
+            NacelleTelemetryEventKind::ListenerStoppedAccepting,
+            NacelleTransport::Http,
+        );
+        drain_http_connection_tasks(connections, drain_deadline.get(), server.telemetry.clone())
+            .await;
         Ok(())
     }
 
@@ -364,7 +365,12 @@ fn log_http_connection_result(
 async fn drain_http_connection_tasks(
     mut connections: tokio::task::JoinSet<Result<(), NacelleError>>,
     drain_timeout: Duration,
+    telemetry: NacelleTelemetry,
 ) {
+    telemetry.shutdown_event(
+        NacelleTelemetryEventKind::DrainStarted,
+        NacelleTransport::Http,
+    );
     let drain = async {
         while let Some(result) = connections.join_next().await {
             log_http_connection_result(Some(result));
@@ -373,11 +379,20 @@ async fn drain_http_connection_tasks(
 
     if tokio::time::timeout(drain_timeout, drain).await.is_ok() {
         tracing::info!(target: "nacelle", transport = "http", "connection drain completed");
+        telemetry.shutdown_event(
+            NacelleTelemetryEventKind::DrainCompleted,
+            NacelleTransport::Http,
+        );
         return;
     }
 
     let aborted = connections.len();
     tracing::warn!(target: "nacelle", transport = "http", aborted, "connection drain timed out; aborting active tasks");
+    telemetry.shutdown_event(
+        NacelleTelemetryEventKind::DrainTimedOut,
+        NacelleTransport::Http,
+    );
+    telemetry.connections_aborted(NacelleTransport::Http, aborted);
     connections.abort_all();
     while let Some(result) = connections.join_next().await {
         log_http_connection_result(Some(result));

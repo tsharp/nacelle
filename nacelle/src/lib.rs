@@ -49,6 +49,9 @@ pub use response::HttpResponseMeta;
 pub use response::{NacelleResponse, NacelleResponseMeta, RawTcpResponseMeta};
 #[cfg(feature = "raw_tcp")]
 pub use server::{NacelleServer, NacelleServerBuilder, RawTcpServer};
-pub use telemetry::{NacelleTelemetry, NacelleTransport};
+pub use telemetry::{
+    NacelleInMemoryTelemetrySink, NacelleTelemetry, NacelleTelemetryEvent,
+    NacelleTelemetryEventKind, NacelleTelemetrySink, NacelleTransport,
+};
 #[cfg(feature = "tower")]
 pub use tower::handler_from_tower_service;

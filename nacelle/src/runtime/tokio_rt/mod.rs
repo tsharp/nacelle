@@ -45,6 +45,8 @@ use crate::protocol::Protocol;
 use crate::request::RequestMetadata;
 #[cfg(feature = "raw_tcp")]
 use crate::server::NacelleServer;
+#[cfg(feature = "raw_tcp")]
+use crate::telemetry::{NacelleTelemetry, NacelleTelemetryEventKind, NacelleTransport};
 
 /// Listen on `addr` and serve each accepted TCP connection in its own task.
 #[cfg(feature = "raw_tcp")]
@@ -141,13 +143,10 @@ where
         let _ = stream.set_nodelay(true);
         let connection_permit = match server.runtime_state().acquire_connection_tracked() {
             Ok(permit) => permit,
-            Err(error) => {
-                tracing::warn!(
-                    target: "nacelle",
-                    transport = "raw_tcp",
-                    error = %error,
-                    "connection rejected"
-                );
+            Err(_error) => {
+                server
+                    .telemetry()
+                    .connection_rejected(NacelleTransport::RawTcp, "connections");
                 continue;
             }
         };
@@ -159,8 +158,17 @@ where
             }
         }
     }
-    tracing::info!(target: "nacelle", transport = "raw_tcp", "listener stopped accepting");
-    drain_connection_tasks(connections, drain_deadline.get(), "raw_tcp").await;
+    server.telemetry().shutdown_event(
+        NacelleTelemetryEventKind::ListenerStoppedAccepting,
+        NacelleTransport::RawTcp,
+    );
+    drain_connection_tasks(
+        connections,
+        drain_deadline.get(),
+        "raw_tcp",
+        server.telemetry().clone(),
+    )
+    .await;
     Ok(())
 }
 
@@ -182,7 +190,12 @@ async fn drain_connection_tasks(
     mut connections: tokio::task::JoinSet<Result<(), NacelleError>>,
     drain_timeout: Duration,
     transport: &'static str,
+    telemetry: NacelleTelemetry,
 ) {
+    telemetry.shutdown_event(
+        NacelleTelemetryEventKind::DrainStarted,
+        NacelleTransport::RawTcp,
+    );
     let drain = async {
         while let Some(result) = connections.join_next().await {
             log_connection_result(Some(result));
@@ -191,11 +204,20 @@ async fn drain_connection_tasks(
 
     if tokio::time::timeout(drain_timeout, drain).await.is_ok() {
         tracing::info!(target: "nacelle", transport, "connection drain completed");
+        telemetry.shutdown_event(
+            NacelleTelemetryEventKind::DrainCompleted,
+            NacelleTransport::RawTcp,
+        );
         return;
     }
 
     let aborted = connections.len();
     tracing::warn!(target: "nacelle", transport, aborted, "connection drain timed out; aborting active tasks");
+    telemetry.shutdown_event(
+        NacelleTelemetryEventKind::DrainTimedOut,
+        NacelleTransport::RawTcp,
+    );
+    telemetry.connections_aborted(NacelleTransport::RawTcp, aborted);
     connections.abort_all();
     while let Some(result) = connections.join_next().await {
         log_connection_result(Some(result));
