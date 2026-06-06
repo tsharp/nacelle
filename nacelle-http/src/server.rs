@@ -1,11 +1,13 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures_core::Stream;
@@ -36,6 +38,7 @@ pub struct HyperServer<H = ()> {
     runtime_state: NacelleRuntimeState,
     http_policy: NacelleHttpPolicy,
     access_log_enabled: bool,
+    peer_rate_limits: Arc<Mutex<HashMap<IpAddr, PeerRateWindow>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -45,7 +48,14 @@ pub struct NacelleHttpPolicy {
     max_uri_len: Option<usize>,
     max_header_count: Option<usize>,
     max_header_bytes: Option<usize>,
+    max_requests_per_peer_per_second: Option<usize>,
     security_headers: Vec<(HeaderName, HeaderValue)>,
+}
+
+#[derive(Debug, Clone)]
+struct PeerRateWindow {
+    started_at: Instant,
+    count: usize,
 }
 
 impl NacelleHttpPolicy {
@@ -83,6 +93,11 @@ impl NacelleHttpPolicy {
 
     pub fn with_max_header_bytes(mut self, max: usize) -> Self {
         self.max_header_bytes = Some(max);
+        self
+    }
+
+    pub fn with_max_requests_per_peer_per_second(mut self, max: usize) -> Self {
+        self.max_requests_per_peer_per_second = Some(max.max(1));
         self
     }
 
@@ -128,6 +143,7 @@ where
             runtime_state: self.runtime_state.clone(),
             http_policy: self.http_policy.clone(),
             access_log_enabled: self.access_log_enabled,
+            peer_rate_limits: self.peer_rate_limits.clone(),
         }
     }
 }
@@ -146,6 +162,7 @@ where
             runtime_state,
             http_policy: NacelleHttpPolicy::default(),
             access_log_enabled: false,
+            peer_rate_limits: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -271,7 +288,12 @@ where
                         }
                     };
                     server.telemetry.connection_opened(NacelleTransport::Http);
-                    connections.spawn(run_http_connection(server, stream, connection_permit));
+                    connections.spawn(run_http_connection(
+                        server,
+                        stream,
+                        Some(peer_addr.ip()),
+                        connection_permit,
+                    ));
                 }
             }
         }
@@ -403,7 +425,13 @@ where
                                 return Err(NacelleError::Timeout("tls_handshake"));
                             }
                         };
-                        run_http_connection(server, tls_stream, connection_permit).await
+                        run_http_connection(
+                            server,
+                            tls_stream,
+                            Some(peer_addr.ip()),
+                            connection_permit,
+                        )
+                        .await
                     });
                 }
             }
@@ -417,7 +445,11 @@ where
         Ok(())
     }
 
-    async fn handle(&self, request: Request<Incoming>) -> Result<Response<HttpBody>, NacelleError> {
+    async fn handle(
+        &self,
+        request: Request<Incoming>,
+        peer_ip: Option<IpAddr>,
+    ) -> Result<Response<HttpBody>, NacelleError> {
         let request_started = std::time::Instant::now();
         let method = request.method().clone();
         let uri = request.uri().clone();
@@ -434,6 +466,26 @@ where
             );
             return response_to_http(
                 NacelleResponse::http_bytes(rejection.status, rejection.reason),
+                self.runtime_state.clone(),
+                self.telemetry.clone(),
+                &self.http_policy,
+            );
+        }
+        if let Some(peer_ip) = peer_ip
+            && !self.allow_peer_request(peer_ip)
+        {
+            self.telemetry
+                .request_rejected(NacelleTransport::Http, "peer_rate");
+            self.access_log(
+                &method,
+                &uri,
+                StatusCode::TOO_MANY_REQUESTS,
+                0,
+                request_started.elapsed(),
+                Some("peer_rate"),
+            );
+            return response_to_http(
+                NacelleResponse::http_bytes(StatusCode::TOO_MANY_REQUESTS, "peer_rate"),
                 self.runtime_state.clone(),
                 self.telemetry.clone(),
                 &self.http_policy,
@@ -559,6 +611,33 @@ where
                 response
             }
         }
+    }
+
+    fn allow_peer_request(&self, peer_ip: IpAddr) -> bool {
+        let Some(limit) = self.http_policy.max_requests_per_peer_per_second else {
+            return true;
+        };
+        let now = Instant::now();
+        let mut peers = self
+            .peer_rate_limits
+            .lock()
+            .expect("HTTP peer rate map poisoned");
+        peers.retain(|_peer, window| {
+            now.duration_since(window.started_at) < Duration::from_secs(60)
+        });
+        let window = peers.entry(peer_ip).or_insert(PeerRateWindow {
+            started_at: now,
+            count: 0,
+        });
+        if now.duration_since(window.started_at) >= Duration::from_secs(1) {
+            window.started_at = now;
+            window.count = 0;
+        }
+        if window.count >= limit {
+            return false;
+        }
+        window.count += 1;
+        true
     }
 
     fn access_log(
@@ -820,6 +899,7 @@ fn connection_rejection_reason(error: &NacelleError) -> &'static str {
 async fn run_http_connection<H, I>(
     server: Arc<HyperServer<H>>,
     stream: I,
+    peer_ip: Option<IpAddr>,
     _connection_permit: nacelle_core::limits::TrackedPermit,
 ) -> Result<(), NacelleError>
 where
@@ -835,7 +915,7 @@ where
     let service_server = server.clone();
     let service = service_fn(move |request| {
         let server = service_server.clone();
-        async move { server.handle(request).await }
+        async move { server.handle(request, peer_ip).await }
     });
     let mut builder = http1::Builder::new();
     builder
@@ -1620,6 +1700,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_policy_rate_limits_requests_per_peer() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let sink = Arc::new(nacelle_core::NacelleInMemoryTelemetrySink::new());
+        let telemetry = NacelleTelemetry::new().with_sink(sink.clone());
+        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
+            Ok(NacelleResponse::http_bytes(StatusCode::OK, "handler"))
+        }))
+        .with_telemetry(telemetry)
+        .with_http_policy(NacelleHttpPolicy::new().with_max_requests_per_peer_per_second(1));
+        let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+        let first = one_shot_http(
+            addr,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        let second = one_shot_http(
+            addr,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+
+        assert!(first.starts_with("HTTP/1.1 200 OK"));
+        assert!(second.starts_with("HTTP/1.1 429 Too Many Requests"));
+        assert!(sink.events().iter().any(|event| {
+            event.kind == nacelle_core::NacelleTelemetryEventKind::RequestRejected
+                && event.reason == Some("peer_rate")
+        }));
+        server_task.abort();
+    }
+
+    #[tokio::test]
     async fn http_per_peer_connection_limit_rejects_second_connection() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -1731,5 +1846,21 @@ mod tests {
             String::from_utf8(response).expect("response should be utf8"),
             sink.events(),
         )
+    }
+
+    async fn one_shot_http(addr: SocketAddr, request: &[u8]) -> String {
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        client
+            .write_all(request)
+            .await
+            .expect("request should write");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("response should read");
+        String::from_utf8(response).expect("response should be utf8")
     }
 }
