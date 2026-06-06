@@ -68,6 +68,10 @@ where
         &self.config
     }
 
+    pub fn runtime_state(&self) -> &NacelleRuntimeState {
+        &self.runtime_state
+    }
+
     pub fn protocol(&self) -> &P {
         self.protocol.as_ref()
     }
@@ -110,9 +114,41 @@ where
         .await
     }
 
+    pub(crate) async fn serve_io_without_connection_limit<IO>(
+        &self,
+        io: IO,
+    ) -> Result<(), NacelleError>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        crate::connection::serve_stream_without_connection_limit(
+            io,
+            self.protocol.clone(),
+            self.handler.clone(),
+            self.config.clone(),
+            self.telemetry.clone(),
+            self.runtime_state.clone(),
+        )
+        .await
+    }
+
     #[cfg(feature = "raw_tcp")]
     pub async fn serve_tcp(&self, addr: SocketAddr) -> Result<(), NacelleError> {
         crate::runtime::serve_tcp(Arc::<NacelleServer<Req, P, H>>::new(self.clone()), addr).await
+    }
+
+    #[cfg(feature = "raw_tcp")]
+    pub async fn serve_tcp_with_shutdown(
+        &self,
+        addr: SocketAddr,
+        shutdown: crate::lifecycle::NacelleShutdownToken,
+    ) -> Result<(), NacelleError> {
+        crate::runtime::serve_tcp_with_shutdown(
+            Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
+            addr,
+            shutdown,
+        )
+        .await
     }
 }
 
@@ -331,6 +367,62 @@ mod tests {
             .await
             .expect("server task should join")
             .expect("server should complete");
+    }
+
+    #[tokio::test]
+    async fn raw_tcp_tracks_active_request_permits() {
+        let protocol = LengthDelimitedProtocol;
+        let runtime_state = NacelleRuntimeState::new(NacelleLimits::default());
+        let observed_active_requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = observed_active_requests.clone();
+        let state_for_handler = runtime_state.clone();
+        let server = NacelleServer::<FrameRequest, ()>::builder()
+            .protocol(protocol.clone())
+            .runtime_state(runtime_state.clone())
+            .handler(handler_fn(move |request: NacelleRequest| {
+                let observed = observed.clone();
+                let state_for_handler = state_for_handler.clone();
+                async move {
+                    observed.store(
+                        state_for_handler.active_requests(),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    Ok(NacelleResponse::raw_tcp(request.body))
+                }
+            }))
+            .build()
+            .expect("server should build");
+
+        let (mut client, server_io) = tokio::io::duplex(256);
+        let server_task = tokio::spawn(async move { server.serve_io(server_io).await });
+        client
+            .write_all(
+                &protocol
+                    .encode_request_frame(3, 1, 0, b"tracked")
+                    .expect("frame should encode"),
+            )
+            .await
+            .expect("request should write");
+        client
+            .shutdown()
+            .await
+            .expect("client shutdown should succeed");
+
+        let (_request_id, _opcode, flags, body) = read_frame(&mut client)
+            .await
+            .expect("response frame should decode");
+        assert_eq!(flags & FRAME_FLAG_END, FRAME_FLAG_END);
+        assert_eq!(body, b"tracked");
+        server_task
+            .await
+            .expect("server task should join")
+            .expect("server should complete");
+
+        assert_eq!(
+            observed_active_requests.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(runtime_state.active_requests(), 0);
     }
 
     #[tokio::test]

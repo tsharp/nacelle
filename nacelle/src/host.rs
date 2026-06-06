@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use tokio::task::JoinSet;
 
 use crate::error::NacelleError;
+use crate::lifecycle::{NacelleShutdown, NacelleShutdownToken};
 use crate::limits::{NacelleLimits, NacelleRuntimeState};
 use crate::telemetry::NacelleTelemetry;
 #[cfg(any(feature = "raw_tcp", feature = "http"))]
@@ -12,6 +13,7 @@ use crate::telemetry::NacelleTransport;
 pub struct NacelleHost {
     telemetry: NacelleTelemetry,
     runtime_state: NacelleRuntimeState,
+    shutdown: NacelleShutdown,
     tasks: JoinSet<Result<(), NacelleError>>,
 }
 
@@ -26,6 +28,7 @@ impl NacelleHost {
         Self {
             telemetry: NacelleTelemetry::default(),
             runtime_state: NacelleRuntimeState::default(),
+            shutdown: NacelleShutdown::new(),
             tasks: JoinSet::new(),
         }
     }
@@ -45,6 +48,14 @@ impl NacelleHost {
         self
     }
 
+    pub fn shutdown_token(&self) -> NacelleShutdownToken {
+        self.shutdown.token()
+    }
+
+    pub fn shutdown(&self) {
+        self.shutdown.shutdown();
+    }
+
     #[cfg(feature = "raw_tcp")]
     pub fn enable_raw_tcp<Req, P, H>(
         &mut self,
@@ -59,10 +70,11 @@ impl NacelleHost {
     {
         let name = name.into();
         let telemetry = self.telemetry.clone();
+        let shutdown = self.shutdown.token();
         let server = server.with_runtime_state(self.runtime_state.clone());
         telemetry.listener_configured(NacelleTransport::RawTcp, &name, &addr.to_string());
         self.tasks.spawn(async move {
-            let result = server.serve_tcp(addr).await;
+            let result = server.serve_tcp_with_shutdown(addr, shutdown).await;
             if let Err(error) = &result {
                 telemetry.listener_failed(
                     NacelleTransport::RawTcp,
@@ -88,10 +100,11 @@ impl NacelleHost {
     {
         let name = name.into();
         let telemetry = self.telemetry.clone();
+        let shutdown = self.shutdown.token();
         let server = server.with_runtime_state(self.runtime_state.clone());
         telemetry.listener_configured(NacelleTransport::Http, &name, &addr.to_string());
         self.tasks.spawn(async move {
-            let result = server.serve(addr).await;
+            let result = server.serve_with_shutdown(addr, shutdown).await;
             if let Err(error) = &result {
                 telemetry.listener_failed(NacelleTransport::Http, &name, &addr.to_string(), error);
             }
@@ -104,6 +117,31 @@ impl NacelleHost {
         while let Some(result) = self.tasks.join_next().await {
             result??;
         }
+        Ok(())
+    }
+
+    pub async fn shutdown_and_wait(self) -> Result<(), NacelleError> {
+        self.shutdown_and_wait_timeout(std::time::Duration::from_secs(30))
+            .await
+    }
+
+    pub async fn shutdown_and_wait_timeout(
+        mut self,
+        drain_timeout: std::time::Duration,
+    ) -> Result<(), NacelleError> {
+        self.shutdown.shutdown();
+        while let Some(result) = self.tasks.join_next().await {
+            result??;
+        }
+
+        let drain = async {
+            while self.runtime_state.active_connections() != 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        tokio::time::timeout(drain_timeout, drain)
+            .await
+            .map_err(|_| NacelleError::Timeout("shutdown_drain"))?;
         Ok(())
     }
 }

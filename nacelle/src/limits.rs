@@ -23,16 +23,16 @@ pub struct NacelleLimits {
 impl Default for NacelleLimits {
     fn default() -> Self {
         Self {
-            max_connections: usize::MAX,
-            max_in_flight_requests: usize::MAX,
-            max_streaming_tasks: usize::MAX,
-            max_memory_bytes: usize::MAX,
+            max_connections: 16_384,
+            max_in_flight_requests: 65_536,
+            max_streaming_tasks: 8_192,
+            max_memory_bytes: 512 * 1024 * 1024,
             max_request_body_bytes: 16 * 1024 * 1024,
             max_response_body_bytes: 16 * 1024 * 1024,
-            read_timeout: None,
-            write_timeout: None,
-            handler_timeout: None,
-            idle_timeout: None,
+            read_timeout: Some(Duration::from_secs(30)),
+            write_timeout: Some(Duration::from_secs(30)),
+            handler_timeout: Some(Duration::from_secs(60)),
+            idle_timeout: Some(Duration::from_secs(120)),
         }
     }
 }
@@ -100,6 +100,9 @@ struct NacelleRuntimeStateInner {
     connections: Option<Arc<Semaphore>>,
     requests: Option<Arc<Semaphore>>,
     streaming_tasks: Option<Arc<Semaphore>>,
+    active_connections: AtomicUsize,
+    active_requests: AtomicUsize,
+    active_streaming_tasks: AtomicUsize,
     memory_used: AtomicUsize,
 }
 
@@ -117,6 +120,9 @@ impl NacelleRuntimeState {
                 requests: finite_semaphore(limits.max_in_flight_requests),
                 streaming_tasks: finite_semaphore(limits.max_streaming_tasks),
                 limits,
+                active_connections: AtomicUsize::new(0),
+                active_requests: AtomicUsize::new(0),
+                active_streaming_tasks: AtomicUsize::new(0),
                 memory_used: AtomicUsize::new(0),
             }),
         }
@@ -130,12 +136,60 @@ impl NacelleRuntimeState {
         acquire(&self.inner.connections, "connections")
     }
 
+    pub fn acquire_connection_tracked(&self) -> Result<TrackedPermit, NacelleError> {
+        let permit = self.acquire_connection()?;
+        self.inner.active_connections.fetch_add(1, Ordering::AcqRel);
+        Ok(TrackedPermit::new(
+            self.clone(),
+            PermitKind::Connection,
+            permit,
+        ))
+    }
+
     pub fn acquire_request(&self) -> Result<Option<OwnedSemaphorePermit>, NacelleError> {
         acquire(&self.inner.requests, "in_flight_requests")
     }
 
+    pub fn acquire_request_tracked(&self) -> Result<TrackedPermit, NacelleError> {
+        let permit = self.acquire_request()?;
+        self.inner.active_requests.fetch_add(1, Ordering::AcqRel);
+        Ok(TrackedPermit::new(
+            self.clone(),
+            PermitKind::Request,
+            permit,
+        ))
+    }
+
     pub fn acquire_streaming_task(&self) -> Result<Option<OwnedSemaphorePermit>, NacelleError> {
         acquire(&self.inner.streaming_tasks, "streaming_tasks")
+    }
+
+    pub fn acquire_streaming_task_tracked(&self) -> Result<TrackedPermit, NacelleError> {
+        let permit = self.acquire_streaming_task()?;
+        self.inner
+            .active_streaming_tasks
+            .fetch_add(1, Ordering::AcqRel);
+        Ok(TrackedPermit::new(
+            self.clone(),
+            PermitKind::StreamingTask,
+            permit,
+        ))
+    }
+
+    pub fn active_connections(&self) -> usize {
+        self.inner.active_connections.load(Ordering::Acquire)
+    }
+
+    pub fn active_requests(&self) -> usize {
+        self.inner.active_requests.load(Ordering::Acquire)
+    }
+
+    pub fn active_streaming_tasks(&self) -> usize {
+        self.inner.active_streaming_tasks.load(Ordering::Acquire)
+    }
+
+    pub fn memory_used_bytes(&self) -> usize {
+        self.inner.memory_used.load(Ordering::Acquire)
     }
 
     pub fn reserve_memory(&self, bytes: usize) -> Result<MemoryReservation, NacelleError> {
@@ -198,6 +252,59 @@ fn acquire(
         .map_err(|_| NacelleError::ResourceLimit(name))
 }
 
+#[derive(Debug, Clone, Copy)]
+enum PermitKind {
+    Connection,
+    Request,
+    StreamingTask,
+}
+
+#[derive(Debug)]
+pub struct TrackedPermit {
+    state: NacelleRuntimeState,
+    kind: PermitKind,
+    _permit: Option<OwnedSemaphorePermit>,
+}
+
+impl TrackedPermit {
+    fn new(
+        state: NacelleRuntimeState,
+        kind: PermitKind,
+        permit: Option<OwnedSemaphorePermit>,
+    ) -> Self {
+        Self {
+            state,
+            kind,
+            _permit: permit,
+        }
+    }
+}
+
+impl Drop for TrackedPermit {
+    fn drop(&mut self) {
+        match self.kind {
+            PermitKind::Connection => {
+                self.state
+                    .inner
+                    .active_connections
+                    .fetch_sub(1, Ordering::AcqRel);
+            }
+            PermitKind::Request => {
+                self.state
+                    .inner
+                    .active_requests
+                    .fetch_sub(1, Ordering::AcqRel);
+            }
+            PermitKind::StreamingTask => {
+                self.state
+                    .inner
+                    .active_streaming_tasks
+                    .fetch_sub(1, Ordering::AcqRel);
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct MemoryReservation {
     state: Option<NacelleRuntimeState>,
@@ -218,5 +325,59 @@ impl Drop for MemoryReservation {
         if let Some(state) = &self.state {
             state.release_memory(self.bytes);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_limits_are_bounded_for_production_safety() {
+        let limits = NacelleLimits::default();
+
+        assert_ne!(limits.max_connections, usize::MAX);
+        assert_ne!(limits.max_in_flight_requests, usize::MAX);
+        assert_ne!(limits.max_streaming_tasks, usize::MAX);
+        assert_ne!(limits.max_memory_bytes, usize::MAX);
+        assert!(limits.read_timeout.is_some());
+        assert!(limits.write_timeout.is_some());
+        assert!(limits.handler_timeout.is_some());
+        assert!(limits.idle_timeout.is_some());
+    }
+
+    #[test]
+    fn runtime_state_reports_active_permits_and_memory() {
+        let state = NacelleRuntimeState::new(
+            NacelleLimits::default()
+                .with_max_connections(1)
+                .with_max_in_flight_requests(1)
+                .with_max_streaming_tasks(1)
+                .with_max_memory_bytes(1024),
+        );
+
+        let connection = state
+            .acquire_connection_tracked()
+            .expect("connection permit");
+        let request = state.acquire_request_tracked().expect("request permit");
+        let streaming = state
+            .acquire_streaming_task_tracked()
+            .expect("streaming permit");
+        let memory = state.reserve_memory(512).expect("memory reservation");
+
+        assert_eq!(state.active_connections(), 1);
+        assert_eq!(state.active_requests(), 1);
+        assert_eq!(state.active_streaming_tasks(), 1);
+        assert_eq!(state.memory_used_bytes(), 512);
+
+        drop(connection);
+        drop(request);
+        drop(streaming);
+        drop(memory);
+
+        assert_eq!(state.active_connections(), 0);
+        assert_eq!(state.active_requests(), 0);
+        assert_eq!(state.active_streaming_tasks(), 0);
+        assert_eq!(state.memory_used_bytes(), 0);
     }
 }

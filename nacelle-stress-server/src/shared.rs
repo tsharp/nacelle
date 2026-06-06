@@ -680,6 +680,7 @@ limits:
         let mut config = ServerConfig::default();
         let default_response_bytes = config.response_bytes;
         let default_response_body_bytes = config.limits.max_response_body_bytes;
+        let default_handler_timeout = config.limits.handler_timeout;
 
         config.apply_config_file(file);
 
@@ -689,7 +690,7 @@ limits:
             config.limits.max_response_body_bytes,
             default_response_body_bytes
         );
-        assert_eq!(config.limits.handler_timeout, None);
+        assert_eq!(config.limits.handler_timeout, default_handler_timeout);
     }
 
     #[test]

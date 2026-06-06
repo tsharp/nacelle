@@ -30,7 +30,7 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    let _connection_permit = runtime_state.acquire_connection()?;
+    let _connection_permit = runtime_state.acquire_connection_tracked()?;
     let _buffer_reservation = reserve_connection_buffers(&config, &runtime_state)?;
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     let mut write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
@@ -111,7 +111,82 @@ where
     H: Handler,
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let _connection_permit = runtime_state.acquire_connection()?;
+    let _connection_permit = runtime_state.acquire_connection_tracked()?;
+    let _buffer_reservation = reserve_connection_buffers(&config, &runtime_state)?;
+    let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
+    let mut write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
+    telemetry.connection_opened(NacelleTransport::RawTcp);
+
+    let result: Result<(), NacelleError> = async {
+        'conn: loop {
+            if !write_buf.is_empty() {
+                write_all_with_timeout(&mut io, &write_buf, &runtime_state, "raw_tcp_write")
+                    .await?;
+                write_buf.clear();
+                if write_buf.capacity() > config.response_buffer_capacity {
+                    write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
+                }
+            }
+
+            if read_buf.is_empty() && read_buf.capacity() > config.read_buffer_capacity {
+                read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
+            }
+
+            let bytes_read =
+                read_buf_with_timeout(&mut io, &mut read_buf, &runtime_state, "raw_tcp_read")
+                    .await?;
+            if bytes_read == 0 {
+                if read_buf.is_empty() {
+                    break 'conn;
+                }
+                return Err(NacelleError::UnexpectedEof);
+            }
+
+            while let Some(decoded) = protocol.decode_head(&mut read_buf, config.max_frame_len)? {
+                let error_context = protocol.error_context(&decoded.request);
+                run_request(
+                    &mut io,
+                    &mut read_buf,
+                    &mut write_buf,
+                    protocol.as_ref(),
+                    &handler,
+                    decoded,
+                    error_context,
+                    &config,
+                    &telemetry,
+                    &runtime_state,
+                )
+                .await?;
+            }
+        }
+
+        Ok(())
+    }
+    .await;
+
+    if !write_buf.is_empty() {
+        let _ = write_all_with_timeout(&mut io, &write_buf, &runtime_state, "raw_tcp_final_write")
+            .await;
+    }
+
+    result
+}
+
+/// Drive one raw TCP framed connection using a single unsplit I/O object.
+pub async fn serve_stream_without_connection_limit<Req, P, H, IO>(
+    mut io: IO,
+    protocol: Arc<P>,
+    handler: H,
+    config: NacelleConfig,
+    telemetry: NacelleTelemetry,
+    runtime_state: NacelleRuntimeState,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let _buffer_reservation = reserve_connection_buffers(&config, &runtime_state)?;
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     let mut write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
@@ -213,7 +288,7 @@ where
         )?;
         return Err(NacelleError::ResourceLimit("request_body_bytes"));
     }
-    let _request_permit = runtime_state.acquire_request()?;
+    let _request_permit = runtime_state.acquire_request_tracked()?;
     let outcome = if decoded.body_len <= read_buf.len() {
         let body =
             buffered_request_body(read_buf, decoded.body_len, config.request_body_chunk_size);
@@ -223,7 +298,7 @@ where
             read_buffered_request_body(reader, read_buf, decoded.body_len, runtime_state).await?;
         execute_handler(handler, request, decoded.body_len, body, runtime_state).await
     } else {
-        let _streaming_permit = runtime_state.acquire_streaming_task()?;
+        let _streaming_permit = runtime_state.acquire_streaming_task_tracked()?;
         let (body_tx, body_rx) = mpsc::channel(config.request_body_channel_capacity);
         let body = NacelleBody::new(body_rx, decoded.body_len);
         let h = handler.clone();
@@ -525,8 +600,8 @@ where
     let future = reader.read_buf(buf);
     if let Some(timeout) = runtime_state
         .limits()
-        .idle_timeout
-        .or(runtime_state.limits().read_timeout)
+        .read_timeout
+        .or(runtime_state.limits().idle_timeout)
     {
         tokio::time::timeout(timeout, future)
             .await

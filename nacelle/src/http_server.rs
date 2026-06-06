@@ -15,6 +15,7 @@ use hyper_util::rt::TokioIo;
 
 use crate::error::{BoxError, NacelleError};
 use crate::handler::Handler;
+use crate::lifecycle::NacelleShutdownToken;
 use crate::limits::NacelleRuntimeState;
 use crate::request::{HttpRequestMeta, NacelleBody, NacelleRequest, NacelleRequestMeta};
 use crate::response::{NacelleResponse, NacelleResponseMeta};
@@ -68,16 +69,38 @@ where
         self.serve_listener(listener).await
     }
 
+    pub async fn serve_with_shutdown(
+        self,
+        addr: SocketAddr,
+        shutdown: NacelleShutdownToken,
+    ) -> Result<(), NacelleError> {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        self.serve_listener_with_shutdown(listener, shutdown).await
+    }
+
     pub async fn serve_listener(
         self,
         listener: tokio::net::TcpListener,
     ) -> Result<(), NacelleError> {
+        let (_shutdown, token) = crate::lifecycle::NacelleShutdown::pair();
+        self.serve_listener_with_shutdown(listener, token).await
+    }
+
+    pub async fn serve_listener_with_shutdown(
+        self,
+        listener: tokio::net::TcpListener,
+        mut shutdown: NacelleShutdownToken,
+    ) -> Result<(), NacelleError> {
         let server = Arc::new(self);
         loop {
-            let (stream, _) = listener.accept().await?;
+            let (stream, _) = tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                accepted = listener.accept() => accepted?,
+            };
             let io = TokioIo::new(stream);
             let server = server.clone();
-            let connection_permit = match server.runtime_state.acquire_connection() {
+            let connection_permit = match server.runtime_state.acquire_connection_tracked() {
                 Ok(permit) => permit,
                 Err(error) => {
                     server.telemetry.request_failed(
@@ -99,11 +122,12 @@ where
                 let _ = http1::Builder::new().serve_connection(io, service).await;
             });
         }
+        Ok(())
     }
 
     async fn handle(&self, request: Request<Incoming>) -> Result<Response<HttpBody>, NacelleError> {
         let request_started = std::time::Instant::now();
-        let _request_permit = match self.runtime_state.acquire_request() {
+        let _request_permit = match self.runtime_state.acquire_request_tracked() {
             Ok(permit) => permit,
             Err(error) => {
                 self.telemetry.request_failed(
@@ -179,7 +203,7 @@ where
 fn incoming_to_body(mut incoming: Incoming, runtime_state: NacelleRuntimeState) -> NacelleBody {
     let (tx, body) = NacelleBody::channel(8);
     tokio::spawn(async move {
-        let _streaming_permit = match runtime_state.acquire_streaming_task() {
+        let _streaming_permit = match runtime_state.acquire_streaming_task_tracked() {
             Ok(permit) => permit,
             Err(error) => {
                 let _ = tx.send(Err(error)).await;
@@ -187,7 +211,24 @@ fn incoming_to_body(mut incoming: Incoming, runtime_state: NacelleRuntimeState) 
             }
         };
         let mut body_bytes = 0_usize;
-        while let Some(frame) = incoming.frame().await {
+        loop {
+            let frame = {
+                let next = incoming.frame();
+                if let Some(timeout) = runtime_state.limits().read_timeout {
+                    match tokio::time::timeout(timeout, next).await {
+                        Ok(frame) => frame,
+                        Err(_) => {
+                            let _ = tx.send(Err(NacelleError::Timeout("http_body_read"))).await;
+                            break;
+                        }
+                    }
+                } else {
+                    next.await
+                }
+            };
+            let Some(frame) = frame else {
+                break;
+            };
             match frame {
                 Ok(frame) => {
                     if let Some(data) = frame.data_ref() {
@@ -348,6 +389,27 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 201 Created"));
         assert!(response.contains("hello world"));
         server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn http_server_stops_accepting_when_shutdown_is_requested() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
+            Ok(NacelleResponse::http_bytes(StatusCode::OK, "ok"))
+        }));
+        let (shutdown, token) = crate::lifecycle::NacelleShutdown::pair();
+        let server_task =
+            tokio::spawn(async move { server.serve_listener_with_shutdown(listener, token).await });
+
+        shutdown.shutdown();
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), server_task)
+            .await
+            .expect("server should stop promptly")
+            .expect("server task should join")
+            .expect("server should exit cleanly");
     }
 
     #[tokio::test]

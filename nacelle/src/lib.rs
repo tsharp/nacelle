@@ -6,6 +6,7 @@ pub mod handler;
 pub mod host;
 #[cfg(feature = "http")]
 pub mod http_server;
+pub mod lifecycle;
 pub mod limits;
 #[cfg(feature = "raw_tcp")]
 pub mod protocol;
@@ -30,6 +31,7 @@ pub use handler::{Handler, HandlerFn, handler_fn};
 pub use host::NacelleHost;
 #[cfg(feature = "http")]
 pub use http_server::HyperServer;
+pub use lifecycle::{NacelleShutdown, NacelleShutdownToken};
 pub use limits::{MemoryReservation, NacelleLimits, NacelleRuntimeState};
 #[cfg(feature = "raw_tcp")]
 pub use protocol::{DecodedRequest, Protocol};
