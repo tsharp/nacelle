@@ -299,6 +299,7 @@ where
         execute_handler(handler, request, decoded.body_len, body, runtime_state).await
     } else {
         let _streaming_permit = runtime_state.acquire_streaming_task_tracked()?;
+        let _streaming_body_reservation = runtime_state.reserve_memory(decoded.body_len)?;
         let (body_tx, body_rx) = mpsc::channel(config.request_body_channel_capacity);
         let body = NacelleBody::new(body_rx, decoded.body_len);
         let h = handler.clone();

@@ -9,7 +9,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_core::Stream;
 use http_body_util::{BodyExt, Full, StreamBody, combinators::BoxBody};
-use hyper::body::{Frame, Incoming};
+use hyper::body::{Body, Frame, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
@@ -224,13 +224,22 @@ where
             }
         };
         let (parts, body) = request.into_parts();
+        let body_len_hint = body
+            .size_hint()
+            .upper()
+            .and_then(|bytes| usize::try_from(bytes).ok());
         let request = NacelleRequest {
             meta: NacelleRequestMeta::Http(HttpRequestMeta {
                 method: parts.method,
                 uri: parts.uri,
                 headers: parts.headers,
             }),
-            body: incoming_to_body(body, self.runtime_state.clone(), self.telemetry.clone()),
+            body: incoming_to_body(
+                body,
+                body_len_hint,
+                self.runtime_state.clone(),
+                self.telemetry.clone(),
+            ),
         };
 
         let handler_future = self.handler.call(request);
@@ -283,11 +292,30 @@ where
 
 fn incoming_to_body(
     mut incoming: Incoming,
+    body_len_hint: Option<usize>,
     runtime_state: NacelleRuntimeState,
     telemetry: NacelleTelemetry,
 ) -> NacelleBody {
     let (tx, body) = NacelleBody::channel(8);
     tokio::spawn(async move {
+        if let Some(body_len_hint) = body_len_hint {
+            if body_len_hint > runtime_state.limits().max_request_body_bytes {
+                let _ = tx
+                    .send(Err(NacelleError::ResourceLimit("request_body_bytes")))
+                    .await;
+                return;
+            }
+        }
+        let _body_reservation = match body_len_hint {
+            Some(bytes) => match runtime_state.reserve_memory(bytes) {
+                Ok(reservation) => Some(reservation),
+                Err(error) => {
+                    let _ = tx.send(Err(error)).await;
+                    return;
+                }
+            },
+            None => None,
+        };
         let _streaming_permit = match runtime_state.acquire_streaming_task_tracked() {
             Ok(permit) => permit,
             Err(error) => {
@@ -737,6 +765,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_content_length_body_reserves_memory_until_consumed() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let runtime_state = crate::limits::NacelleRuntimeState::new(
+            crate::limits::NacelleLimits::default().with_max_memory_bytes(1024 * 1024),
+        );
+        let observed_memory = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = observed_memory.clone();
+        let state_for_handler = runtime_state.clone();
+        let server = HyperServer::new(handler_fn(move |mut request: NacelleRequest| {
+            let observed = observed.clone();
+            let state_for_handler = state_for_handler.clone();
+            async move {
+                for _ in 0..100 {
+                    let memory = state_for_handler.memory_used_bytes();
+                    if memory >= 11 {
+                        observed.store(memory, std::sync::atomic::Ordering::SeqCst);
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                }
+                while let Some(chunk) = request.body.next_chunk().await {
+                    let _ = chunk?;
+                }
+                Ok(NacelleResponse::http_bytes(StatusCode::OK, "ok"))
+            }
+        }))
+        .with_runtime_state(runtime_state.clone());
+        let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        client
+            .write_all(
+                b"POST / HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Content-Length: 11\r\n\
+                  Connection: close\r\n\
+                  \r\n",
+            )
+            .await
+            .expect("headers should write");
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        client
+            .write_all(b"hello world")
+            .await
+            .expect("body should write");
+
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("response should read");
+
+        assert!(
+            observed_memory.load(std::sync::atomic::Ordering::SeqCst) >= 11,
+            "handler should observe reserved body memory"
+        );
+        wait_for_memory(&runtime_state, 0).await;
+        server_task.abort();
+    }
+
+    #[tokio::test]
     async fn http_handler_error_becomes_500_response() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -785,6 +879,19 @@ mod tests {
         panic!(
             "active connections did not reach {expected}; observed {}",
             runtime_state.active_connections()
+        );
+    }
+
+    async fn wait_for_memory(runtime_state: &crate::limits::NacelleRuntimeState, expected: usize) {
+        for _ in 0..100 {
+            if runtime_state.memory_used_bytes() == expected {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        panic!(
+            "memory did not reach {expected}; observed {}",
+            runtime_state.memory_used_bytes()
         );
     }
 }
