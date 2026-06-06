@@ -1,4 +1,4 @@
 target
 artifacts
-docs/internal
+docs/_site
 *.ignore.md

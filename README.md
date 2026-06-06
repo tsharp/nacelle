@@ -152,13 +152,21 @@ Production notes:
 - [Architecture](docs/architecture.md)
 - [Operations](docs/operations.md)
 - [HTTP hardening](docs/http-hardening.md)
-- [Edge readiness plan](docs/edge-readiness-plan-2026-06-06.md)
 - [Production configuration](docs/production-configuration.md)
-- [Production checklist](docs/production-checklist.md)
 - [Stress testing](docs/stress-testing.md)
 - [Security scanning](docs/security-scanning.md)
 - [Performance tuning](docs/performance-tuning.md)
 - [API stability](docs/api-stability.md)
+
+Generate the documentation site with DocFX:
+
+```bash
+dotnet tool restore
+dotnet docfx docfx.json
+```
+
+Internal readiness plans, assessments, and checklists live under `docs/internal`
+and are excluded from the generated DocFX site.
 
 Exporter/subscriber setup stays in the application so production can choose OTLP, stdout, Prometheus, or another pipeline.
 
