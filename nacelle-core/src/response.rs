@@ -22,6 +22,16 @@ pub enum NacelleResponseMeta {
     Http(HttpResponseMeta),
 }
 
+impl NacelleResponseMeta {
+    pub fn raw_tcp(&self) -> Option<&RawTcpResponseMeta> {
+        match self {
+            Self::RawTcp(meta) => Some(meta),
+            #[cfg(feature = "http-types")]
+            Self::Http(_) => None,
+        }
+    }
+}
+
 pub struct NacelleResponse {
     pub meta: NacelleResponseMeta,
     pub body: NacelleBody,

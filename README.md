@@ -20,6 +20,15 @@ async fn handle(request: NacelleRequest) -> Result<NacelleResponse, NacelleError
 
 `NacelleBody` is streaming, so handlers can consume request chunks and return response chunks without forcing full buffering.
 
+## Crate Layout
+
+The workspace is split by responsibility:
+
+- `nacelle-core` owns shared handler, body, limits, telemetry, lifecycle, and TLS primitives.
+- `nacelle-tcp` owns the raw TCP transport and protocol trait.
+- `nacelle-http` owns the Hyper HTTP/1 transport and HTTP edge policy.
+- `nacelle` is the convenience crate that re-exports the transport crates and owns the reference length-delimited protocol.
+
 ## Raw TCP Example
 
 ```rust
@@ -202,7 +211,7 @@ cargo run --features reference_protocol --example echo -- 127.0.0.1:8080
 cargo run --no-default-features --features http --example http_echo -- 127.0.0.1:8080
 
 # HTTPS echo with an ephemeral self-signed certificate
-cargo run --no-default-features --features tls-self-signed --example tls_http_echo -- 127.0.0.1:8443
+cargo run --no-default-features --features http,tls-self-signed --example tls_http_echo -- 127.0.0.1:8443
 
 # Raw TCP and HTTP with one shared handler and one host
 cargo run --features reference_protocol,http --example dual_echo -- 127.0.0.1:8080 127.0.0.1:8081

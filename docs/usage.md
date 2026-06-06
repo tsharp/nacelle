@@ -8,6 +8,11 @@ async fn handle(request: NacelleRequest) -> Result<NacelleResponse, NacelleError
 
 Use `handler_fn` for simple services and capture application state in an `Arc`.
 
+The top-level `nacelle` crate re-exports the split transport crates. Use
+`nacelle-core` directly for shared primitives, `nacelle-tcp` for raw TCP-only
+applications, and `nacelle-http` for HTTP-only applications when you want a
+narrow dependency surface.
+
 ## Raw TCP
 
 Raw TCP requires a protocol implementation. The built-in

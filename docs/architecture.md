@@ -1,6 +1,17 @@
 # Architecture
 
-Nacelle is organized around a small transport/runtime core.
+Nacelle is organized as a small core plus protocol-specific transport crates.
+
+## Crate Layout
+
+- `nacelle-core`: shared handler, request/response body, limits, lifecycle, telemetry, and TLS primitives.
+- `nacelle-tcp`: raw TCP server, protocol trait, connection loop, and listener runtime.
+- `nacelle-http`: Hyper HTTP/1 server, HTTP request policy, and HTTP TLS listener integration.
+- `nacelle`: convenience crate that re-exports the split crates and owns the reference length-delimited protocol.
+
+The reference protocol intentionally stays out of `nacelle-core` and
+`nacelle-tcp`; it is a batteries-included implementation exported by the
+umbrella `nacelle` crate.
 
 ## Request Flow
 
@@ -14,8 +25,8 @@ listener
   -> response body encode/stream
 ```
 
-Raw TCP uses a `Protocol<Req>` trait to decode request heads and encode response
-frames. HTTP uses Hyper HTTP/1 and maps requests into the same
+Raw TCP uses the `nacelle-tcp` `Protocol<Req>` trait to decode request heads and encode response
+frames. HTTP uses `nacelle-http` with Hyper HTTP/1 and maps requests into the same
 `NacelleRequest` / `NacelleResponse` shape.
 
 ## Runtime State

@@ -10,7 +10,7 @@ use nacelle_core::error::NacelleError;
 use nacelle_core::handler::Handler;
 use nacelle_core::limits::{MemoryReservation, NacelleRuntimeState};
 use nacelle_core::request::{NacelleBody, NacelleRequest, NacelleRequestMeta, RequestMetadata};
-use nacelle_core::response::{NacelleResponse, NacelleResponseMeta};
+use nacelle_core::response::NacelleResponse;
 use nacelle_core::telemetry::{NacelleTelemetry, NacelleTransport};
 
 /// Drive one raw TCP framed connection and coalesce completed responses into writes.
@@ -511,7 +511,7 @@ where
     Req: RequestMetadata,
     P: Protocol<Req> + Send + Sync + 'static,
 {
-    let NacelleResponseMeta::RawTcp(meta) = &response.meta else {
+    let Some(meta) = response.meta.raw_tcp() else {
         return Err(NacelleError::InvalidFrame("non_raw_tcp_response"));
     };
     protocol.apply_raw_tcp_response_meta(&mut context, meta);
