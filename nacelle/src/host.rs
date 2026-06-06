@@ -9,7 +9,7 @@ use nacelle_core::limits::{NacelleLimits, NacelleRuntimeState};
 use nacelle_core::telemetry::NacelleTelemetry;
 #[cfg(any(feature = "raw_tcp", feature = "http"))]
 use nacelle_core::telemetry::NacelleTransport;
-#[cfg(feature = "tls")]
+#[cfg(all(feature = "http", feature = "tls"))]
 use nacelle_core::tls::NacelleTlsConfig;
 
 pub struct NacelleHost {
@@ -133,7 +133,7 @@ impl NacelleHost {
         self
     }
 
-    #[cfg(feature = "tls")]
+    #[cfg(all(feature = "http", feature = "tls"))]
     pub fn enable_http_tls<H>(
         &mut self,
         name: impl Into<String>,
