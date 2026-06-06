@@ -21,14 +21,18 @@ pub struct NacelleTlsConfig {
     handshake_timeout: Duration,
 }
 
+/// Identifies the compiled TLS backend for a [`NacelleTlsConfig`].
+///
+/// Rustls is the only backend today. Keeping the provider visible in the
+/// shared core API leaves room for an OpenSSL-backed implementation without
+/// changing the HTTP or raw TCP server entry points.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NacelleTlsProvider {
     Rustls,
 }
 
 impl NacelleTlsConfig {
-    pub fn from_server_config(mut server_config: ServerConfig) -> Self {
-        ensure_http1_alpn(&mut server_config);
+    pub fn from_server_config(server_config: ServerConfig) -> Self {
         Self {
             server_config: Arc::new(RwLock::new(Arc::new(server_config))),
             handshake_timeout: Duration::from_secs(10),
@@ -94,8 +98,7 @@ impl NacelleTlsConfig {
         self
     }
 
-    pub fn replace_server_config(&self, mut server_config: ServerConfig) {
-        ensure_http1_alpn(&mut server_config);
+    pub fn replace_server_config(&self, server_config: ServerConfig) {
         self.replace_server_config_arc(Arc::new(server_config));
     }
 
@@ -150,16 +153,6 @@ impl NacelleTlsConfig {
     #[doc(hidden)]
     pub fn handshake_timeout(&self) -> Duration {
         self.handshake_timeout
-    }
-}
-
-fn ensure_http1_alpn(config: &mut ServerConfig) {
-    if !config
-        .alpn_protocols
-        .iter()
-        .any(|protocol| protocol == b"http/1.1")
-    {
-        config.alpn_protocols.push(b"http/1.1".to_vec());
     }
 }
 
@@ -235,12 +228,6 @@ mod tests {
                 generated.private_key_pem.as_bytes(),
             )
             .expect("generated certificate should reload");
-        assert!(
-            generated
-                .tls_config
-                .server_config()
-                .alpn_protocols
-                .contains(&b"http/1.1".to_vec())
-        );
+        assert_eq!(generated.tls_config.handshake_timeout(), Duration::from_secs(10));
     }
 }
