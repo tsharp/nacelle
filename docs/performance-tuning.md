@@ -24,6 +24,10 @@ per-request atomics in peak throughput runs. Add `--stats` or set
 `stats_enabled = true` when validating server-side counters rather than maximum
 RPS.
 
+The stress server default build includes TLS capability, but the raw throughput
+baseline remains plain TCP unless `--tls-self-signed` or `tls_self_signed = true`
+is enabled. Compare TLS and non-TLS runs separately.
+
 Guardrails:
 
 - keep shutdown task tracking at the connection/listener boundary

@@ -7,6 +7,7 @@ request_body_chunk_size = 16384
 request_body_channel_capacity = 8
 low_memory = false
 stats_enabled = false
+tls_self_signed = false
 
 [limits]
 max_connections = 128000

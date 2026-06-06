@@ -15,6 +15,11 @@ cargo run --release --package nacelle-stress-test -- --connections 32 --pipeline
 Server-side stats are disabled by default for peak throughput. Add `--stats`
 when you want periodic server counters during a diagnostic run.
 
+The Tokio stress server default build includes `tls-self-signed` support. Plain
+TCP remains the runtime default for baseline RPS comparisons; add
+`--tls-self-signed` or set `tls_self_signed = true` in TOML when testing raw TCP
+over TLS with an ephemeral certificate.
+
 CI-friendly scenarios should stay short and deterministic:
 
 - baseline echo throughput

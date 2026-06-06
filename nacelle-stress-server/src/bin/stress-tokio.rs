@@ -13,12 +13,29 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+#[cfg(feature = "tls-self-signed")]
+use nacelle::NacelleTlsConfig;
 use nacelle::{FrameRequest, Handler, LengthDelimitedProtocol, NacelleError, RawTcpServer};
-use tokio::net::{TcpListener, TcpSocket};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 
 const SOCKET_BUFFER_BYTES: u32 = 4 * 1024 * 1024;
+
+#[cfg(feature = "tls-self-signed")]
+type StressTlsConfig = NacelleTlsConfig;
+#[cfg(not(feature = "tls-self-signed"))]
+type StressTlsConfig = ();
+
+#[cfg(feature = "tls-self-signed")]
+fn clone_tls_config(tls_config: &Option<StressTlsConfig>) -> Option<StressTlsConfig> {
+    tls_config.clone()
+}
+
+#[cfg(not(feature = "tls-self-signed"))]
+fn clone_tls_config(tls_config: &Option<StressTlsConfig>) -> Option<StressTlsConfig> {
+    *tls_config
+}
 
 // ---------------------------------------------------------------------------
 // Platform-specific low-latency socket helpers
@@ -100,6 +117,7 @@ fn make_server_socket(
 async fn run_server<H>(
     listener: TcpListener,
     server: RawTcpServer<FrameRequest, LengthDelimitedProtocol, H>,
+    tls_config: Option<StressTlsConfig>,
     mut shutdown: watch::Receiver<bool>,
     stats: Arc<StressServerStats>,
 ) -> Result<(), NacelleError>
@@ -117,17 +135,42 @@ where
                 let (stream, _) = accepted?;
                 stream.set_nodelay(true)?;
                 let server = server.clone();
+                let tls_config = clone_tls_config(&tls_config);
                 let stats = stats.clone();
                 stats.record_accepted_connection();
                 tokio::spawn(async move {
                     let active_connection = ActiveConnection::new(stats);
-                    let result = server.serve_io(stream).await;
+                    let result = serve_accepted_stream(server, stream, tls_config).await;
                     active_connection.record_finished(result.is_err());
                 });
             }
         }
     }
     Ok(())
+}
+
+async fn serve_accepted_stream<H>(
+    server: RawTcpServer<FrameRequest, LengthDelimitedProtocol, H>,
+    stream: TcpStream,
+    tls_config: Option<StressTlsConfig>,
+) -> Result<(), NacelleError>
+where
+    H: Handler,
+{
+    #[cfg(feature = "tls-self-signed")]
+    if let Some(tls_config) = tls_config {
+        let acceptor = tokio_rustls::TlsAcceptor::from(tls_config.server_config());
+        let tls_stream =
+            tokio::time::timeout(tls_config.handshake_timeout(), acceptor.accept(stream))
+                .await
+                .map_err(|_| NacelleError::Timeout("tls_handshake"))??;
+        return server.serve_io(tls_stream).await;
+    }
+
+    #[cfg(not(feature = "tls-self-signed"))]
+    let _ = tls_config;
+
+    server.serve_io(stream).await
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +180,7 @@ where
 fn spawn_server_thread<H>(
     listener: TcpListener,
     server: RawTcpServer<FrameRequest, LengthDelimitedProtocol, H>,
+    tls_config: Option<StressTlsConfig>,
     shutdown: watch::Receiver<bool>,
     stats: Arc<StressServerStats>,
 ) -> thread::JoinHandle<Result<(), NacelleError>>
@@ -148,8 +192,29 @@ where
             .enable_all()
             .build()
             .map_err(NacelleError::from)?;
-        runtime.block_on(run_server(listener, server, shutdown, stats))
+        runtime.block_on(run_server(listener, server, tls_config, shutdown, stats))
     })
+}
+
+fn build_tls_config(
+    config: &shared::ServerConfig,
+) -> Result<Option<StressTlsConfig>, Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(feature = "tls-self-signed")]
+    {
+        if config.tls_self_signed {
+            let generated = NacelleTlsConfig::self_signed(["localhost", "127.0.0.1"])?;
+            return Ok(Some(generated.tls_config));
+        }
+        Ok(None)
+    }
+
+    #[cfg(not(feature = "tls-self-signed"))]
+    {
+        if config.tls_self_signed {
+            return Err("tokio-server was built without tls-self-signed support".into());
+        }
+        Ok(None)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -353,6 +418,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     configure_allocator(config.low_memory);
     let stats = Arc::new(StressServerStats::new(config.stats_enabled));
     let server = build_server(&config, stats.clone())?;
+    let tls_config = build_tls_config(&config)?;
 
     #[cfg(not(target_os = "linux"))]
     let n_server_threads = {
@@ -375,8 +441,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let listen_addr = first_listener.local_addr()?;
 
     println!(
-        "nacelle-stress-server listening on {} (threads={})",
-        listen_addr, n_server_threads,
+        "nacelle-stress-server listening on {} (threads={} transport={})",
+        listen_addr,
+        n_server_threads,
+        if config.tls_self_signed {
+            "raw-tcp-tls"
+        } else {
+            "raw-tcp"
+        },
     );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -393,6 +465,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let server_task = tokio::spawn(run_server(
             first_listener,
             server,
+            tls_config,
             shutdown_rx,
             stats.clone(),
         ));
@@ -410,6 +483,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     server_tasks.push(spawn_server_thread(
         first_listener,
         server.clone(),
+        clone_tls_config(&tls_config),
         shutdown_rx.clone(),
         stats.clone(),
     ));
@@ -420,6 +494,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         server_tasks.push(spawn_server_thread(
             listener,
             server.clone(),
+            clone_tls_config(&tls_config),
             shutdown_rx.clone(),
             stats.clone(),
         ));

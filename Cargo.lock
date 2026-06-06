@@ -783,6 +783,7 @@ dependencies = [
  "nacelle",
  "serde",
  "tokio",
+ "tokio-rustls",
  "toml",
 ]
 

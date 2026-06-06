@@ -235,6 +235,12 @@ cargo run --release --package nacelle-stress-server --bin tokio-server
 cargo run --release --package nacelle-stress-server --bin tokio-server -- \
   --config nacelle-stress-server/config.example.toml
 
+# The stress server default build includes raw TCP TLS support. Plain TCP
+# remains the runtime default; add --tls-self-signed to serve with an ephemeral
+# self-signed certificate.
+cargo run --release --package nacelle-stress-server --bin tokio-server -- \
+  --tls-self-signed
+
 # In another shell:
 cargo run --release --package nacelle-stress-test -- \
   --connections 32 \

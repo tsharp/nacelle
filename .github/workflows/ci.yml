@@ -53,6 +53,8 @@ jobs:
         run: cargo test -p nacelle --features reference_protocol,http,tower,otel --all-targets
       - name: Test Stress Server
         run: cargo test -p nacelle-stress-server --all-targets
+      - name: Test Stress Server Without Default Features
+        run: cargo test -p nacelle-stress-server --no-default-features --all-targets
       - name: Ensure deprecated YAML stack is absent
         run: |
           ! cargo tree -i serde_yaml

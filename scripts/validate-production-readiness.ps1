@@ -34,6 +34,7 @@ Invoke-Step "nacelle raw tcp self-signed tests" { cargo test -p nacelle --featur
 Invoke-Step "nacelle all-feature clippy" { cargo clippy -p nacelle --features reference_protocol,http,tower,otel,tls-self-signed --all-targets -- -D warnings }
 Invoke-Step "nacelle no-default tests" { cargo test -p nacelle --no-default-features --all-targets }
 Invoke-Step "stress server tests" { cargo test -p nacelle-stress-server --all-targets }
+Invoke-Step "stress server no-default tests" { cargo test -p nacelle-stress-server --no-default-features --all-targets }
 
 cargo tree -i serde_yaml
 if ($LASTEXITCODE -eq 0) {

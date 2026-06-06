@@ -22,6 +22,7 @@ cargo test -p nacelle --features reference_protocol,tls-self-signed --all-target
 cargo clippy -p nacelle --features reference_protocol,http,tower,otel,tls-self-signed --all-targets -- -D warnings
 cargo test -p nacelle --no-default-features --all-targets
 cargo test -p nacelle-stress-server --all-targets
+cargo test -p nacelle-stress-server --no-default-features --all-targets
 cargo tree -i serde_yaml && {
   echo "serde_yaml is still present" >&2
   exit 1
