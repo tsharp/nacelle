@@ -52,6 +52,11 @@ path = "examples/http_echo.rs"
 required-features = ["http"]
 
 [[example]]
+name = "tls_http_echo"
+path = "examples/tls_http_echo.rs"
+required-features = ["tls-self-signed"]
+
+[[example]]
 name = "dual_echo"
 path = "examples/dual_echo.rs"
 required-features = ["reference_protocol", "http"]
