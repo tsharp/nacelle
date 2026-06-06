@@ -770,11 +770,13 @@ name = "nacelle-http"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "futures-core",
  "http",
  "http-body-util",
  "hyper",
  "hyper-util",
  "nacelle-core",
+ "rustls",
  "tokio",
  "tokio-rustls",
  "tracing",
