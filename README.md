@@ -160,11 +160,11 @@ cargo run --features reference_protocol,http --example dual_echo -- 127.0.0.1:80
 ```bash
 cargo run --release --package nacelle-stress-server --bin tokio-server
 
-# If ./config.yaml exists, the stress server loads it automatically.
+# If ./config.toml exists, the stress server loads it automatically.
 
-# Or load server limits and buffer sizing from YAML:
+# Or load server limits and buffer sizing from TOML:
 cargo run --release --package nacelle-stress-server --bin tokio-server -- \
-  --config nacelle-stress-server/config.example.yaml
+  --config nacelle-stress-server/config.example.toml
 
 # In another shell:
 cargo run --release --package nacelle-stress-test -- \

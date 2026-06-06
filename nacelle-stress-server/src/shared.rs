@@ -17,7 +17,7 @@ use nacelle::{
 use serde::Deserialize;
 
 pub const STRESS_OPCODE: u64 = 1;
-const DEFAULT_CONFIG_PATH: &str = "config.yaml";
+const DEFAULT_CONFIG_PATH: &str = "config.toml";
 
 #[derive(Debug)]
 pub struct StressServerStats {
@@ -225,10 +225,10 @@ impl ServerConfig {
         path: impl AsRef<Path>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let path = path.as_ref();
-        let yaml = std::fs::read_to_string(path)?;
-        let file = serde_yaml::from_str::<ServerConfigFile>(&yaml)?;
+        let config = std::fs::read_to_string(path)?;
+        let file = toml::from_str::<ServerConfigFile>(&config)?;
         self.apply_config_file(file);
-        self.config_sources.push(format!("yaml {}", path.display()));
+        self.config_sources.push(format!("toml {}", path.display()));
         Ok(())
     }
 
@@ -611,7 +611,7 @@ pub fn print_help(runtime: &str) {
          \n\
          Options:\n\
            --bind <addr>                             Listen address (default 127.0.0.1:7878)\n\
-           --config <path>                           Load YAML config before applying CLI flags\n\
+           --config <path>                           Load TOML config before applying CLI flags\n\
            --server-threads <count>                  Threads (default: logical CPUs)\n\
            --response-bytes <bytes>                  Response payload bytes per request (default 64)\n\
            --read-buffer <bytes>                     Read buffer capacity (default 65536)\n\
@@ -627,8 +627,8 @@ pub fn print_help(runtime: &str) {
                                                        MIMALLOC_ARENA_EAGER_COMMIT=0\n\
          \n\
          Config:\n\
-           If ./config.yaml exists, it is loaded automatically. Explicit\n\
-           --config files are applied after ./config.yaml, and CLI flags are\n\
+           If ./config.toml exists, it is loaded automatically. Explicit\n\
+           --config files are applied after ./config.toml, and CLI flags are\n\
            applied last.\n\
         "
     );
@@ -639,34 +639,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn yaml_config_applies_limits() {
-        let yaml = r#"
-bind: 127.0.0.1:9000
-server_threads: 4
-response_bytes: 256
-read_buffer_capacity: 4096
-response_buffer_capacity: 2048
-request_body_chunk_size: 1024
-request_body_channel_capacity: 2
-low_memory: true
-limits:
-  max_connections: 128000
-  max_in_flight_requests: 64000
-  max_streaming_tasks: 8192
-  max_memory_bytes: 8589934592
-  max_request_body_bytes: 16777216
-  max_response_body_bytes: 15728640
-  read_timeout_ms: 30000
-  write_timeout_ms: 30000
-  handler_timeout_ms: 60000
-  idle_timeout_ms: 120000
-  http_header_read_timeout_ms: 5000
-  http_request_body_read_timeout_ms: 10000
-  http_response_write_timeout_ms: 15000
-  http_keep_alive: false
-  http_max_connection_age_ms: 300000
+    fn toml_config_applies_limits() {
+        let toml = r#"
+bind = "127.0.0.1:9000"
+server_threads = 4
+response_bytes = 256
+read_buffer_capacity = 4096
+response_buffer_capacity = 2048
+request_body_chunk_size = 1024
+request_body_channel_capacity = 2
+low_memory = true
+
+[limits]
+max_connections = 128000
+max_in_flight_requests = 64000
+max_streaming_tasks = 8192
+max_memory_bytes = 8589934592
+max_request_body_bytes = 16777216
+max_response_body_bytes = 15728640
+read_timeout_ms = 30000
+write_timeout_ms = 30000
+handler_timeout_ms = 60000
+idle_timeout_ms = 120000
+http_header_read_timeout_ms = 5000
+http_request_body_read_timeout_ms = 10000
+http_response_write_timeout_ms = 15000
+http_keep_alive = false
+http_max_connection_age_ms = 300000
 "#;
-        let file = serde_yaml::from_str::<ServerConfigFile>(yaml).unwrap();
+        let file = toml::from_str::<ServerConfigFile>(toml).unwrap();
         let mut config = ServerConfig::default();
         config.apply_config_file(file);
 
@@ -708,14 +709,14 @@ limits:
     }
 
     #[test]
-    fn cli_overrides_yaml_after_config_load() {
+    fn cli_overrides_toml_after_config_load() {
         let path = std::env::temp_dir().join(format!(
-            "nacelle-stress-server-test-{}.yaml",
+            "nacelle-stress-server-test-{}.toml",
             std::process::id()
         ));
         std::fs::write(
             &path,
-            "server_threads: 2\nresponse_bytes: 128\nlimits:\n  max_connections: 1500\n",
+            "server_threads = 2\nresponse_bytes = 128\n[limits]\nmax_connections = 1500\n",
         )
         .unwrap();
 
@@ -737,9 +738,9 @@ limits:
     }
 
     #[test]
-    fn missing_yaml_values_keep_code_defaults() {
+    fn missing_toml_values_keep_code_defaults() {
         let file =
-            serde_yaml::from_str::<ServerConfigFile>("limits:\n  max_connections: 1500\n").unwrap();
+            toml::from_str::<ServerConfigFile>("[limits]\nmax_connections = 1500\n").unwrap();
         let mut config = ServerConfig::default();
         let default_response_bytes = config.response_bytes;
         let default_response_body_bytes = config.limits.max_response_body_bytes;
@@ -757,14 +758,14 @@ limits:
     }
 
     #[test]
-    fn default_config_yaml_loads_when_present() {
+    fn default_config_toml_loads_when_present() {
         let path = std::env::temp_dir().join(format!(
-            "nacelle-stress-server-default-config-{}.yaml",
+            "nacelle-stress-server-default-config-{}.toml",
             std::process::id()
         ));
         std::fs::write(
             &path,
-            "response_bytes: 512\nlimits:\n  max_connections: 1500\n",
+            "response_bytes = 512\n[limits]\nmax_connections = 1500\n",
         )
         .unwrap();
 
@@ -777,29 +778,29 @@ limits:
             config.config_sources,
             vec![
                 "code defaults".to_string(),
-                format!("yaml {}", path.display())
+                format!("toml {}", path.display())
             ]
         );
     }
 
     #[test]
-    fn explicit_config_and_cli_override_default_config_yaml() {
+    fn explicit_config_and_cli_override_default_config_toml() {
         let base_path = std::env::temp_dir().join(format!(
-            "nacelle-stress-server-base-config-{}.yaml",
+            "nacelle-stress-server-base-config-{}.toml",
             std::process::id()
         ));
         let explicit_path = std::env::temp_dir().join(format!(
-            "nacelle-stress-server-explicit-config-{}.yaml",
+            "nacelle-stress-server-explicit-config-{}.toml",
             std::process::id()
         ));
         std::fs::write(
             &base_path,
-            "response_bytes: 128\nlimits:\n  max_connections: 1500\n",
+            "response_bytes = 128\n[limits]\nmax_connections = 1500\n",
         )
         .unwrap();
         std::fs::write(
             &explicit_path,
-            "response_bytes: 256\nlimits:\n  max_connections: 32000\n",
+            "response_bytes = 256\n[limits]\nmax_connections = 32000\n",
         )
         .unwrap();
 
@@ -825,15 +826,15 @@ limits:
     #[test]
     fn explicit_config_without_cli_override_does_not_record_cli_source() {
         let path = std::env::temp_dir().join(format!(
-            "nacelle-stress-server-explicit-only-config-{}.yaml",
+            "nacelle-stress-server-explicit-only-config-{}.toml",
             std::process::id()
         ));
-        std::fs::write(&path, "response_bytes: 256\n").unwrap();
+        std::fs::write(&path, "response_bytes = 256\n").unwrap();
 
         let config = parse_args_with_default_config(
             ["--config".to_string(), path.to_string_lossy().into_owned()],
             "tokio",
-            Path::new("nacelle-stress-server-test-missing-default-config.yaml"),
+            Path::new("nacelle-stress-server-test-missing-default-config.toml"),
         )
         .unwrap();
 
@@ -843,7 +844,7 @@ limits:
             config.config_sources,
             vec![
                 "code defaults".to_string(),
-                format!("yaml {}", path.display())
+                format!("toml {}", path.display())
             ]
         );
     }
