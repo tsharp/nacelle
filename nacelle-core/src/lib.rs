@@ -34,6 +34,6 @@ pub use telemetry::{
 #[cfg(feature = "tls-self-signed")]
 pub use tls::NacelleGeneratedTlsConfig;
 #[cfg(feature = "tls")]
-pub use tls::NacelleTlsConfig;
+pub use tls::{NacelleTlsConfig, NacelleTlsProvider};
 #[cfg(feature = "tower")]
 pub use tower::handler_from_tower_service;

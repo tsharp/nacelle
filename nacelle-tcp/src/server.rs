@@ -10,6 +10,8 @@ use nacelle_core::handler::Handler;
 use nacelle_core::limits::NacelleRuntimeState;
 use nacelle_core::request::RequestMetadata;
 use nacelle_core::telemetry::NacelleTelemetry;
+#[cfg(feature = "tls")]
+use nacelle_core::tls::NacelleTlsConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub struct Missing;
@@ -162,6 +164,54 @@ where
         crate::runtime::serve_tcp_with_shutdown_timeout(
             Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
             addr,
+            shutdown,
+            drain_timeout,
+        )
+        .await
+    }
+
+    #[cfg(feature = "tls")]
+    pub async fn serve_tcp_tls(
+        &self,
+        addr: SocketAddr,
+        tls_config: NacelleTlsConfig,
+    ) -> Result<(), NacelleError> {
+        crate::runtime::serve_tcp_tls(
+            Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
+            addr,
+            tls_config,
+        )
+        .await
+    }
+
+    #[cfg(feature = "tls")]
+    pub async fn serve_tcp_tls_with_shutdown(
+        &self,
+        addr: SocketAddr,
+        tls_config: NacelleTlsConfig,
+        shutdown: nacelle_core::lifecycle::NacelleShutdownToken,
+    ) -> Result<(), NacelleError> {
+        crate::runtime::serve_tcp_tls_with_shutdown(
+            Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
+            addr,
+            tls_config,
+            shutdown,
+        )
+        .await
+    }
+
+    #[cfg(feature = "tls")]
+    pub async fn serve_tcp_tls_with_shutdown_timeout(
+        &self,
+        addr: SocketAddr,
+        tls_config: NacelleTlsConfig,
+        shutdown: nacelle_core::lifecycle::NacelleShutdownToken,
+        drain_timeout: std::time::Duration,
+    ) -> Result<(), NacelleError> {
+        crate::runtime::serve_tcp_tls_with_shutdown_timeout(
+            Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
+            addr,
+            tls_config,
             shutdown,
             drain_timeout,
         )

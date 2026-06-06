@@ -21,6 +21,11 @@ pub struct NacelleTlsConfig {
     handshake_timeout: Duration,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NacelleTlsProvider {
+    Rustls,
+}
+
 impl NacelleTlsConfig {
     pub fn from_server_config(mut server_config: ServerConfig) -> Self {
         ensure_http1_alpn(&mut server_config);
@@ -87,6 +92,10 @@ impl NacelleTlsConfig {
     pub fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
         self.handshake_timeout = timeout;
         self
+    }
+
+    pub fn provider(&self) -> NacelleTlsProvider {
+        NacelleTlsProvider::Rustls
     }
 
     #[doc(hidden)]

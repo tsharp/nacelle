@@ -9,7 +9,7 @@ use nacelle_core::limits::{NacelleLimits, NacelleRuntimeState};
 use nacelle_core::telemetry::NacelleTelemetry;
 #[cfg(any(feature = "raw_tcp", feature = "http"))]
 use nacelle_core::telemetry::NacelleTransport;
-#[cfg(all(feature = "http", feature = "tls"))]
+#[cfg(all(any(feature = "raw_tcp", feature = "http"), feature = "tls"))]
 use nacelle_core::tls::NacelleTlsConfig;
 
 pub struct NacelleHost {
@@ -88,6 +88,47 @@ impl NacelleHost {
             let result = nacelle_tcp::runtime::serve_tcp_with_shutdown_deadline(
                 std::sync::Arc::new(server),
                 addr,
+                shutdown,
+                drain_deadline,
+            )
+            .await;
+            if let Err(error) = &result {
+                telemetry.listener_failed(
+                    NacelleTransport::RawTcp,
+                    &name,
+                    &addr.to_string(),
+                    error,
+                );
+            }
+            result
+        });
+        self
+    }
+
+    #[cfg(all(feature = "raw_tcp", feature = "tls"))]
+    pub fn enable_raw_tcp_tls<Req, P, H>(
+        &mut self,
+        name: impl Into<String>,
+        addr: SocketAddr,
+        server: nacelle_tcp::RawTcpServer<Req, P, H>,
+        tls_config: NacelleTlsConfig,
+    ) -> &mut Self
+    where
+        Req: nacelle_core::request::RequestMetadata + Send + 'static,
+        P: nacelle_tcp::Protocol<Req> + Send + Sync + 'static,
+        H: nacelle_core::handler::Handler,
+    {
+        let name = name.into();
+        let telemetry = self.telemetry.clone();
+        let shutdown = self.shutdown.token();
+        let drain_deadline = self.drain_deadline.clone();
+        let server = server.with_runtime_state(self.runtime_state.clone());
+        telemetry.listener_configured(NacelleTransport::RawTcp, &name, &addr.to_string());
+        self.tasks.spawn(async move {
+            let result = nacelle_tcp::runtime::serve_tcp_tls_with_shutdown_deadline(
+                std::sync::Arc::new(server),
+                addr,
+                tls_config,
                 shutdown,
                 drain_deadline,
             )
