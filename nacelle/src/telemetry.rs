@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+#[cfg(feature = "otel")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +27,7 @@ pub enum NacelleTelemetryEventKind {
     ConnectionRejected,
     RequestCompleted,
     RequestFailed,
+    ResponseBodyBytes,
     Timeout,
     ShutdownRequested,
     ListenerStoppedAccepting,
@@ -333,6 +336,33 @@ impl NacelleTelemetry {
         );
     }
 
+    pub fn response_body_bytes(&self, transport: NacelleTransport, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        self.record(NacelleTelemetryEvent {
+            kind: NacelleTelemetryEventKind::ResponseBodyBytes,
+            transport: Some(transport),
+            reason: None,
+            count: bytes as u64,
+        });
+        #[cfg(feature = "otel")]
+        self.metrics.response_bytes.add(
+            bytes as u64,
+            &[opentelemetry::KeyValue::new(
+                "transport",
+                transport.as_str(),
+            )],
+        );
+    }
+
+    pub fn register_runtime_state(&self, state: crate::limits::NacelleRuntimeState) {
+        #[cfg(feature = "otel")]
+        self.metrics.register_runtime_state(state);
+        #[cfg(not(feature = "otel"))]
+        let _ = state;
+    }
+
     fn record(&self, event: NacelleTelemetryEvent) {
         if let Some(sink) = &self.sink {
             sink.record(event);
@@ -372,6 +402,8 @@ fn shutdown_stage(kind: NacelleTelemetryEventKind) -> &'static str {
 #[cfg(feature = "otel")]
 #[derive(Debug)]
 struct OtelMetrics {
+    runtime_state_registered: AtomicBool,
+    runtime_state_gauges: Mutex<Vec<opentelemetry::metrics::ObservableGauge<u64>>>,
     connection_count: opentelemetry::metrics::Counter<u64>,
     request_count: opentelemetry::metrics::Counter<u64>,
     request_error_count: opentelemetry::metrics::Counter<u64>,
@@ -389,6 +421,8 @@ impl OtelMetrics {
     fn new() -> Self {
         let meter = opentelemetry::global::meter("nacelle");
         Self {
+            runtime_state_registered: AtomicBool::new(false),
+            runtime_state_gauges: Mutex::new(Vec::new()),
             connection_count: meter.u64_counter("nacelle.connections").build(),
             request_count: meter.u64_counter("nacelle.requests").build(),
             request_error_count: meter.u64_counter("nacelle.request_errors").build(),
@@ -400,6 +434,48 @@ impl OtelMetrics {
             response_bytes: meter.u64_counter("nacelle.response_bytes").build(),
             request_duration_ms: meter.f64_histogram("nacelle.request_duration_ms").build(),
         }
+    }
+
+    fn register_runtime_state(&self, state: crate::limits::NacelleRuntimeState) {
+        if self.runtime_state_registered.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let meter = opentelemetry::global::meter("nacelle");
+        let connections = state.clone();
+        let requests = state.clone();
+        let streaming = state.clone();
+        let memory = state;
+        let gauges = vec![
+            meter
+                .u64_observable_gauge("nacelle.connections.active")
+                .with_callback(move |observer| {
+                    observer.observe(connections.active_connections() as u64, &[])
+                })
+                .build(),
+            meter
+                .u64_observable_gauge("nacelle.requests.active")
+                .with_callback(move |observer| {
+                    observer.observe(requests.active_requests() as u64, &[])
+                })
+                .build(),
+            meter
+                .u64_observable_gauge("nacelle.streaming_tasks.active")
+                .with_callback(move |observer| {
+                    observer.observe(streaming.active_streaming_tasks() as u64, &[])
+                })
+                .build(),
+            meter
+                .u64_observable_gauge("nacelle.memory.used_bytes")
+                .with_callback(move |observer| {
+                    observer.observe(memory.memory_used_bytes() as u64, &[])
+                })
+                .build(),
+        ];
+        self.runtime_state_gauges
+            .lock()
+            .expect("otel gauge registry poisoned")
+            .extend(gauges);
     }
 }
 

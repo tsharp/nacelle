@@ -3,6 +3,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -49,19 +50,24 @@ where
     H: Handler,
 {
     pub fn new(handler: H) -> Self {
+        let telemetry = NacelleTelemetry::default();
+        let runtime_state = NacelleRuntimeState::default();
+        telemetry.register_runtime_state(runtime_state.clone());
         Self {
             handler,
-            telemetry: NacelleTelemetry::default(),
-            runtime_state: NacelleRuntimeState::default(),
+            telemetry,
+            runtime_state,
         }
     }
 
     pub fn with_telemetry(mut self, telemetry: NacelleTelemetry) -> Self {
+        telemetry.register_runtime_state(self.runtime_state.clone());
         self.telemetry = telemetry;
         self
     }
 
     pub fn with_runtime_state(mut self, runtime_state: NacelleRuntimeState) -> Self {
+        self.telemetry.register_runtime_state(runtime_state.clone());
         self.runtime_state = runtime_state;
         self
     }
@@ -220,10 +226,12 @@ where
                 return response_to_http(
                     NacelleResponse::http_bytes(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
                     self.runtime_state.clone(),
+                    self.telemetry.clone(),
                 );
             }
         };
         let (parts, body) = request.into_parts();
+        let request_body_bytes = Arc::new(AtomicUsize::new(0));
         let body_len_hint = body
             .size_hint()
             .upper()
@@ -237,6 +245,7 @@ where
             body: incoming_to_body(
                 body,
                 body_len_hint,
+                request_body_bytes.clone(),
                 self.runtime_state.clone(),
                 self.telemetry.clone(),
             ),
@@ -253,11 +262,13 @@ where
 
         match handler_result {
             Ok(response) => {
-                let response = response_to_http(response, self.runtime_state.clone());
+                let request_bytes = request_body_bytes.load(Ordering::Relaxed);
+                let response =
+                    response_to_http(response, self.runtime_state.clone(), self.telemetry.clone());
                 self.telemetry.request_completed(
                     NacelleTransport::Http,
                     None,
-                    0,
+                    request_bytes,
                     0,
                     request_started.elapsed(),
                 );
@@ -270,17 +281,19 @@ where
                     request_started.elapsed(),
                     &error,
                 );
+                let request_bytes = request_body_bytes.load(Ordering::Relaxed);
                 let response = response_to_http(
                     NacelleResponse::http_bytes(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         error.to_string(),
                     ),
                     self.runtime_state.clone(),
+                    self.telemetry.clone(),
                 );
                 self.telemetry.request_completed(
                     NacelleTransport::Http,
                     None,
-                    0,
+                    request_bytes,
                     0,
                     request_started.elapsed(),
                 );
@@ -293,6 +306,7 @@ where
 fn incoming_to_body(
     mut incoming: Incoming,
     body_len_hint: Option<usize>,
+    request_body_bytes: Arc<AtomicUsize>,
     runtime_state: NacelleRuntimeState,
     telemetry: NacelleTelemetry,
 ) -> NacelleBody {
@@ -363,6 +377,7 @@ fn incoming_to_body(
                             break;
                         }
                         body_bytes = next;
+                        request_body_bytes.fetch_add(data.len(), Ordering::Relaxed);
                         if tx.send(Ok(data.clone())).await.is_err() {
                             break;
                         }
@@ -381,6 +396,7 @@ fn incoming_to_body(
 fn response_to_http(
     response: NacelleResponse,
     runtime_state: NacelleRuntimeState,
+    telemetry: NacelleTelemetry,
 ) -> Result<Response<HttpBody>, NacelleError> {
     let (status, headers) = match response.meta {
         NacelleResponseMeta::Http(meta) => (meta.status, meta.headers),
@@ -393,14 +409,23 @@ fn response_to_http(
     };
     *builder_headers = headers;
     builder
-        .body(nacelle_body_to_http(response.body, runtime_state))
+        .body(nacelle_body_to_http(
+            response.body,
+            runtime_state,
+            telemetry,
+        ))
         .map_err(NacelleError::protocol)
 }
 
-fn nacelle_body_to_http(body: NacelleBody, runtime_state: NacelleRuntimeState) -> HttpBody {
+fn nacelle_body_to_http(
+    body: NacelleBody,
+    runtime_state: NacelleRuntimeState,
+    telemetry: NacelleTelemetry,
+) -> HttpBody {
     StreamBody::new(HttpBodyStream {
         body,
         runtime_state,
+        telemetry,
         response_body_bytes: 0,
     })
     .map_err(|error| -> BoxError { Box::new(error) })
@@ -573,6 +598,7 @@ async fn drain_http_connection_tasks(
 struct HttpBodyStream {
     body: NacelleBody,
     runtime_state: NacelleRuntimeState,
+    telemetry: NacelleTelemetry,
     response_body_bytes: usize,
 }
 
@@ -600,6 +626,13 @@ impl Stream for HttpBodyStream {
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+impl Drop for HttpBodyStream {
+    fn drop(&mut self) {
+        self.telemetry
+            .response_body_bytes(NacelleTransport::Http, self.response_body_bytes);
     }
 }
 
@@ -669,6 +702,41 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 201 Created"));
         assert!(response.contains("hello world"));
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn http_response_body_bytes_are_recorded() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let sink = Arc::new(crate::NacelleInMemoryTelemetrySink::new());
+        let telemetry = NacelleTelemetry::new().with_sink(sink.clone());
+        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
+            Ok(NacelleResponse::http_bytes(StatusCode::OK, "hello bytes"))
+        }))
+        .with_telemetry(telemetry);
+        let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("request should write");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("response should read");
+
+        assert!(sink.events().iter().any(|event| {
+            event.kind == crate::NacelleTelemetryEventKind::ResponseBodyBytes
+                && event.transport == Some(NacelleTransport::Http)
+                && event.count == "hello bytes".len() as u64
+        }));
         server_task.abort();
     }
 

@@ -81,6 +81,7 @@ where
     }
 
     pub fn with_runtime_state(mut self, runtime_state: NacelleRuntimeState) -> Self {
+        self.telemetry.register_runtime_state(runtime_state.clone());
         self.runtime_state = runtime_state;
         self
     }
@@ -247,6 +248,9 @@ where
     pub fn build(self) -> Result<NacelleServer<Req, P, H>, NacelleError> {
         let protocol = self.protocol.ok_or(NacelleError::MissingProtocol)?;
         let handler = self.handler.expect("handler state guarantees a handler");
+
+        self.telemetry
+            .register_runtime_state(self.runtime_state.clone());
 
         Ok(NacelleServer {
             protocol,
