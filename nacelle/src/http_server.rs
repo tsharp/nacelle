@@ -15,6 +15,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::error::{BoxError, NacelleError};
 use crate::handler::Handler;
@@ -23,6 +24,8 @@ use crate::limits::NacelleRuntimeState;
 use crate::request::{HttpRequestMeta, NacelleBody, NacelleRequest, NacelleRequestMeta};
 use crate::response::{NacelleResponse, NacelleResponseMeta};
 use crate::telemetry::{NacelleTelemetry, NacelleTelemetryEventKind, NacelleTransport};
+#[cfg(feature = "tls")]
+use crate::tls::NacelleTlsConfig;
 
 type HttpBody = BoxBody<Bytes, BoxError>;
 
@@ -156,50 +159,148 @@ where
                 }
                 accepted = listener.accept() => {
                     let (stream, _) = accepted?;
-            let server = server.clone();
-            let connection_permit = match server.runtime_state.acquire_connection_tracked() {
-                Ok(permit) => permit,
-                Err(_error) => {
-                    server
-                        .telemetry
-                        .connection_rejected(NacelleTransport::Http, "connections");
-                    continue;
-                }
-            };
-            server.telemetry.connection_opened(NacelleTransport::Http);
-                    connections.spawn(async move {
-                let _connection_permit = connection_permit;
-                let write_timeout = server
-                    .runtime_state
-                    .limits()
-                    .http_response_write_timeout
-                    .or(server.runtime_state.limits().write_timeout);
-                let io = TimeoutIo::new(TokioIo::new(stream), write_timeout);
-                let service_server = server.clone();
-                let service = service_fn(move |request| {
-                    let server = service_server.clone();
-                    async move { server.handle(request).await }
-                });
-                let mut builder = http1::Builder::new();
-                builder
-                    .timer(TokioTimer::new())
-                    .header_read_timeout(server.runtime_state.limits().http_header_read_timeout)
-                    .keep_alive(server.runtime_state.limits().http_keep_alive);
-                let connection = builder.serve_connection(io, service);
-                if let Some(max_age) = server.runtime_state.limits().http_max_connection_age {
-                    match tokio::time::timeout(max_age, connection).await {
-                        Ok(result) => result.map_err(NacelleError::protocol),
-                        Err(_) => {
+                    let server = server.clone();
+                    let connection_permit = match server.runtime_state.acquire_connection_tracked() {
+                        Ok(permit) => permit,
+                        Err(_error) => {
                             server
                                 .telemetry
-                                .timeout(NacelleTransport::Http, "http_max_connection_age");
-                            Err(NacelleError::Timeout("http_max_connection_age"))
+                                .connection_rejected(NacelleTransport::Http, "connections");
+                            continue;
                         }
-                    }
-                } else {
-                    connection.await.map_err(NacelleError::protocol)
+                    };
+                    server.telemetry.connection_opened(NacelleTransport::Http);
+                    connections.spawn(run_http_connection(server, stream, connection_permit));
                 }
-            });
+            }
+        }
+        server.telemetry.shutdown_event(
+            NacelleTelemetryEventKind::ListenerStoppedAccepting,
+            NacelleTransport::Http,
+        );
+        drain_http_connection_tasks(connections, drain_deadline.get(), server.telemetry.clone())
+            .await;
+        Ok(())
+    }
+
+    #[cfg(feature = "tls")]
+    pub async fn serve_tls(
+        self,
+        addr: SocketAddr,
+        tls_config: NacelleTlsConfig,
+    ) -> Result<(), NacelleError> {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        self.serve_tls_listener(listener, tls_config).await
+    }
+
+    #[cfg(feature = "tls")]
+    pub async fn serve_tls_with_shutdown(
+        self,
+        addr: SocketAddr,
+        tls_config: NacelleTlsConfig,
+        shutdown: NacelleShutdownToken,
+    ) -> Result<(), NacelleError> {
+        self.serve_tls_with_shutdown_timeout(addr, tls_config, shutdown, Duration::from_secs(30))
+            .await
+    }
+
+    #[cfg(feature = "tls")]
+    pub async fn serve_tls_with_shutdown_timeout(
+        self,
+        addr: SocketAddr,
+        tls_config: NacelleTlsConfig,
+        shutdown: NacelleShutdownToken,
+        drain_timeout: Duration,
+    ) -> Result<(), NacelleError> {
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        self.serve_tls_listener_with_shutdown_deadline(
+            listener,
+            tls_config,
+            shutdown,
+            NacelleDrainDeadline::new(drain_timeout),
+        )
+        .await
+    }
+
+    #[cfg(feature = "tls")]
+    pub async fn serve_tls_listener(
+        self,
+        listener: tokio::net::TcpListener,
+        tls_config: NacelleTlsConfig,
+    ) -> Result<(), NacelleError> {
+        let (_shutdown, token) = crate::lifecycle::NacelleShutdown::pair();
+        self.serve_tls_listener_with_shutdown(listener, tls_config, token)
+            .await
+    }
+
+    #[cfg(feature = "tls")]
+    pub async fn serve_tls_listener_with_shutdown(
+        self,
+        listener: tokio::net::TcpListener,
+        tls_config: NacelleTlsConfig,
+        shutdown: NacelleShutdownToken,
+    ) -> Result<(), NacelleError> {
+        self.serve_tls_listener_with_shutdown_deadline(
+            listener,
+            tls_config,
+            shutdown,
+            NacelleDrainDeadline::default(),
+        )
+        .await
+    }
+
+    #[cfg(feature = "tls")]
+    pub(crate) async fn serve_tls_listener_with_shutdown_deadline(
+        self,
+        listener: tokio::net::TcpListener,
+        tls_config: NacelleTlsConfig,
+        mut shutdown: NacelleShutdownToken,
+        drain_deadline: NacelleDrainDeadline,
+    ) -> Result<(), NacelleError> {
+        let server = Arc::new(self);
+        let acceptor = tokio_rustls::TlsAcceptor::from(tls_config.server_config());
+        let handshake_timeout = tls_config.handshake_timeout();
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                joined = connections.join_next(), if !connections.is_empty() => {
+                    log_http_connection_result(joined);
+                    continue;
+                }
+                accepted = listener.accept() => {
+                    let (stream, _) = accepted?;
+                    let server = server.clone();
+                    let acceptor = acceptor.clone();
+                    let connection_permit = match server.runtime_state.acquire_connection_tracked() {
+                        Ok(permit) => permit,
+                        Err(_error) => {
+                            server
+                                .telemetry
+                                .connection_rejected(NacelleTransport::Http, "connections");
+                            continue;
+                        }
+                    };
+                    server.telemetry.connection_opened(NacelleTransport::Http);
+                    connections.spawn(async move {
+                        let tls_stream = match tokio::time::timeout(
+                            handshake_timeout,
+                            acceptor.accept(stream),
+                        )
+                        .await
+                        {
+                            Ok(Ok(stream)) => stream,
+                            Ok(Err(error)) => return Err(NacelleError::protocol(error)),
+                            Err(_) => {
+                                server
+                                    .telemetry
+                                    .timeout(NacelleTransport::Http, "tls_handshake");
+                                return Err(NacelleError::Timeout("tls_handshake"));
+                            }
+                        };
+                        run_http_connection(server, tls_stream, connection_permit).await
+                    });
                 }
             }
         }
@@ -430,6 +531,47 @@ fn nacelle_body_to_http(
     })
     .map_err(|error| -> BoxError { Box::new(error) })
     .boxed()
+}
+
+async fn run_http_connection<H, I>(
+    server: Arc<HyperServer<H>>,
+    stream: I,
+    _connection_permit: crate::limits::TrackedPermit,
+) -> Result<(), NacelleError>
+where
+    H: Handler,
+    I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let write_timeout = server
+        .runtime_state
+        .limits()
+        .http_response_write_timeout
+        .or(server.runtime_state.limits().write_timeout);
+    let io = TimeoutIo::new(TokioIo::new(stream), write_timeout);
+    let service_server = server.clone();
+    let service = service_fn(move |request| {
+        let server = service_server.clone();
+        async move { server.handle(request).await }
+    });
+    let mut builder = http1::Builder::new();
+    builder
+        .timer(TokioTimer::new())
+        .header_read_timeout(server.runtime_state.limits().http_header_read_timeout)
+        .keep_alive(server.runtime_state.limits().http_keep_alive);
+    let connection = builder.serve_connection(io, service);
+    if let Some(max_age) = server.runtime_state.limits().http_max_connection_age {
+        match tokio::time::timeout(max_age, connection).await {
+            Ok(result) => result.map_err(NacelleError::protocol),
+            Err(_) => {
+                server
+                    .telemetry
+                    .timeout(NacelleTransport::Http, "http_max_connection_age");
+                Err(NacelleError::Timeout("http_max_connection_age"))
+            }
+        }
+    } else {
+        connection.await.map_err(NacelleError::protocol)
+    }
 }
 
 struct TimeoutIo<I> {

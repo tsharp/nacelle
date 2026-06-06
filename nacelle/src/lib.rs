@@ -39,6 +39,8 @@ pub mod runtime;
 #[cfg(feature = "raw_tcp")]
 pub mod server;
 pub mod telemetry;
+#[cfg(feature = "tls")]
+pub mod tls;
 #[cfg(feature = "tower")]
 pub mod tower;
 #[cfg(feature = "reference_protocol")]
@@ -74,5 +76,7 @@ pub use telemetry::{
     NacelleInMemoryTelemetrySink, NacelleTelemetry, NacelleTelemetryEvent,
     NacelleTelemetryEventKind, NacelleTelemetrySink, NacelleTransport,
 };
+#[cfg(feature = "tls")]
+pub use tls::NacelleTlsConfig;
 #[cfg(feature = "tower")]
 pub use tower::handler_from_tower_service;
