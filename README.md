@@ -152,6 +152,7 @@ Production notes:
 - [Architecture](docs/architecture.md)
 - [Operations](docs/operations.md)
 - [HTTP hardening](docs/http-hardening.md)
+- [Edge readiness plan](docs/edge-readiness-plan-2026-06-06.md)
 - [Production configuration](docs/production-configuration.md)
 - [Production checklist](docs/production-checklist.md)
 - [Stress testing](docs/stress-testing.md)
