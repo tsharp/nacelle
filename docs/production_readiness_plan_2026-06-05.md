@@ -4,7 +4,7 @@
 
 **Goal:** Make Nacelle battle-hardened for internet-facing and high-SLO production deployments.
 
-**Architecture:** Build on the current hardening baseline: bounded defaults, shutdown primitives, accept-side raw TCP limits, tracked runtime counters, and passing workspace/feature-matrix validation. The remaining work should focus on adversarial transport behavior, richer observability, lifecycle draining/force-close semantics, dependency hygiene, and production documentation.
+**Architecture:** Build on the current hardening baseline: bounded defaults, shutdown primitives, accept-side raw TCP limits, tracked runtime counters, and passing workspace/feature-matrix validation. Listener shutdown and passive drain exist, but connection tasks are not yet force-closeable. The remaining work should focus on adversarial transport behavior, richer observability, enforceable lifecycle draining/force-close semantics, memory/backpressure coverage, dependency hygiene, production documentation, and throughput preservation.
 
 **Tech Stack:** Rust, Tokio, Hyper, http-body-util, tower optional integration, OpenTelemetry optional integration, Cargo test/clippy/fmt/audit, stress tooling under `nacelle-stress-*`.
 
@@ -16,14 +16,14 @@ Nacelle is now production-capable for controlled/internal deployments after the 
 
 - `NacelleShutdown` / `NacelleShutdownToken` lifecycle primitive.
 - Shutdown-aware HTTP and raw TCP listener paths.
-- Host-level shutdown API.
+- Host-level shutdown API with listener stop and passive drain.
 - Raw TCP connection permits acquired before spawning per-connection tasks.
 - Bounded default runtime limits.
 - Tracked active connection/request/streaming/memory counters.
 - HTTP request-body size and read-timeout enforcement.
 - Clean validation across workspace tests, clippy, fmt, feature matrix, and cargo audit.
 
-The codebase should not yet be considered fully battle-hardened for hostile internet-facing production because HTTP transport policy, telemetry exports, shutdown force-close semantics, and adversarial testing need deeper work.
+The codebase should not yet be considered fully battle-hardened for hostile internet-facing production because HTTP transport policy, telemetry exports, shutdown force-close semantics, memory/backpressure accounting, performance regression protection, and adversarial testing need deeper work.
 
 ---
 
@@ -41,9 +41,95 @@ Nacelle should be considered production-ready when all of the following are true
 
 ---
 
-## Phase 1: HTTP Transport Hardening
+## Phase 1: Lifecycle Drain and Force-Close Semantics
 
-### Task 1.1: Add explicit HTTP timeout policy fields
+### Task 1.1: Track spawned connection tasks explicitly
+
+**Objective:** Allow shutdown to wait for active connection tasks and force-abort them after a deadline.
+
+**Files:**
+
+- Modify: `nacelle/src/runtime/tokio_rt/mod.rs`
+- Modify: `nacelle/src/http_server.rs`
+- Modify: `nacelle/src/host.rs`
+- Possibly create: `nacelle/src/lifecycle.rs` additions
+- Test: `nacelle/src/server.rs`, `nacelle/src/http_server.rs`, or `nacelle/src/host.rs`
+
+**Approach:**
+
+Introduce a connection task registry or per-listener `JoinSet` so accepted connections are not fire-and-forget. On shutdown:
+
+1. stop accepting new connections;
+2. wait for active connections to finish;
+3. after drain timeout, abort remaining connection tasks;
+4. record/log forced closures.
+
+Keep the hot accept path lean: connection task tracking should add the minimum synchronization needed for shutdown correctness and should not add per-request locking.
+
+**Validation:**
+
+```bash
+cargo test -p nacelle raw_tcp_shutdown_aborts_after_drain_deadline --features reference_protocol --all-targets
+cargo test -p nacelle http_shutdown_aborts_after_drain_deadline --features http --all-targets
+```
+
+---
+
+### Task 1.2: Add telemetry test sink and staged shutdown events
+
+**Objective:** Make shutdown behavior observable and diagnosable, and make telemetry assertions possible in unit/integration tests.
+
+**Files:**
+
+- Modify: `nacelle/src/telemetry.rs`
+- Modify: `nacelle/src/host.rs`
+- Modify: `nacelle/src/runtime/tokio_rt/mod.rs`
+- Modify: `nacelle/src/http_server.rs`
+
+**Events/counters:**
+
+- shutdown requested
+- listener stopped accepting
+- drain started
+- drain completed
+- drain timed out
+- active connections aborted
+
+**Validation:**
+
+Add an in-memory telemetry sink or snapshot API and assert expected event/counter sequences during shutdown.
+
+---
+
+### Task 1.3: Add shutdown race tests
+
+**Objective:** Prove shutdown is safe while requests are in-flight, streaming, blocked, or erroring.
+
+**Files:**
+
+- Test: `nacelle/src/server.rs`
+- Test: `nacelle/src/http_server.rs`
+- Test: `nacelle/src/host.rs`
+
+**Scenarios:**
+
+- shutdown during raw TCP request body streaming
+- shutdown during HTTP request body streaming
+- shutdown while handler is sleeping
+- shutdown while response body is still streaming
+- repeated shutdown calls are idempotent
+
+**Validation:**
+
+```bash
+cargo test -p nacelle shutdown --features reference_protocol,http --all-targets
+```
+
+---
+
+## Phase 2: HTTP Transport Hardening
+
+### Task 2.1: Add explicit HTTP timeout policy fields
 
 **Objective:** Represent HTTP-specific transport deadlines and keep-alive behavior in config/limits instead of relying only on generic request/body timeouts.
 
@@ -77,7 +163,7 @@ cargo clippy -p nacelle --all-targets -- -D warnings
 
 ---
 
-### Task 1.2: Enforce HTTP header/read timeout around connection serving
+### Task 2.2: Enforce HTTP header/read timeout around connection serving
 
 **Objective:** Prevent slowloris-style clients from holding HTTP connections open before sending complete requests.
 
@@ -88,7 +174,7 @@ cargo clippy -p nacelle --all-targets -- -D warnings
 
 **Approach:**
 
-Wrap `http1::Builder::serve_connection(...)` or request-reading future with the new header/connection timeout where Hyper exposes the appropriate boundary. If Hyper does not expose a direct header-only future, document the limitation and enforce connection-level read/idle timeout around the full connection future.
+First add a small design note or code comment documenting the exact Hyper boundary being protected. Do not rely on a full-connection timeout as a substitute for header timeout because it can kill legitimate long-lived or streaming connections. If Hyper does not expose a stable header-only future, use an I/O wrapper or documented read-idle enforcement that resets on socket progress.
 
 **Test case:**
 
@@ -108,7 +194,7 @@ cargo test -p nacelle http_slow_header_client_times_out --features http --all-ta
 
 ---
 
-### Task 1.3: Enforce HTTP response write timeout / slow-reader protection
+### Task 2.3: Enforce HTTP response write timeout / slow-reader protection
 
 **Objective:** Prevent slow response consumers from pinning server tasks indefinitely.
 
@@ -119,7 +205,7 @@ cargo test -p nacelle http_slow_header_client_times_out --features http --all-ta
 
 **Approach:**
 
-Evaluate whether Hyper's body streaming can be wrapped with timeout semantics at the `HttpBodyStream::poll_next` boundary or whether write timeout must be enforced at connection level. Prefer connection-level enforcement if body polling does not map to socket write progress.
+Evaluate whether Hyper's body streaming can be wrapped with timeout semantics at the `HttpBodyStream::poll_next` boundary or whether write timeout must be enforced at the I/O boundary. Prefer an I/O wrapper if body polling does not map to socket write progress.
 
 **Test case:**
 
@@ -133,7 +219,7 @@ cargo test -p nacelle http_slow_response_reader_times_out --features http --all-
 
 ---
 
-### Task 1.4: Document HTTP policy defaults and proxy assumptions
+### Task 2.4: Document HTTP policy defaults and proxy assumptions
 
 **Objective:** Make HTTP production behavior explicit for operators.
 
@@ -161,90 +247,55 @@ cargo test --workspace --all-targets
 
 ---
 
-## Phase 2: Lifecycle Drain and Force-Close Semantics
+## Phase 3: Memory and Backpressure Hardening
 
-### Task 2.1: Track spawned connection tasks explicitly
+### Task 3.1: Account for queued streaming chunks and response growth
 
-**Objective:** Allow shutdown to wait for active connection tasks and force-abort them after a deadline.
+**Objective:** Ensure configured memory budgets cover queued request chunks, buffered bodies, response encoding buffers, and application-created body channels where Nacelle owns the queue.
 
 **Files:**
 
-- Modify: `nacelle/src/runtime/tokio_rt/mod.rs`
-- Modify: `nacelle/src/host.rs`
-- Possibly create: `nacelle/src/lifecycle.rs` additions
-- Test: `nacelle/src/server.rs` or `nacelle/src/host.rs`
+- Modify: `nacelle/src/request.rs`
+- Modify: `nacelle/src/connection.rs`
+- Modify: `nacelle/src/http_server.rs`
+- Modify: `nacelle/src/limits.rs`
 
 **Approach:**
 
-Introduce a connection task registry or per-listener `JoinSet` so accepted connections are not fire-and-forget. On shutdown:
-
-1. stop accepting new connections;
-2. wait for active connections to finish;
-3. after drain timeout, abort remaining connection tasks;
-4. record/log forced closures.
+Reserve memory when chunks enter Nacelle-owned queues and release it when chunks are consumed or dropped. Keep the fast single-chunk and already-buffered raw TCP path allocation-light, and avoid per-byte accounting.
 
 **Validation:**
 
-```bash
-cargo test -p nacelle raw_tcp_shutdown_aborts_after_drain_deadline --features reference_protocol --all-targets
-```
+Add tests for:
+
+- streaming queue memory reservation and release
+- HTTP body queue memory reservation and release
+- response body size rejection increments telemetry
 
 ---
 
-### Task 2.2: Add staged shutdown events
+### Task 3.2: Document explicit backpressure boundaries
 
-**Objective:** Make shutdown behavior observable and diagnosable.
+**Objective:** Make clear where Nacelle applies backpressure and where applications/proxies/containers must provide guardrails.
 
 **Files:**
 
-- Modify: `nacelle/src/telemetry.rs`
-- Modify: `nacelle/src/host.rs`
-- Modify: `nacelle/src/runtime/tokio_rt/mod.rs`
+- Create or modify: `docs/production-configuration.md`
+- Modify: `docs/PROTOCOL.md`
 
-**Events/counters:**
+**Document:**
 
-- shutdown requested
-- listener stopped accepting
-- drain started
-- drain completed
-- drain timed out
-- active connections aborted
-
-**Validation:**
-
-Add test telemetry sink or mock recorder and assert expected event sequence during shutdown.
+- raw TCP sequential per-connection request processing
+- request body channel capacity behavior
+- HTTP body queue behavior
+- Hyper/internal buffer caveats
+- memory budgeting formula and examples
 
 ---
 
-### Task 2.3: Add shutdown race tests
+## Phase 4: Production Observability
 
-**Objective:** Prove shutdown is safe while requests are in-flight, streaming, blocked, or erroring.
-
-**Files:**
-
-- Test: `nacelle/src/server.rs`
-- Test: `nacelle/src/http_server.rs`
-- Test: `nacelle/src/host.rs`
-
-**Scenarios:**
-
-- shutdown during raw TCP request body streaming
-- shutdown during HTTP request body streaming
-- shutdown while handler is sleeping
-- shutdown while response body is still streaming
-- repeated shutdown calls are idempotent
-
-**Validation:**
-
-```bash
-cargo test -p nacelle shutdown --features reference_protocol,http --all-targets
-```
-
----
-
-## Phase 3: Production Observability
-
-### Task 3.1: Add explicit rejection counters
+### Task 4.1: Add explicit rejection counters
 
 **Objective:** Record why work was rejected instead of relying only on logs or generic errors.
 
@@ -267,11 +318,11 @@ cargo test -p nacelle shutdown --features reference_protocol,http --all-targets
 
 **Validation:**
 
-Use a test telemetry sink to assert counters increment once per rejection.
+Use the telemetry test sink to assert counters increment once per rejection.
 
 ---
 
-### Task 3.2: Export active gauges through OpenTelemetry
+### Task 4.2: Export active gauges through OpenTelemetry
 
 **Objective:** Make active connection/request/streaming/memory counts visible in production dashboards.
 
@@ -297,7 +348,7 @@ cargo clippy -p nacelle --features otel --all-targets -- -D warnings
 
 ---
 
-### Task 3.3: Add per-transport byte metrics
+### Task 4.3: Add per-transport byte metrics
 
 **Objective:** Provide throughput and anomaly visibility.
 
@@ -321,9 +372,9 @@ Add unit/integration tests around known body sizes and assert telemetry values.
 
 ---
 
-## Phase 4: Adversarial and Stress Testing
+## Phase 5: Adversarial and Stress Testing
 
-### Task 4.1: Add raw TCP connection-flood regression test
+### Task 5.1: Add raw TCP connection-flood regression test
 
 **Objective:** Prove connection saturation does not spawn unbounded tasks and counters remain bounded.
 
@@ -347,7 +398,7 @@ cargo test -p nacelle raw_tcp_connection_flood_is_bounded --features reference_p
 
 ---
 
-### Task 4.2: Add slow-client/trickle-body tests
+### Task 5.2: Add slow-client/trickle-body tests
 
 **Objective:** Prove body-read timeout protects both HTTP and raw TCP from trickle clients.
 
@@ -370,7 +421,7 @@ cargo test -p nacelle trickle --features reference_protocol,http --all-targets
 
 ---
 
-### Task 4.3: Add protocol fuzz/property tests
+### Task 5.3: Add protocol fuzz/property tests
 
 **Objective:** Exercise frame parsing and response/error framing against random/malformed inputs.
 
@@ -397,7 +448,7 @@ cargo test -p nacelle --features reference_protocol protocol_fuzz --all-targets
 
 ---
 
-### Task 4.4: Convert stress tooling into CI-friendly scenarios
+### Task 5.4: Convert stress tooling into CI-friendly scenarios
 
 **Objective:** Ensure stress tests can run in bounded time in CI or nightly jobs.
 
@@ -422,9 +473,39 @@ Add documented commands with explicit duration, concurrency, and expected pass c
 
 ---
 
-## Phase 5: Dependency and Supply-Chain Hardening
+## Phase 6: Performance Tuning and Regression Protection
 
-### Task 5.1: Replace deprecated YAML stack in stress tooling/config
+### Task 6.1: Add benchmark-preserving perf guardrails
+
+**Objective:** Avoid losing unnecessary throughput as hardening lands. Current `main` is approximately 1.9M RPS on Linux; the recent branch observed approximately 1.3M RPS and needs targeted tuning.
+
+**Files:**
+
+- Modify: `nacelle/benches/critical_paths.rs`
+- Modify: hot-path files only when measurement or code inspection justifies it
+- Create: `docs/performance-tuning.md`
+
+**Approach:**
+
+- keep connection/task tracking out of the per-request raw TCP hot path
+- keep telemetry snapshots optional and allocation-free in default operation
+- preserve single-chunk fast paths for small request/response bodies
+- avoid extra atomics in the common request completion path unless they replace existing work
+- document Linux benchmark commands, expected environment, and comparison against `main`
+
+**Validation:**
+
+```bash
+cargo bench -p nacelle --features bench,reference_protocol
+```
+
+Heavy RPS tests should remain manual/nightly, but the docs must describe how to compare this branch with `main`.
+
+---
+
+## Phase 7: Dependency and Supply-Chain Hardening
+
+### Task 7.1: Replace deprecated YAML stack in stress tooling/config
 
 **Objective:** Remove dependency-quality concern around `serde_yaml` / `unsafe-libyaml` if feasible.
 
@@ -452,7 +533,7 @@ Expected after replacement: no dependency path unless intentionally retained.
 
 ---
 
-### Task 5.2: Add advisory and dependency checks to CI
+### Task 7.2: Add advisory and dependency checks to CI
 
 **Objective:** Make vulnerability scanning repeatable.
 
@@ -472,9 +553,9 @@ If `cargo-deny` is adopted, add `deny.toml` with accepted licenses and source po
 
 ---
 
-## Phase 6: Production Configuration and Operator Docs
+## Phase 8: Production Configuration and Operator Docs
 
-### Task 6.1: Add production configuration guide
+### Task 8.1: Add production configuration guide
 
 **Objective:** Explain how to configure Nacelle safely for real services.
 
@@ -496,7 +577,7 @@ If `cargo-deny` is adopted, add `deny.toml` with accepted licenses and source po
 
 ---
 
-### Task 6.2: Add production readiness checklist
+### Task 8.2: Add production readiness checklist
 
 **Objective:** Give deployers a final go/no-go checklist.
 
@@ -517,7 +598,7 @@ If `cargo-deny` is adopted, add `deny.toml` with accepted licenses and source po
 
 ---
 
-### Task 6.3: Document public API stability and semver policy
+### Task 8.3: Document public API stability and semver policy
 
 **Objective:** Prevent accidental breaking changes as the library matures.
 
@@ -536,15 +617,16 @@ If `cargo-deny` is adopted, add `deny.toml` with accepted licenses and source po
 
 ---
 
-## Phase 7: CI / Release Gates
+## Phase 9: CI / Release Gates
 
-### Task 7.1: Add a complete validation script
+### Task 9.1: Add a complete validation script
 
 **Objective:** Provide one command that runs the full production-readiness gate locally and in CI.
 
 **Files:**
 
 - Create: `scripts/validate-production-readiness.sh` or equivalent
+- Create: `scripts/validate-production-readiness.ps1`
 - Document in: `docs/production-checklist.md`
 
 **Script commands:**
@@ -566,7 +648,7 @@ Run the script on a clean checkout and record expected output in the docs.
 
 ---
 
-### Task 7.2: Add release-blocking CI jobs
+### Task 9.2: Add release-blocking CI jobs
 
 **Objective:** Ensure the validation gate runs on PRs and release branches.
 
@@ -587,17 +669,17 @@ Run the script on a clean checkout and record expected output in the docs.
 
 ## Suggested Execution Order
 
-1. Phase 1, Task 1.1: Add HTTP-specific limits.
-2. Phase 1, Task 1.2: Slow header protection.
-3. Phase 1, Task 1.3: Slow response writer protection.
-4. Phase 2, Task 2.1: Connection task registry and force-close.
-5. Phase 2, Task 2.2: Shutdown telemetry.
-6. Phase 3, Task 3.1: Rejection counters.
-7. Phase 3, Task 3.2: Active gauge export.
-8. Phase 4, Tasks 4.1–4.3: Adversarial tests.
-9. Phase 5: Dependency hardening.
-10. Phase 6: Operator docs.
-11. Phase 7: CI/release gates.
+1. Phase 1: Connection task registry, force-close, and shutdown telemetry.
+2. Phase 2, Task 2.1: Add HTTP-specific limits.
+3. Phase 2, Task 2.2: Slow header/read-idle protection.
+4. Phase 2, Task 2.3: Slow response writer protection.
+5. Phase 3: Memory/backpressure accounting and documentation.
+6. Phase 4: Rejection counters, active gauges, and byte metrics.
+7. Phase 5, Tasks 5.1–5.3: Adversarial tests.
+8. Phase 6: Performance guardrails and tuning.
+9. Phase 7: Dependency hardening.
+10. Phase 8: Operator docs.
+11. Phase 9: CI/release gates.
 
 ---
 
