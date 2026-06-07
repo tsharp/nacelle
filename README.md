@@ -173,7 +173,22 @@ Production notes:
 - [Performance tuning](docs/performance-tuning.md)
 - [API stability](docs/api-stability.md)
 
-Generate the Markdown documentation site with DocFX:
+Generate the mdBook narrative documentation site:
+
+```bash
+mdbook build
+```
+
+On Windows, the build script installs mdBook if needed:
+
+```powershell
+.\scripts\build-book.ps1
+```
+
+The mdBook source follows a Django-style organization: tutorials, topic guides,
+how-to guides, and reference. The generated output is written to `docs/book`.
+
+Generate the existing DocFX Markdown site:
 
 ```bash
 dotnet tool restore
@@ -199,7 +214,7 @@ Or on Windows:
 ```
 
 Internal readiness plans, assessments, and checklists live under `docs/internal`
-and are excluded from the generated DocFX site.
+and are excluded from generated public documentation sites.
 
 Exporter/subscriber setup stays in the application so production can choose OTLP, stdout, Prometheus, or another pipeline.
 

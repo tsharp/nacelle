@@ -10,6 +10,8 @@
         ],
         "exclude": [
           "internal/**",
+          "book-src/**",
+          "book/**",
           "_site/**"
         ]
       }
@@ -21,6 +23,8 @@
           "assets/**"
         ],
         "exclude": [
+          "book-src/**",
+          "book/**",
           "_site/**"
         ]
       }
