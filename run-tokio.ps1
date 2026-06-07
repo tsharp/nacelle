@@ -59,6 +59,22 @@ function Wait-PortOpen {
     throw "Timed out waiting for $Bind to accept connections"
 }
 
+function Get-TlsSelfSignedFromConfig {
+    $configPath = Join-Path $PSScriptRoot "config.toml"
+    if (-not (Test-Path -Path $configPath)) {
+        return $false
+    }
+
+    foreach ($line in Get-Content -Path $configPath) {
+        $withoutComment = ($line -replace '\s*#.*$', '').Trim()
+        if ($withoutComment -match '^tls_self_signed\s*=\s*(true|false)\s*$') {
+            return $Matches[1] -eq "true"
+        }
+    }
+
+    return $false
+}
+
 $profile = if ($Debug) { "debug" } else { "release" }
 $cargoProfileArg = if ($Debug) { @() } else { @("--release") }
 
@@ -102,9 +118,11 @@ try {
         "--connections", "$Connections",
         "--pipeline", "$Pipeline",
         "--duration-secs", "$DurationSecs",
-        "--payload-bytes", "$PayloadBytes",
-        "--tls-insecure"
+        "--payload-bytes", "$PayloadBytes"
     )
+    if (Get-TlsSelfSignedFromConfig) {
+        $clientArgs += "--tls-insecure"
+    }
     & $clientExe @clientArgs
 
     if ($LASTEXITCODE -ne 0) {

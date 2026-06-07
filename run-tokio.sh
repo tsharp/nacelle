@@ -9,9 +9,36 @@ CONNECTIONS="256"
 PIPELINE="8"
 PAYLOAD="256"
 
+config_tls_self_signed() {
+    local config_path="config.toml"
+    if [[ ! -f "$config_path" ]]; then
+        echo "false"
+        return
+    fi
+
+    awk '
+        {
+            sub(/[[:space:]]*#.*/, "", $0)
+            if ($0 ~ /^[[:space:]]*tls_self_signed[[:space:]]*=/) {
+                value = $0
+                sub(/^[^=]*=/, "", value)
+                gsub(/[[:space:]]/, "", value)
+                print tolower(value)
+                found = 1
+                exit
+            }
+        }
+        END {
+            if (!found) {
+                print "false"
+            }
+        }
+    ' "$config_path"
+}
+
 usage() {
     echo "Usage: $0 [--bind ADDR] [--server-threads N] [--connections N] [--pipeline N] [--duration-secs S] [--payload-bytes N]"
-    echo "Uses ./config.toml by default; the checked-in config enables self-signed TLS."
+    echo "Uses ./config.toml by default; client TLS mode follows tls_self_signed."
     exit 0
 }
 
@@ -55,10 +82,16 @@ done
 
 echo "--- tokio  threads=$SERVER_THREADS  connections=$CONNECTIONS  pipeline=$PIPELINE ---"
 
-./artifacts/nacelle-stress-test \
-    --addr "$BIND" \
-    --connections "$CONNECTIONS" \
-    --pipeline "$PIPELINE" \
-    --duration-secs "$DURATION" \
-    --payload-bytes "$PAYLOAD" \
-    --tls-insecure
+CLIENT_ARGS=(
+    --addr "$BIND"
+    --connections "$CONNECTIONS"
+    --pipeline "$PIPELINE"
+    --duration-secs "$DURATION"
+    --payload-bytes "$PAYLOAD"
+)
+
+if [[ "$(config_tls_self_signed)" == "true" ]]; then
+    CLIENT_ARGS+=(--tls-insecure)
+fi
+
+./artifacts/nacelle-stress-test "${CLIENT_ARGS[@]}"

@@ -12,14 +12,17 @@ Run a bounded client smoke test:
 cargo run --release --package nacelle-stress-test -- --tls-insecure --connections 32 --pipeline 16 --duration-secs 15
 ```
 
+The `run-tokio.sh` and `run-tokio.ps1` helpers read the root `config.toml` and
+pass `--tls-insecure` to the stress client only when `tls_self_signed = true`.
+
 Server-side stats are disabled by default for peak throughput. Add `--stats`
 when you want periodic server counters during a diagnostic run.
 
 The Tokio stress server default build includes `tls-self-signed` support. The
 checked-in root `config.toml` enables `tls_self_signed = true`, so the local
-stress client should use `--tls-insecure` with that default config. Use an
-explicit TOML file with `tls_self_signed = false` when you need a plain TCP
-baseline.
+stress client should use `--tls-insecure` with that default config. Set
+`tls_self_signed = false` or use an explicit TOML file with that value when you
+need a plain TCP baseline.
 
 CI-friendly scenarios should stay short and deterministic:
 

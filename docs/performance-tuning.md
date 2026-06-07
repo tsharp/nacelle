@@ -30,6 +30,9 @@ as `nacelle-stress-server/config.example.toml` with `tls_self_signed = false`
 and omit `--tls-insecure` from the stress client. Compare TLS and non-TLS runs
 separately.
 
+The `run-tokio.sh` and `run-tokio.ps1` helpers read root `config.toml` and choose
+the matching client mode automatically.
+
 Guardrails:
 
 - keep shutdown task tracking at the connection/listener boundary
