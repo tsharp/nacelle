@@ -163,15 +163,15 @@ Nacelle emits structured `tracing` events for listener, connection, request comp
 
 Production notes:
 
-- [Usage guide](docs/usage.md)
-- [Architecture](docs/architecture.md)
-- [Operations](docs/operations.md)
-- [HTTP hardening](docs/http-hardening.md)
-- [Production configuration](docs/production-configuration.md)
-- [Stress testing](docs/stress-testing.md)
-- [Security scanning](docs/security-scanning.md)
-- [Performance tuning](docs/performance-tuning.md)
-- [API stability](docs/api-stability.md)
+- [Getting started](docs/tutorials/getting-started.md)
+- [Architecture](docs/topics/architecture.md)
+- [Operations](docs/topics/operations.md)
+- [HTTP hardening](docs/how-to/harden-http.md)
+- [Production configuration](docs/how-to/configure-production.md)
+- [Stress testing](docs/how-to/run-stress-tests.md)
+- [Security scanning](docs/how-to/security-scanning.md)
+- [Performance tuning](docs/how-to/compare-performance.md)
+- [API stability](docs/reference/api-stability.md)
 
 Generate the mdBook narrative documentation site:
 
@@ -186,7 +186,8 @@ On Windows, the build script installs mdBook if needed:
 ```
 
 The mdBook source follows a Django-style organization: tutorials, topic guides,
-how-to guides, and reference. The generated output is written to `docs/book`.
+how-to guides, and reference. The generated output is written to
+`target/docs/book`.
 
 Generate the existing DocFX Markdown site:
 
@@ -265,7 +266,7 @@ cargo run --release --package nacelle-stress-test -- \
   --duration-secs 15
 ```
 
-The optional reference protocol contract is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+The optional reference protocol contract is documented in [docs/reference/protocol.md](docs/reference/protocol.md).
 
 Authentication and compression are not implemented in this prototype.
 

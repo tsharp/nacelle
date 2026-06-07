@@ -1,4 +1,4 @@
-# HTTP Hardening
+# HTTP hardening reference
 
 Nacelle's HTTP transport is Hyper HTTP/1. Configure HTTP timeout and body policy through `NacelleLimits`, and configure request-shape policy through `NacelleHttpPolicy`.
 
@@ -49,3 +49,5 @@ request metadata, and access logs use the socket peer address.
 For internet-facing deployments, a reverse proxy or load balancer can still own coarse traffic filtering and certificate automation. Nacelle now also enforces application-level body, request, connection, per-peer connection/request/connection-open-rate, timeout, TLS handshake, security header, and optional Host/header/method/URI limits in-process.
 
 Slowloris-style clients are closed by `http_header_read_timeout`. Trickle request bodies are closed by `http_request_body_read_timeout`. Slow response readers are closed by `http_response_write_timeout` when socket writes stop making progress.
+
+

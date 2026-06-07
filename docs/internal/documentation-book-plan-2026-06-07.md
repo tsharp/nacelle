@@ -25,11 +25,11 @@ Add a Rust-ecosystem documentation site built with mdBook, modeled on the Rust B
 ## Implementation Tasks
 
 1. Add `book.toml` at the repository root.
-2. Add `docs/book-src/SUMMARY.md` and section landing pages.
-3. Reuse existing Markdown through mdBook include directives where it avoids duplicated maintenance.
+2. Add `docs/SUMMARY.md` and section landing pages.
+3. Collapse existing public Markdown into the first-class mdBook source tree.
 4. Add minimal mdBook CSS for nacelle branding and readable technical pages.
 5. Add `scripts/build-book.ps1` to install mdBook if missing, build, serve, and optionally open the book.
-6. Ignore generated `docs/book`.
+6. Write generated book output under ignored `target/docs/book`.
 7. Update README with the new book build flow.
 8. Build and verify the mdBook site.
 
@@ -39,4 +39,3 @@ Add a Rust-ecosystem documentation site built with mdBook, modeled on the Rust B
 - Existing DocFX build still succeeds.
 - Existing production validation still succeeds.
 - README documents mdBook, DocFX, and `cargo doc` roles clearly.
-

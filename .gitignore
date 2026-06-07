@@ -1,5 +1,4 @@
 target
 artifacts
 docs/_site
-docs/book
 *.ignore.md

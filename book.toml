@@ -2,11 +2,11 @@
 title = "nacelle"
 authors = ["nacelle contributors"]
 description = "Narrative documentation for nacelle, organized as tutorials, topic guides, how-to guides, and reference."
-src = "docs/book-src"
+src = "docs"
 language = "en"
 
 [build]
-build-dir = "docs/book"
+build-dir = "target/docs/book"
 create-missing = false
 
 [output.html]
@@ -14,5 +14,5 @@ default-theme = "rust"
 preferred-dark-theme = "ayu"
 git-repository-url = "https://github.com/tsharp/nacelle"
 edit-url-template = "https://github.com/tsharp/nacelle/edit/main/{path}"
-additional-css = ["docs/book-src/theme/nacelle.css"]
+additional-css = ["docs/theme/nacelle.css"]
 site-url = "/nacelle/"

@@ -23,7 +23,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "mdbook build failed with exit code $LASTEXITCODE"
 }
 
-$indexPath = Join-Path $repoRoot "docs\book\index.html"
+$indexPath = Join-Path $repoRoot "target\docs\book\index.html"
 Write-Host "==> Book docs: $indexPath"
 
 if ($Open) {

@@ -1,4 +1,4 @@
-# Operations
+# Operations model
 
 ## Deployment Shape
 
@@ -63,3 +63,5 @@ Run microbenchmarks before and after hot-path changes:
 ```bash
 cargo bench -p nacelle --features bench,reference_protocol
 ```
+
+

@@ -3,27 +3,32 @@
 nacelle is an experimental Tokio-based Rust library for streaming application
 handlers across raw TCP and HTTP transports.
 
-Use this documentation site for application integration, operational limits,
-transport behavior, and production validation. Rust API reference is generated
-separately with `cargo doc`.
+This book is the narrative documentation site. It follows the same broad
+delivery model as the Rust Book: chapter-oriented Markdown, search, keyboard
+navigation, and a local/offline build. Its content is organized like Django's
+documentation:
 
-## Start Here
+- **Tutorials** take you through a working path.
+- **Topic guides** explain concepts and design choices.
+- **How-to guides** solve specific operational tasks.
+- **Reference** pages document exact behavior and APIs.
 
-- [Usage guide](usage.md) shows the shared handler shape, raw TCP setup, HTTP
-  setup, multi-listener hosts, limits, shutdown, and telemetry.
-- [Architecture](architecture.md) explains the request flow, runtime state,
-  body model, shutdown lifecycle, and observability strategy.
-- [Operations](operations.md) covers production runtime behavior and operator
-  expectations.
+Rust API reference is still generated separately with `cargo doc`.
 
-## Production
+## Start here
 
-- [HTTP hardening](http-hardening.md)
-- [Production configuration](production-configuration.md)
-- [Stress testing](stress-testing.md)
-- [Security scanning](security-scanning.md)
-- [Performance tuning](performance-tuning.md)
-- [API stability](api-stability.md)
+If you are new to nacelle, read:
+
+1. [Getting started](tutorials/getting-started.md)
+2. [Architecture](topics/architecture.md)
+3. [Configure production limits](how-to/configure-production.md)
+
+If you are validating performance, read:
+
+1. [Run the stress harness](tutorials/stress-harness.md)
+2. [Compare performance profiles](how-to/compare-performance.md)
+3. [Performance model](topics/performance-model.md)
 
 Internal readiness plans and assessments live under `docs/internal` and are not
-included in the generated DocFX site.
+part of this public book.
+

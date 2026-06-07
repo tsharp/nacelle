@@ -1,4 +1,29 @@
-# Performance Tuning
+# Compare performance profiles
+
+Use separate profiles for each transport mode:
+
+- plain raw TCP
+- raw TCP with low-memory allocator behavior
+- raw TCP with TLS
+- HTTP
+
+Do not compare TLS and non-TLS runs as if they measure the same path. Likewise,
+do not compare two runs if the stress client version changed.
+
+Recommended plain raw TCP baseline config:
+
+```text
+nacelle-stress-server/configs/raw-tcp.toml
+```
+
+Then run:
+
+```bash
+./build-all.sh
+./run-tokio.sh --config nacelle-stress-server/configs/raw-tcp.toml --connections 256 --pipeline 8 --duration-secs 30 --payload-bytes 256
+```
+
+More background:
 
 The current `main` branch has been observed around 1.9M RPS on Linux for the raw TCP benchmark path. This branch should be compared against that baseline on the same host, kernel, CPU governor, allocator settings, and command line.
 
@@ -45,3 +70,4 @@ Guardrails:
 - keep telemetry sinks optional; default operation should not push into in-memory sinks
 - preserve single-chunk body fast paths
 - tune raw TCP buffer sizes for the connection count instead of relying on large defaults
+

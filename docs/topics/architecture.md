@@ -80,3 +80,5 @@ Telemetry is deliberately low-cardinality. Reasons are static strings such as
 
 With `otel`, active gauges are observable instruments backed by runtime-state
 atomics, so collection reads current values without per-request metric writes.
+
+

@@ -1,4 +1,23 @@
-# Production Configuration
+# Runtime limits and backpressure
+
+Runtime limits are enforced through `NacelleRuntimeState`. They are intended to
+make overload predictable rather than perfectly invisible.
+
+Key budgets include:
+
+- active connections
+- in-flight requests
+- streaming body tasks
+- optional per-peer connections
+- memory reservations
+- request and response body size
+- read, write, handler, idle, HTTP, and TLS handshake timeouts
+
+The important production habit is to size limits together. A high connection
+count with large read and response buffers is a memory budget decision, not just
+a concurrency decision.
+
+For configuration details:
 
 Start from `NacelleLimits::default()` and tune downward for smaller machines. Avoid `usize::MAX` limits outside benchmarks.
 
@@ -48,3 +67,5 @@ tls.reload_from_pem_files("next-cert.pem", "next-key.pem")?;
 
 Reloads affect new TLS handshakes. Existing connections continue with the
 configuration negotiated when they connected.
+
+

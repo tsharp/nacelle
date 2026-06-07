@@ -1,4 +1,0 @@
-# Architecture
-
-{{#include ../../architecture.md}}
-
