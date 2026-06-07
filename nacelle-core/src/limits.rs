@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::error::NacelleError;
 
@@ -12,6 +12,7 @@ pub struct NacelleLimits {
     pub max_in_flight_requests: usize,
     pub max_streaming_tasks: usize,
     pub max_connections_per_peer: Option<usize>,
+    pub max_connection_opens_per_peer_per_second: Option<usize>,
     pub max_memory_bytes: usize,
     pub max_request_body_bytes: usize,
     pub max_response_body_bytes: usize,
@@ -33,6 +34,7 @@ impl Default for NacelleLimits {
             max_in_flight_requests: 65_536,
             max_streaming_tasks: 8_192,
             max_connections_per_peer: None,
+            max_connection_opens_per_peer_per_second: None,
             max_memory_bytes: 512 * 1024 * 1024,
             max_request_body_bytes: 16 * 1024 * 1024,
             max_response_body_bytes: 16 * 1024 * 1024,
@@ -67,6 +69,11 @@ impl NacelleLimits {
 
     pub fn with_max_connections_per_peer(mut self, max: usize) -> Self {
         self.max_connections_per_peer = Some(max.max(1));
+        self
+    }
+
+    pub fn with_max_connection_opens_per_peer_per_second(mut self, max: usize) -> Self {
+        self.max_connection_opens_per_peer_per_second = Some(max.max(1));
         self
     }
 
@@ -143,7 +150,14 @@ struct NacelleRuntimeStateInner {
     active_requests: AtomicUsize,
     active_streaming_tasks: AtomicUsize,
     peer_connections: Mutex<HashMap<IpAddr, usize>>,
+    peer_connection_rates: Mutex<HashMap<IpAddr, PeerConnectionRateWindow>>,
     memory_used: AtomicUsize,
+}
+
+#[derive(Debug, Clone)]
+struct PeerConnectionRateWindow {
+    started_at: Instant,
+    count: usize,
 }
 
 impl Default for NacelleRuntimeState {
@@ -161,6 +175,7 @@ impl NacelleRuntimeState {
                 active_requests: AtomicUsize::new(0),
                 active_streaming_tasks: AtomicUsize::new(0),
                 peer_connections: Mutex::new(HashMap::new()),
+                peer_connection_rates: Mutex::new(HashMap::new()),
                 memory_used: AtomicUsize::new(0),
             }),
         }
@@ -193,6 +208,13 @@ impl NacelleRuntimeState {
             "connections",
         )?;
         if let Err(error) = self.acquire_peer_connection(peer) {
+            self.inner
+                .active_connections
+                .fetch_sub(1, Ordering::Relaxed);
+            return Err(error);
+        }
+        if let Err(error) = self.acquire_peer_connection_rate(peer) {
+            self.release_peer_connection(peer);
             self.inner
                 .active_connections
                 .fetch_sub(1, Ordering::Relaxed);
@@ -317,6 +339,34 @@ impl NacelleRuntimeState {
             None => {}
         }
     }
+
+    fn acquire_peer_connection_rate(&self, peer: IpAddr) -> Result<(), NacelleError> {
+        let Some(limit) = self.inner.limits.max_connection_opens_per_peer_per_second else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        let mut peers = self
+            .inner
+            .peer_connection_rates
+            .lock()
+            .expect("peer connection rate map poisoned");
+        peers.retain(|_peer, window| {
+            now.duration_since(window.started_at) < Duration::from_secs(60)
+        });
+        let window = peers.entry(peer).or_insert(PeerConnectionRateWindow {
+            started_at: now,
+            count: 0,
+        });
+        if now.duration_since(window.started_at) >= Duration::from_secs(1) {
+            window.started_at = now;
+            window.count = 0;
+        }
+        if window.count >= limit {
+            return Err(NacelleError::ResourceLimit("peer_connection_rate"));
+        }
+        window.count += 1;
+        Ok(())
+    }
 }
 
 fn acquire_counter(
@@ -421,6 +471,7 @@ mod tests {
         assert_ne!(limits.max_in_flight_requests, usize::MAX);
         assert_ne!(limits.max_streaming_tasks, usize::MAX);
         assert_ne!(limits.max_memory_bytes, usize::MAX);
+        assert!(limits.max_connection_opens_per_peer_per_second.is_none());
         assert!(limits.read_timeout.is_some());
         assert!(limits.write_timeout.is_some());
         assert!(limits.handler_timeout.is_some());
@@ -503,5 +554,24 @@ mod tests {
             .acquire_connection_for_peer(peer)
             .expect("peer connection should recover after drop");
         assert_eq!(state.active_connections(), 1);
+    }
+
+    #[test]
+    fn per_peer_connection_open_rate_rejects_churn_after_drop() {
+        let peer = "127.0.0.1".parse().expect("valid ip");
+        let state = NacelleRuntimeState::new(
+            NacelleLimits::default().with_max_connection_opens_per_peer_per_second(1),
+        );
+
+        let connection = state
+            .acquire_connection_for_peer(peer)
+            .expect("first peer connection");
+        drop(connection);
+
+        assert!(matches!(
+            state.acquire_connection_for_peer(peer),
+            Err(NacelleError::ResourceLimit("peer_connection_rate"))
+        ));
+        assert_eq!(state.active_connections(), 0);
     }
 }

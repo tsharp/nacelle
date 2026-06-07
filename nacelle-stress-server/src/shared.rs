@@ -231,6 +231,7 @@ struct ServerConfigFile {
 struct LimitsConfigFile {
     max_connections: Option<usize>,
     max_connections_per_peer: Option<usize>,
+    max_connection_opens_per_peer_per_second: Option<usize>,
     max_in_flight_requests: Option<usize>,
     max_streaming_tasks: Option<usize>,
     max_memory_bytes: Option<usize>,
@@ -302,6 +303,9 @@ impl ServerConfig {
         }
         if let Some(max_connections_per_peer) = file.max_connections_per_peer {
             self.limits.max_connections_per_peer = Some(max_connections_per_peer.max(1));
+        }
+        if let Some(max) = file.max_connection_opens_per_peer_per_second {
+            self.limits.max_connection_opens_per_peer_per_second = Some(max.max(1));
         }
         if let Some(max_in_flight_requests) = file.max_in_flight_requests {
             self.limits.max_in_flight_requests = max_in_flight_requests.max(1);
@@ -558,6 +562,14 @@ pub fn print_config(config: &ServerConfig, runtime: &str, actual_server_threads:
             .unwrap_or_else(|| "null".to_string())
     );
     println!(
+        "    max_connection_opens_per_peer_per_second: {}",
+        config
+            .limits
+            .max_connection_opens_per_peer_per_second
+            .map(|max| max.to_string())
+            .unwrap_or_else(|| "null".to_string())
+    );
+    println!(
         "    max_in_flight_requests: {}",
         config.limits.max_in_flight_requests
     );
@@ -729,6 +741,7 @@ tls_self_signed = true
 [limits]
 max_connections = 128000
 max_connections_per_peer = 4096
+max_connection_opens_per_peer_per_second = 2048
 max_in_flight_requests = 64000
 max_streaming_tasks = 8192
 max_memory_bytes = 8589934592
@@ -760,6 +773,10 @@ http_max_connection_age_ms = 300000
         assert!(config.tls_self_signed);
         assert_eq!(config.limits.max_connections, 128_000);
         assert_eq!(config.limits.max_connections_per_peer, Some(4_096));
+        assert_eq!(
+            config.limits.max_connection_opens_per_peer_per_second,
+            Some(2_048)
+        );
         assert_eq!(config.limits.max_in_flight_requests, 64_000);
         assert_eq!(config.limits.max_streaming_tasks, 8_192);
         assert_eq!(config.limits.max_memory_bytes, 8_589_934_592);

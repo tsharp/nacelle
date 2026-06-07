@@ -12,6 +12,8 @@ tls_self_signed = false
 [limits]
 max_connections = 128000
 max_connections_per_peer = 4096
+# Optional churn protection for direct edge tests.
+# max_connection_opens_per_peer_per_second = 2048
 max_in_flight_requests = 64000
 max_streaming_tasks = 8192
 max_memory_bytes = 8589934592

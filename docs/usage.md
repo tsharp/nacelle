@@ -109,6 +109,7 @@ limit budget.
 ```rust
 let limits = NacelleLimits::default().with_max_connections(16_384);
 let limits = limits.with_max_connections_per_peer(512);
+let limits = limits.with_max_connection_opens_per_peer_per_second(128);
 let mut host = NacelleHost::new().with_limits(limits);
 host.enable_raw_tcp("raw", raw_server_addr, raw_server)
     .enable_http("http", http_addr, http_server);
@@ -140,6 +141,7 @@ host.shutdown_and_wait_timeout(Duration::from_secs(30)).await?;
 - in-flight requests
 - streaming body tasks
 - optional per-peer connections
+- optional per-peer connection-open rates
 - memory reservations
 - request and response body size
 - raw and HTTP timeouts

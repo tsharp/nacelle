@@ -21,6 +21,7 @@ Defaults:
 - optional per-peer request rate limits through `with_max_requests_per_peer_per_second`
 - optional security headers through `with_security_header(...)` or `with_default_security_headers()`
 - optional per-peer connection caps through `NacelleLimits::with_max_connections_per_peer`
+- optional per-peer connection-open rate caps through `NacelleLimits::with_max_connection_opens_per_peer_per_second`
 
 Rejected requests receive deterministic HTTP responses where the request parser has already accepted the request: `405`, `414`, `421`, `429`, or `431`. Rejections emit low-cardinality telemetry reasons such as `host`, `method_not_allowed`, `uri_too_long`, `header_count`, `header_bytes`, and `peer_rate`.
 
@@ -30,6 +31,6 @@ Enable the `tls` feature to terminate HTTP over Rustls. `NacelleTlsConfig` loads
 
 Enable `HyperServer::with_access_log(true)` when direct edge deployments need structured request logs. Access events are emitted with target `nacelle::access` and include transport, method, URI, status, request bytes, elapsed microseconds, and rejection reason.
 
-For internet-facing deployments, a reverse proxy or load balancer can still own coarse traffic filtering and certificate automation. Nacelle now also enforces application-level body, request, connection, per-peer connection/request, timeout, TLS handshake, security header, and optional Host/header/method/URI limits in-process.
+For internet-facing deployments, a reverse proxy or load balancer can still own coarse traffic filtering and certificate automation. Nacelle now also enforces application-level body, request, connection, per-peer connection/request/connection-open-rate, timeout, TLS handshake, security header, and optional Host/header/method/URI limits in-process.
 
 Slowloris-style clients are closed by `http_header_read_timeout`. Trickle request bodies are closed by `http_request_body_read_timeout`. Slow response readers are closed by `http_response_write_timeout` when socket writes stop making progress.

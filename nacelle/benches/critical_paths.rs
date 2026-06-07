@@ -107,6 +107,11 @@ fn runtime_limit_benches(c: &mut Criterion) {
             .with_max_connections(128_000)
             .with_max_connections_per_peer(128_000),
     );
+    let peer_rate_state = NacelleRuntimeState::new(
+        NacelleLimits::default()
+            .with_max_connections(128_000)
+            .with_max_connection_opens_per_peer_per_second(128_000),
+    );
     let unbounded_memory_state =
         NacelleRuntimeState::new(NacelleLimits::default().with_max_memory_bytes(usize::MAX));
     let peer: IpAddr = "127.0.0.1".parse().expect("valid ip");
@@ -135,6 +140,15 @@ fn runtime_limit_benches(c: &mut Criterion) {
             let permit = black_box(&peer_state)
                 .acquire_connection_for_peer(black_box(peer))
                 .expect("peer connection permit");
+            black_box(&permit);
+            drop(permit);
+        })
+    });
+    group.bench_function("connection_per_peer_rate_acquire_drop", |b| {
+        b.iter(|| {
+            let permit = black_box(&peer_rate_state)
+                .acquire_connection_for_peer(black_box(peer))
+                .expect("peer connection rate permit");
             black_box(&permit);
             drop(permit);
         })
@@ -183,8 +197,10 @@ fn telemetry_benches(c: &mut Criterion) {
     });
     group.bench_function("timeout_disabled", |b| {
         b.iter(|| {
-            black_box(&disabled)
-                .timeout(black_box(NacelleTransport::RawTcp), black_box("request_body_read"));
+            black_box(&disabled).timeout(
+                black_box(NacelleTransport::RawTcp),
+                black_box("request_body_read"),
+            );
         })
     });
     group.bench_function("connection_opened_in_memory_sink", |b| {
