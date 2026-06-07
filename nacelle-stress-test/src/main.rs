@@ -182,22 +182,25 @@ async fn run_worker(
         let server_name = ServerName::try_from("localhost")
             .map_err(|_| NacelleError::InvalidFrame("invalid TLS server name"))?;
         let stream = connector.connect(server_name, stream).await?;
-        return run_worker_stream(worker_id, stream, config, barrier).await;
+        let (reader, writer) = tokio::io::split(stream);
+        return run_worker_io(worker_id, reader, writer, config, barrier).await;
     }
 
-    run_worker_stream(worker_id, stream, config, barrier).await
+    let (reader, writer) = stream.into_split();
+    run_worker_io(worker_id, reader, writer, config, barrier).await
 }
 
-async fn run_worker_stream<S>(
+async fn run_worker_io<R, W>(
     worker_id: usize,
-    stream: S,
+    mut reader: R,
+    mut writer: W,
     config: StressConfig,
     barrier: Arc<Barrier>,
 ) -> Result<WorkerResult, NacelleError>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
 {
-    let (mut reader, mut writer) = tokio::io::split(stream);
     let payload = vec![worker_id as u8; config.payload_bytes];
     let mut request_frame = vec![0_u8; 24 + payload.len()];
     request_frame[24..].copy_from_slice(&payload);
