@@ -108,6 +108,14 @@ let server = HyperServer::new(handler)
     .with_access_log(true);
 ```
 
+Forwarded peer headers are ignored unless the socket peer is explicitly trusted:
+
+```rust
+let policy = NacelleHttpPolicy::new()
+    .with_trusted_proxy_ips(["10.0.0.10".parse()?])
+    .with_max_requests_per_peer_per_second(1_000);
+```
+
 HTTP deployments may still sit behind a proxy or load balancer for coarse
 traffic filtering. Nacelle enforces request, body, timeout, TLS handshake,
 connection, optional per-peer connection/request caps, optional security

@@ -49,6 +49,7 @@ pub struct NacelleHttpPolicy {
     max_header_count: Option<usize>,
     max_header_bytes: Option<usize>,
     max_requests_per_peer_per_second: Option<usize>,
+    trusted_proxy_ips: Option<Vec<IpAddr>>,
     security_headers: Vec<(HeaderName, HeaderValue)>,
 }
 
@@ -98,6 +99,11 @@ impl NacelleHttpPolicy {
 
     pub fn with_max_requests_per_peer_per_second(mut self, max: usize) -> Self {
         self.max_requests_per_peer_per_second = Some(max.max(1));
+        self
+    }
+
+    pub fn with_trusted_proxy_ips(mut self, ips: impl IntoIterator<Item = IpAddr>) -> Self {
+        self.trusted_proxy_ips = Some(ips.into_iter().collect());
         self
     }
 
@@ -453,12 +459,14 @@ where
         let request_started = std::time::Instant::now();
         let method = request.method().clone();
         let uri = request.uri().clone();
+        let effective_peer_ip = self.effective_peer_ip(peer_ip, &request);
         if let Some(rejection) = validate_http_policy(&self.http_policy, &request) {
             self.telemetry
                 .request_rejected(NacelleTransport::Http, rejection.reason);
             self.access_log(
                 &method,
                 &uri,
+                effective_peer_ip,
                 rejection.status,
                 0,
                 request_started.elapsed(),
@@ -471,7 +479,7 @@ where
                 &self.http_policy,
             );
         }
-        if let Some(peer_ip) = peer_ip
+        if let Some(peer_ip) = effective_peer_ip
             && !self.allow_peer_request(peer_ip)
         {
             self.telemetry
@@ -479,6 +487,7 @@ where
             self.access_log(
                 &method,
                 &uri,
+                effective_peer_ip,
                 StatusCode::TOO_MANY_REQUESTS,
                 0,
                 request_started.elapsed(),
@@ -503,6 +512,7 @@ where
                 self.access_log(
                     &method,
                     &uri,
+                    effective_peer_ip,
                     StatusCode::SERVICE_UNAVAILABLE,
                     0,
                     request_started.elapsed(),
@@ -527,6 +537,7 @@ where
                 method: parts.method,
                 uri: parts.uri,
                 headers: parts.headers,
+                peer_ip: effective_peer_ip,
             }),
             body: incoming_to_body(
                 body,
@@ -559,6 +570,7 @@ where
                     self.access_log(
                         &method,
                         &uri,
+                        effective_peer_ip,
                         response.status(),
                         request_bytes,
                         request_started.elapsed(),
@@ -595,6 +607,7 @@ where
                     self.access_log(
                         &method,
                         &uri,
+                        effective_peer_ip,
                         response.status(),
                         request_bytes,
                         request_started.elapsed(),
@@ -640,10 +653,28 @@ where
         true
     }
 
+    fn effective_peer_ip(
+        &self,
+        socket_peer_ip: Option<IpAddr>,
+        request: &Request<Incoming>,
+    ) -> Option<IpAddr> {
+        let Some(socket_peer_ip) = socket_peer_ip else {
+            return None;
+        };
+        let Some(trusted_proxy_ips) = &self.http_policy.trusted_proxy_ips else {
+            return Some(socket_peer_ip);
+        };
+        if !trusted_proxy_ips.contains(&socket_peer_ip) {
+            return Some(socket_peer_ip);
+        }
+        Some(forwarded_peer_ip(request).unwrap_or(socket_peer_ip))
+    }
+
     fn access_log(
         &self,
         method: &Method,
         uri: &http::Uri,
+        peer_ip: Option<IpAddr>,
         status: StatusCode,
         request_bytes: usize,
         elapsed: Duration,
@@ -657,6 +688,7 @@ where
             transport = "http",
             method = %method,
             uri = %uri,
+            peer_ip = ?peer_ip,
             status = status.as_u16(),
             request_bytes,
             elapsed_us = elapsed.as_micros() as u64,
@@ -887,6 +919,54 @@ fn host_allowed(allowed_hosts: &[String], request: &Request<Incoming>) -> bool {
     allowed_hosts
         .iter()
         .any(|allowed| allowed == &host || allowed == host_without_port)
+}
+
+fn forwarded_peer_ip(request: &Request<Incoming>) -> Option<IpAddr> {
+    request
+        .headers()
+        .get(http::header::FORWARDED)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_forwarded_header_for)
+        .or_else(|| {
+            request
+                .headers()
+                .get(HeaderName::from_static("x-forwarded-for"))
+                .and_then(|value| value.to_str().ok())
+                .and_then(parse_x_forwarded_for)
+        })
+}
+
+fn parse_forwarded_header_for(value: &str) -> Option<IpAddr> {
+    let first = value.split(',').next()?.trim();
+    for part in first.split(';') {
+        let (name, value) = part.trim().split_once('=')?;
+        if name.trim().eq_ignore_ascii_case("for") {
+            return parse_forwarded_ip(value.trim().trim_matches('"'));
+        }
+    }
+    None
+}
+
+fn parse_x_forwarded_for(value: &str) -> Option<IpAddr> {
+    parse_forwarded_ip(value.split(',').next()?.trim())
+}
+
+fn parse_forwarded_ip(value: &str) -> Option<IpAddr> {
+    let value = value.trim();
+    if let Ok(ip) = value.parse::<IpAddr>() {
+        return Some(ip);
+    }
+    if let Some(stripped) = value.strip_prefix('[')
+        && let Some((ip, _rest)) = stripped.split_once(']')
+    {
+        return ip.parse().ok();
+    }
+    if let Some((ip, _port)) = value.rsplit_once(':')
+        && !ip.contains(':')
+    {
+        return ip.parse().ok();
+    }
+    None
 }
 
 fn connection_rejection_reason(error: &NacelleError) -> &'static str {
@@ -1774,6 +1854,81 @@ mod tests {
             event.kind == nacelle_core::NacelleTelemetryEventKind::RequestRejected
                 && event.reason == Some("peer_rate")
         }));
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn http_policy_ignores_forwarded_peer_by_default() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
+            Ok(NacelleResponse::http_bytes(StatusCode::OK, "handler"))
+        }))
+        .with_http_policy(NacelleHttpPolicy::new().with_max_requests_per_peer_per_second(1));
+        let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+        let first = one_shot_http(
+            addr,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        let second = one_shot_http(
+            addr,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.2\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+
+        assert!(first.starts_with("HTTP/1.1 200 OK"));
+        assert!(second.starts_with("HTTP/1.1 429 Too Many Requests"));
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn http_policy_uses_forwarded_peer_only_from_trusted_proxy() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let server = HyperServer::new(handler_fn(|request: NacelleRequest| async move {
+            let peer_ip = request
+                .http_meta()
+                .and_then(|meta| meta.peer_ip)
+                .expect("effective peer ip");
+            Ok(NacelleResponse::http_bytes(
+                StatusCode::OK,
+                peer_ip.to_string(),
+            ))
+        }))
+        .with_http_policy(
+            NacelleHttpPolicy::new()
+                .with_max_requests_per_peer_per_second(1)
+                .with_trusted_proxy_ips(["127.0.0.1".parse().expect("trusted proxy ip")]),
+        );
+        let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+        let first = one_shot_http(
+            addr,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nForwarded: for=203.0.113.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        let second = one_shot_http(
+            addr,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.2\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        let third = one_shot_http(
+            addr,
+            b"GET / HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.1\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+
+        assert!(first.starts_with("HTTP/1.1 200 OK"));
+        assert!(first.contains("203.0.113.1"));
+        assert!(second.starts_with("HTTP/1.1 200 OK"));
+        assert!(second.contains("203.0.113.2"));
+        assert!(third.starts_with("HTTP/1.1 429 Too Many Requests"));
         server_task.abort();
     }
 

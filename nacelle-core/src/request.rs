@@ -1,3 +1,5 @@
+#[cfg(feature = "http-types")]
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -22,6 +24,7 @@ pub struct HttpRequestMeta {
     pub method: http::Method,
     pub uri: http::Uri,
     pub headers: http::HeaderMap,
+    pub peer_ip: Option<IpAddr>,
 }
 
 #[derive(Debug, Clone)]

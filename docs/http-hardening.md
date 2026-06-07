@@ -19,6 +19,7 @@ Defaults:
 - maximum header count
 - maximum aggregate header bytes
 - optional per-peer request rate limits through `with_max_requests_per_peer_per_second`
+- optional trusted proxy forwarded address handling through `with_trusted_proxy_ips`
 - optional security headers through `with_security_header(...)` or `with_default_security_headers()`
 - optional per-peer connection caps through `NacelleLimits::with_max_connections_per_peer`
 - optional per-peer connection-open rate caps through `NacelleLimits::with_max_connection_opens_per_peer_per_second`
@@ -39,6 +40,11 @@ policy.
 `NacelleTlsConfig` is shared with raw TCP TLS and intentionally stays transport-neutral. Rustls is the only provider today; `NacelleTlsProvider` keeps the API ready for a future OpenSSL provider without changing listener signatures.
 
 Enable `HyperServer::with_access_log(true)` when direct edge deployments need structured request logs. Access events are emitted with target `nacelle::access` and include transport, method, URI, status, request bytes, elapsed microseconds, and rejection reason.
+
+Forwarded peer identity is disabled by default. `Forwarded` and
+`X-Forwarded-For` are considered only when the immediate socket peer is listed
+in `NacelleHttpPolicy::with_trusted_proxy_ips(...)`; otherwise rate limits,
+request metadata, and access logs use the socket peer address.
 
 For internet-facing deployments, a reverse proxy or load balancer can still own coarse traffic filtering and certificate automation. Nacelle now also enforces application-level body, request, connection, per-peer connection/request/connection-open-rate, timeout, TLS handshake, security header, and optional Host/header/method/URI limits in-process.
 
