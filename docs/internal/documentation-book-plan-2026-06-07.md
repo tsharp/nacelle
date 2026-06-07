@@ -13,7 +13,7 @@ Add a Rust-ecosystem documentation site built with mdBook, modeled on the Rust B
 - Keep generated output ignored.
 - Prefer one canonical Markdown source where possible.
 - Keep Rust API reference in `cargo doc`.
-- Keep DocFX available while introducing mdBook, so existing docs links and styling work during transition.
+- Replace the redundant alternate Markdown site generator once mdBook covers the public documentation.
 
 ## Information Architecture
 
@@ -36,6 +36,6 @@ Add a Rust-ecosystem documentation site built with mdBook, modeled on the Rust B
 ## Acceptance
 
 - `mdbook build` succeeds.
-- Existing DocFX build still succeeds.
+- Redundant alternate site-generation tooling can be removed once the mdBook source tree is first class.
 - Existing production validation still succeeds.
-- README documents mdBook, DocFX, and `cargo doc` roles clearly.
+- README documents mdBook and `cargo doc` roles clearly.

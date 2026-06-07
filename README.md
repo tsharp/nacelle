@@ -189,19 +189,6 @@ The mdBook source follows a Django-style organization: tutorials, topic guides,
 how-to guides, and reference. The generated output is written to
 `target/docs/book`.
 
-Generate the existing DocFX Markdown site:
-
-```bash
-dotnet tool restore
-dotnet docfx docfx.json
-```
-
-On Windows, the same build can be run with:
-
-```powershell
-.\scripts\build-docs.ps1
-```
-
 Generate Rust API reference with `cargo doc`:
 
 ```bash
