@@ -229,7 +229,8 @@ cargo run --features reference_protocol,http --example dual_echo -- 127.0.0.1:80
 ```bash
 cargo run --release --package nacelle-stress-server --bin tokio-server
 
-# If ./config.toml exists, the stress server loads it automatically.
+# If ./config.toml exists, the stress server loads it automatically. The
+# checked-in root config enables self-signed raw TCP TLS for local runs.
 
 # Or load server limits and buffer sizing from TOML:
 cargo run --release --package nacelle-stress-server --bin tokio-server -- \
@@ -243,6 +244,7 @@ cargo run --release --package nacelle-stress-server --bin tokio-server -- \
 
 # In another shell:
 cargo run --release --package nacelle-stress-test -- \
+  --tls-insecure \
   --connections 32 \
   --pipeline 16 \
   --duration-secs 15

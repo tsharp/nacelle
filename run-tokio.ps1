@@ -102,7 +102,8 @@ try {
         "--connections", "$Connections",
         "--pipeline", "$Pipeline",
         "--duration-secs", "$DurationSecs",
-        "--payload-bytes", "$PayloadBytes"
+        "--payload-bytes", "$PayloadBytes",
+        "--tls-insecure"
     )
     & $clientExe @clientArgs
 

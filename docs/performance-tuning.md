@@ -24,9 +24,11 @@ per-request atomics in peak throughput runs. Add `--stats` or set
 `stats_enabled = true` when validating server-side counters rather than maximum
 RPS.
 
-The stress server default build includes TLS capability, but the raw throughput
-baseline remains plain TCP unless `--tls-self-signed` or `tls_self_signed = true`
-is enabled. Compare TLS and non-TLS runs separately.
+The checked-in root `config.toml` enables self-signed raw TCP TLS for local
+stress runs. For the plain TCP throughput baseline, use an explicit config such
+as `nacelle-stress-server/config.example.toml` with `tls_self_signed = false`
+and omit `--tls-insecure` from the stress client. Compare TLS and non-TLS runs
+separately.
 
 Guardrails:
 

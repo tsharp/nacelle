@@ -11,6 +11,7 @@ PAYLOAD="256"
 
 usage() {
     echo "Usage: $0 [--bind ADDR] [--server-threads N] [--connections N] [--pipeline N] [--duration-secs S] [--payload-bytes N]"
+    echo "Uses ./config.toml by default; the checked-in config enables self-signed TLS."
     exit 0
 }
 
@@ -59,4 +60,5 @@ echo "--- tokio  threads=$SERVER_THREADS  connections=$CONNECTIONS  pipeline=$PI
     --connections "$CONNECTIONS" \
     --pipeline "$PIPELINE" \
     --duration-secs "$DURATION" \
-    --payload-bytes "$PAYLOAD"
+    --payload-bytes "$PAYLOAD" \
+    --tls-insecure

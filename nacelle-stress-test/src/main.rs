@@ -2,6 +2,7 @@
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::collections::VecDeque;
+use std::fmt::Debug;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -9,6 +10,9 @@ use std::time::{Duration, Instant};
 
 use bytes::{Buf, BytesMut};
 use nacelle::{FRAME_FLAG_END, FRAME_FLAG_ERROR, NacelleError};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpSocket;
 use tokio::sync::Barrier;
@@ -94,6 +98,7 @@ struct StressConfig {
     pipeline: usize,
     duration: Duration,
     payload_bytes: usize,
+    tls_insecure: bool,
 }
 
 impl Default for StressConfig {
@@ -104,6 +109,7 @@ impl Default for StressConfig {
             pipeline: 8,
             duration: Duration::from_secs(10),
             payload_bytes: 256,
+            tls_insecure: false,
         }
     }
 }
@@ -136,6 +142,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config.payload_bytes,
         config.duration.as_secs_f64(),
     );
+    if config.tls_insecure {
+        println!("stress transport=raw-tcp-tls verify=insecure");
+    }
 
     let barrier = Arc::new(Barrier::new(config.connections + 1));
     let mut workers = Vec::with_capacity(config.connections);
@@ -168,7 +177,27 @@ async fn run_worker(
 ) -> Result<WorkerResult, NacelleError> {
     let stream = make_tcp_socket(&server_addr)?.connect(server_addr).await?;
     stream.set_nodelay(true)?;
-    let (mut reader, mut writer) = stream.into_split();
+    if config.tls_insecure {
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(insecure_tls_config()));
+        let server_name = ServerName::try_from("localhost")
+            .map_err(|_| NacelleError::InvalidFrame("invalid TLS server name"))?;
+        let stream = connector.connect(server_name, stream).await?;
+        return run_worker_stream(worker_id, stream, config, barrier).await;
+    }
+
+    run_worker_stream(worker_id, stream, config, barrier).await
+}
+
+async fn run_worker_stream<S>(
+    worker_id: usize,
+    stream: S,
+    config: StressConfig,
+    barrier: Arc<Barrier>,
+) -> Result<WorkerResult, NacelleError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (mut reader, mut writer) = tokio::io::split(stream);
     let payload = vec![worker_id as u8; config.payload_bytes];
     let mut request_frame = vec![0_u8; 24 + payload.len()];
     request_frame[24..].copy_from_slice(&payload);
@@ -218,6 +247,63 @@ async fn run_worker(
 
     writer.shutdown().await?;
     Ok(result)
+}
+
+fn insecure_tls_config() -> ClientConfig {
+    let mut config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(InsecureCertificateVerifier))
+        .with_no_client_auth();
+    config.alpn_protocols.clear();
+    config
+}
+
+#[derive(Debug)]
+struct InsecureCertificateVerifier;
+
+impl ServerCertVerifier for InsecureCertificateVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, RustlsError> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, RustlsError> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        vec![
+            SignatureScheme::ECDSA_NISTP256_SHA256,
+            SignatureScheme::ECDSA_NISTP384_SHA384,
+            SignatureScheme::ED25519,
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+            SignatureScheme::RSA_PKCS1_SHA256,
+            SignatureScheme::RSA_PKCS1_SHA384,
+            SignatureScheme::RSA_PKCS1_SHA512,
+        ]
+    }
 }
 
 async fn write_request_frame<W>(
@@ -371,6 +457,9 @@ fn parse_args(
             "--payload-bytes" => {
                 config.payload_bytes = parse_value(&arg, args.next())?;
             }
+            "--tls-insecure" => {
+                config.tls_insecure = true;
+            }
             other => {
                 return Err(format!("unknown argument: {other}").into());
             }
@@ -412,6 +501,9 @@ fn print_help() {
            --pipeline <count>     Requests kept in flight per connection (default 8)\n\
            --duration-secs <s>    Active load duration (default 10)\n\
            --payload-bytes <n>    Request payload bytes (default 256)\n\
+           --tls-insecure         Connect with TLS and accept the server certificate\n\
+                                  without verification. Use only for the local\n\
+                                  self-signed stress server.\n\
          \n\
          Notes:\n\
            - Connections are established once per worker and reused for the whole run.\n\

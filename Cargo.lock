@@ -794,7 +794,9 @@ dependencies = [
  "bytes",
  "mimalloc",
  "nacelle",
+ "rustls",
  "tokio",
+ "tokio-rustls",
 ]
 
 [[package]]
