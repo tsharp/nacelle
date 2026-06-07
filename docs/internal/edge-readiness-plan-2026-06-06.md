@@ -6,7 +6,7 @@
 
 **Current status:** Nacelle is production-capable for controlled, internal, or proxy-protected deployments with explicit limits, shutdown, transport timeouts, telemetry, validation, and flat-memory soak behavior. The latest reported Linux soak ran for one hour at approximately 1.81M RPS, with stable memory, p99 latency around 3.5 ms, and clean shutdown. Direct public edge readiness is a separate higher bar.
 
-**Implementation checkpoint:** Raw TCP and HTTP now both support shared Rustls TLS through `NacelleTlsConfig`; self-signed certificate generation is opt-in through `tls-self-signed`; certificate reloads update future handshakes; HTTP policy now includes security headers, structured access logs, and per-peer fixed-window request limits. Shared runtime limits now include opt-in per-peer connection caps and per-peer connection-open rate caps for churn protection. TLS remains transport-neutral in `nacelle-core`, and `NacelleTlsProvider` keeps room for a future OpenSSL backend without changing listener APIs.
+**Implementation checkpoint:** Raw TCP and HTTP now both support shared Rustls TLS through `NacelleTlsConfig`; self-signed certificate generation is opt-in through `tls-self-signed`; certificate reloads update future handshakes; TLS configs can opt into an SNI allowlist that rejects missing or unknown SNI during handshake; HTTP policy now includes Host allowlists, security headers, structured access logs, and per-peer fixed-window request limits. Shared runtime limits now include opt-in per-peer connection caps and per-peer connection-open rate caps for churn protection. TLS remains transport-neutral in `nacelle-core`, and `NacelleTlsProvider` keeps room for a future OpenSSL backend without changing listener APIs.
 
 ## Edge Readiness Definition
 
@@ -65,16 +65,16 @@ Acceptance:
 Deliverables:
 
 - Add optional allowed Host header list for HTTP.
-- Add optional SNI allowlist for TLS listeners.
-- Decide and document behavior when Host and SNI disagree.
+- Add optional SNI allowlist for TLS listeners. **Implemented:** `NacelleTlsConfig::from_pem_with_allowed_server_names(...)` and `from_der_with_allowed_server_names(...)`.
+- Decide and document behavior when Host and SNI disagree. **Implemented:** SNI rejects during TLS handshake when configured; HTTP Host rejects after parsing. Direct edge deployments should configure both lists to the same service names unless intentionally narrowing Host.
 - Add listener identity labels for logs and metrics.
 - Emit rejection reason metrics without high-cardinality host labels.
 
 Acceptance:
 
 - Unknown Host requests receive a deterministic rejection.
-- Unknown SNI handshakes are rejected or routed to a documented default.
-- Host/SNI policy is configurable per listener.
+- Unknown SNI handshakes are rejected or routed to a documented default. **Implemented:** unknown or missing SNI is rejected when an SNI allowlist is configured.
+- Host/SNI policy is configurable per listener. **Implemented:** SNI through per-listener `NacelleTlsConfig`; Host through per-server `NacelleHttpPolicy`.
 
 ## Phase 3: HTTP Edge Limits
 

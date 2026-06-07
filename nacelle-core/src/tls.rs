@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use rustls::ServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::{ClientHello, ResolvesServerCert};
+use rustls::sign::CertifiedKey;
 
 #[cfg(feature = "tls-self-signed")]
 #[derive(Debug, Clone)]
@@ -19,6 +21,7 @@ pub struct NacelleGeneratedTlsConfig {
 pub struct NacelleTlsConfig {
     server_config: Arc<RwLock<Arc<ServerConfig>>>,
     handshake_timeout: Duration,
+    allowed_server_names: Arc<RwLock<Option<Vec<String>>>>,
 }
 
 /// Identifies the compiled TLS backend for a [`NacelleTlsConfig`].
@@ -36,6 +39,7 @@ impl NacelleTlsConfig {
         Self {
             server_config: Arc::new(RwLock::new(Arc::new(server_config))),
             handshake_timeout: Duration::from_secs(10),
+            allowed_server_names: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -43,6 +47,7 @@ impl NacelleTlsConfig {
         Self {
             server_config: Arc::new(RwLock::new(server_config)),
             handshake_timeout: Duration::from_secs(10),
+            allowed_server_names: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -50,17 +55,42 @@ impl NacelleTlsConfig {
         certificates: Vec<CertificateDer<'static>>,
         private_key: PrivateKeyDer<'static>,
     ) -> io::Result<Self> {
-        let config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certificates, private_key)
-            .map_err(io::Error::other)?;
+        let config = server_config_from_der(certificates, private_key, None)?;
         Ok(Self::from_server_config(config))
+    }
+
+    pub fn from_der_with_allowed_server_names(
+        certificates: Vec<CertificateDer<'static>>,
+        private_key: PrivateKeyDer<'static>,
+        allowed_server_names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> io::Result<Self> {
+        let allowed_server_names = normalize_allowed_server_names(allowed_server_names)?;
+        let config = server_config_from_der(
+            certificates,
+            private_key,
+            Some(allowed_server_names.clone()),
+        )?;
+        Ok(Self {
+            server_config: Arc::new(RwLock::new(Arc::new(config))),
+            handshake_timeout: Duration::from_secs(10),
+            allowed_server_names: Arc::new(RwLock::new(Some(allowed_server_names))),
+        })
     }
 
     pub fn from_pem(certificates: &[u8], private_key: &[u8]) -> io::Result<Self> {
         let certificates = parse_pem_certificates(certificates)?;
         let private_key = parse_pem_private_key(private_key)?;
         Self::from_der(certificates, private_key)
+    }
+
+    pub fn from_pem_with_allowed_server_names(
+        certificates: &[u8],
+        private_key: &[u8],
+        allowed_server_names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> io::Result<Self> {
+        let certificates = parse_pem_certificates(certificates)?;
+        let private_key = parse_pem_private_key(private_key)?;
+        Self::from_der_with_allowed_server_names(certificates, private_key, allowed_server_names)
     }
 
     pub fn from_pem_files(
@@ -107,6 +137,10 @@ impl NacelleTlsConfig {
             .server_config
             .write()
             .expect("TLS server config lock poisoned") = server_config;
+        *self
+            .allowed_server_names
+            .write()
+            .expect("TLS allowed server names lock poisoned") = None;
     }
 
     pub fn reload_from_der(
@@ -114,11 +148,18 @@ impl NacelleTlsConfig {
         certificates: Vec<CertificateDer<'static>>,
         private_key: PrivateKeyDer<'static>,
     ) -> io::Result<()> {
-        let config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certificates, private_key)
-            .map_err(io::Error::other)?;
+        let allowed_server_names = self
+            .allowed_server_names
+            .read()
+            .expect("TLS allowed server names lock poisoned")
+            .clone();
+        let config =
+            server_config_from_der(certificates, private_key, allowed_server_names.clone())?;
         self.replace_server_config(config);
+        *self
+            .allowed_server_names
+            .write()
+            .expect("TLS allowed server names lock poisoned") = allowed_server_names;
         Ok(())
     }
 
@@ -142,6 +183,13 @@ impl NacelleTlsConfig {
         NacelleTlsProvider::Rustls
     }
 
+    pub fn allowed_server_names(&self) -> Option<Vec<String>> {
+        self.allowed_server_names
+            .read()
+            .expect("TLS allowed server names lock poisoned")
+            .clone()
+    }
+
     #[doc(hidden)]
     pub fn server_config(&self) -> Arc<ServerConfig> {
         self.server_config
@@ -154,6 +202,64 @@ impl NacelleTlsConfig {
     pub fn handshake_timeout(&self) -> Duration {
         self.handshake_timeout
     }
+}
+
+fn server_config_from_der(
+    certificates: Vec<CertificateDer<'static>>,
+    private_key: PrivateKeyDer<'static>,
+    allowed_server_names: Option<Vec<String>>,
+) -> io::Result<ServerConfig> {
+    let builder = ServerConfig::builder().with_no_client_auth();
+    if let Some(allowed_server_names) = allowed_server_names {
+        let certified_key =
+            CertifiedKey::from_der(certificates, private_key, builder.crypto_provider())
+                .map_err(io::Error::other)?;
+        Ok(builder.with_cert_resolver(Arc::new(SniAllowlistResolver {
+            certified_key: Arc::new(certified_key),
+            allowed_server_names,
+        })))
+    } else {
+        builder
+            .with_single_cert(certificates, private_key)
+            .map_err(io::Error::other)
+    }
+}
+
+#[derive(Debug)]
+struct SniAllowlistResolver {
+    certified_key: Arc<CertifiedKey>,
+    allowed_server_names: Vec<String>,
+}
+
+impl ResolvesServerCert for SniAllowlistResolver {
+    fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        let server_name = client_hello.server_name()?;
+        if self
+            .allowed_server_names
+            .iter()
+            .any(|allowed| allowed.eq_ignore_ascii_case(server_name.trim_end_matches('.')))
+        {
+            return Some(self.certified_key.clone());
+        }
+        None
+    }
+}
+
+fn normalize_allowed_server_names(
+    names: impl IntoIterator<Item = impl Into<String>>,
+) -> io::Result<Vec<String>> {
+    let names = names
+        .into_iter()
+        .map(|name| name.into().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|name| !name.is_empty())
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "missing allowed server names",
+        ));
+    }
+    Ok(names)
 }
 
 #[doc(hidden)]
@@ -231,6 +337,23 @@ mod tests {
         assert_eq!(
             generated.tls_config.handshake_timeout(),
             Duration::from_secs(10)
+        );
+    }
+
+    #[cfg(feature = "tls-self-signed")]
+    #[test]
+    fn pem_config_can_restrict_allowed_server_names() {
+        let generated = NacelleTlsConfig::self_signed(["localhost"]).expect("self-signed config");
+        let tls = NacelleTlsConfig::from_pem_with_allowed_server_names(
+            generated.certificate_pem.as_bytes(),
+            generated.private_key_pem.as_bytes(),
+            ["LOCALHOST."],
+        )
+        .expect("SNI allowlist config should build");
+
+        assert_eq!(
+            tls.allowed_server_names(),
+            Some(vec!["localhost".to_string()])
         );
     }
 }

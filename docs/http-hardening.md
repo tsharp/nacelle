@@ -27,6 +27,15 @@ Rejected requests receive deterministic HTTP responses where the request parser 
 
 Enable the `tls` feature to terminate HTTP over Rustls. `NacelleTlsConfig` loads PEM certificate/key pairs, accepts explicit Rustls `ServerConfig` values, supports reloads for future handshakes, and enforces a TLS handshake timeout. Enable `tls-self-signed` only when local load tests or auto-deploying applications need to generate a self-signed certificate immediately.
 
+For direct edge HTTPS, build TLS config with
+`NacelleTlsConfig::from_pem_with_allowed_server_names(...)` or
+`NacelleTlsConfig::from_der_with_allowed_server_names(...)`. When an SNI
+allowlist is configured, clients that omit SNI or send a name outside the list
+fail during the TLS handshake. HTTP Host policy is enforced after the handshake,
+so configure the SNI allowlist and `NacelleHttpPolicy::with_allowed_hosts(...)`
+with the same service names unless you intentionally need a narrower Host
+policy.
+
 `NacelleTlsConfig` is shared with raw TCP TLS and intentionally stays transport-neutral. Rustls is the only provider today; `NacelleTlsProvider` keeps the API ready for a future OpenSSL provider without changing listener signatures.
 
 Enable `HyperServer::with_access_log(true)` when direct edge deployments need structured request logs. Access events are emitted with target `nacelle::access` and include transport, method, URI, status, request bytes, elapsed microseconds, and rejection reason.

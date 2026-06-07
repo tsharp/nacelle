@@ -42,6 +42,18 @@ let tls = NacelleTlsConfig::from_pem_files("cert.pem", "key.pem")?;
 server.serve_tcp_tls("127.0.0.1:8443".parse()?, tls).await?;
 ```
 
+For direct edge listeners, prefer an SNI allowlist:
+
+```rust
+let cert = std::fs::read("cert.pem")?;
+let key = std::fs::read("key.pem")?;
+let tls = NacelleTlsConfig::from_pem_with_allowed_server_names(
+    &cert,
+    &key,
+    ["api.example.com"],
+)?;
+```
+
 ## HTTP
 
 The HTTP transport is HTTP/1 through Hyper.

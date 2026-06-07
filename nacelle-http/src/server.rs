@@ -1587,6 +1587,49 @@ mod tests {
         server_task.abort();
     }
 
+    #[cfg(feature = "tls-self-signed")]
+    #[tokio::test]
+    async fn http_tls_sni_allowlist_rejects_disallowed_name() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let generated =
+            nacelle_core::tls::NacelleTlsConfig::self_signed(["localhost", "wrong.local"])
+                .expect("self-signed tls");
+        let tls_config = nacelle_core::tls::NacelleTlsConfig::from_pem_with_allowed_server_names(
+            generated.certificate_pem.as_bytes(),
+            generated.private_key_pem.as_bytes(),
+            ["localhost"],
+        )
+        .expect("SNI allowlist config should build");
+        let certificate =
+            nacelle_core::tls::parse_pem_certificates(generated.certificate_pem.as_bytes())
+                .expect("certificate should parse")
+                .remove(0);
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(certificate).expect("root cert should add");
+        let client_config = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
+        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
+            Ok(NacelleResponse::http_bytes(StatusCode::OK, "tls ok"))
+        }));
+        let server_task =
+            tokio::spawn(async move { server.serve_tls_listener(listener, tls_config).await });
+
+        let stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        let server_name =
+            rustls::pki_types::ServerName::try_from("wrong.local").expect("valid server name");
+        let result = connector.connect(server_name, stream).await;
+
+        assert!(result.is_err());
+        server_task.abort();
+    }
+
     #[tokio::test]
     async fn http_policy_rejects_disallowed_host_before_handler() {
         let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
