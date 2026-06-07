@@ -2,13 +2,22 @@
 name = "nacelle-stress-server"
 version = "0.1.0"
 edition = "2024"
+description = "Stress server binary for exercising Nacelle raw TCP throughput and runtime limits."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../README.md"
+keywords = ["networking", "tokio", "benchmark"]
+categories = ["asynchronous", "network-programming"]
 
 [[bin]]
 name = "tokio-server"
 path = "src/bin/stress-tokio.rs"
 
 [features]
-default = []
+default = ["tls-self-signed"]
+tls = ["nacelle/tls", "dep:tokio-rustls"]
+tls-self-signed = ["tls", "nacelle/tls-self-signed"]
 
 [dependencies]
 nacelle = { path = "../nacelle", features = ["reference_protocol", "otel"], default-features = false }
@@ -18,3 +27,4 @@ libmimalloc-sys = { version = "0.1", features = ["extended"], default-features =
 serde = { version = "1.0.219", features = ["derive"] }
 toml = "0.8.23"
 tokio = { version = "1.47.1", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "0.26.4", optional = true }

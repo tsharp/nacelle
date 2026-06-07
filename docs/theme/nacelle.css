@@ -1,0 +1,30 @@
+:root {
+  --content-max-width: 980px;
+}
+
+html {
+  font-variant-ligatures: none;
+}
+
+.content main {
+  line-height: 1.62;
+}
+
+.content main h1,
+.content main h2,
+.content main h3 {
+  letter-spacing: 0;
+}
+
+.content main table {
+  font-size: 0.95rem;
+}
+
+.content main code {
+  font-size: 0.94em;
+}
+
+.nav-chapters {
+  min-width: 36px;
+}
+

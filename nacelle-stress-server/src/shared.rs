@@ -185,6 +185,7 @@ pub struct ServerConfig {
     pub request_body_channel_capacity: usize,
     pub low_memory: bool,
     pub stats_enabled: bool,
+    pub tls_self_signed: bool,
     pub limits: nacelle::NacelleLimits,
 }
 
@@ -203,6 +204,7 @@ impl Default for ServerConfig {
             request_body_channel_capacity: 8,
             low_memory: false,
             stats_enabled: false,
+            tls_self_signed: false,
             limits: nacelle::NacelleLimits::default(),
         }
     }
@@ -220,6 +222,7 @@ struct ServerConfigFile {
     request_body_channel_capacity: Option<usize>,
     low_memory: Option<bool>,
     stats_enabled: Option<bool>,
+    tls_self_signed: Option<bool>,
     limits: Option<LimitsConfigFile>,
 }
 
@@ -227,6 +230,8 @@ struct ServerConfigFile {
 #[serde(deny_unknown_fields)]
 struct LimitsConfigFile {
     max_connections: Option<usize>,
+    max_connections_per_peer: Option<usize>,
+    max_connection_opens_per_peer_per_second: Option<usize>,
     max_in_flight_requests: Option<usize>,
     max_streaming_tasks: Option<usize>,
     max_memory_bytes: Option<usize>,
@@ -284,6 +289,9 @@ impl ServerConfig {
         if let Some(stats_enabled) = file.stats_enabled {
             self.stats_enabled = stats_enabled;
         }
+        if let Some(tls_self_signed) = file.tls_self_signed {
+            self.tls_self_signed = tls_self_signed;
+        }
         if let Some(limits) = file.limits {
             self.apply_limits_file(limits);
         }
@@ -292,6 +300,12 @@ impl ServerConfig {
     fn apply_limits_file(&mut self, file: LimitsConfigFile) {
         if let Some(max_connections) = file.max_connections {
             self.limits.max_connections = max_connections.max(1);
+        }
+        if let Some(max_connections_per_peer) = file.max_connections_per_peer {
+            self.limits.max_connections_per_peer = Some(max_connections_per_peer.max(1));
+        }
+        if let Some(max) = file.max_connection_opens_per_peer_per_second {
+            self.limits.max_connection_opens_per_peer_per_second = Some(max.max(1));
         }
         if let Some(max_in_flight_requests) = file.max_in_flight_requests {
             self.limits.max_in_flight_requests = max_in_flight_requests.max(1);
@@ -493,6 +507,9 @@ fn parse_args_with_default_config(
             "--stats" => {
                 config.stats_enabled = true;
             }
+            "--tls-self-signed" => {
+                config.tls_self_signed = true;
+            }
             other => {
                 return Err(format!("unknown argument: {other}").into());
             }
@@ -533,8 +550,25 @@ pub fn print_config(config: &ServerConfig, runtime: &str, actual_server_threads:
     );
     println!("  low_memory: {}", config.low_memory);
     println!("  stats_enabled: {}", config.stats_enabled);
+    println!("  tls_self_signed: {}", config.tls_self_signed);
     println!("  limits:");
     println!("    max_connections: {}", config.limits.max_connections);
+    println!(
+        "    max_connections_per_peer: {}",
+        config
+            .limits
+            .max_connections_per_peer
+            .map(|max| max.to_string())
+            .unwrap_or_else(|| "null".to_string())
+    );
+    println!(
+        "    max_connection_opens_per_peer_per_second: {}",
+        config
+            .limits
+            .max_connection_opens_per_peer_per_second
+            .map(|max| max.to_string())
+            .unwrap_or_else(|| "null".to_string())
+    );
     println!(
         "    max_in_flight_requests: {}",
         config.limits.max_in_flight_requests
@@ -673,6 +707,10 @@ pub fn print_help(runtime: &str) {
                                                        MIMALLOC_ARENA_EAGER_COMMIT=0\n\
            --stats                                   Enable server-side per-request atomic counters.\n\
                                                      Leave disabled for peak throughput benchmarks.\n\
+           --tls-self-signed                         Serve raw TCP over TLS with an ephemeral\n\
+                                                     self-signed certificate. The stress server\n\
+                                                     default build includes this capability, but\n\
+                                                     plain TCP remains the runtime default.\n\
          \n\
          Config:\n\
            If ./config.toml exists, it is loaded automatically. Explicit\n\
@@ -698,9 +736,12 @@ request_body_chunk_size = 1024
 request_body_channel_capacity = 2
 low_memory = true
 stats_enabled = true
+tls_self_signed = true
 
 [limits]
 max_connections = 128000
+max_connections_per_peer = 4096
+max_connection_opens_per_peer_per_second = 2048
 max_in_flight_requests = 64000
 max_streaming_tasks = 8192
 max_memory_bytes = 8589934592
@@ -729,7 +770,13 @@ http_max_connection_age_ms = 300000
         assert_eq!(config.request_body_channel_capacity, 2);
         assert!(config.low_memory);
         assert!(config.stats_enabled);
+        assert!(config.tls_self_signed);
         assert_eq!(config.limits.max_connections, 128_000);
+        assert_eq!(config.limits.max_connections_per_peer, Some(4_096));
+        assert_eq!(
+            config.limits.max_connection_opens_per_peer_per_second,
+            Some(2_048)
+        );
         assert_eq!(config.limits.max_in_flight_requests, 64_000);
         assert_eq!(config.limits.max_streaming_tasks, 8_192);
         assert_eq!(config.limits.max_memory_bytes, 8_589_934_592);
@@ -785,6 +832,13 @@ http_max_connection_age_ms = 300000
         assert_eq!(config.server_threads, 8);
         assert_eq!(config.response_bytes, 128);
         assert_eq!(config.limits.max_connections, 1_500);
+    }
+
+    #[test]
+    fn cli_enables_self_signed_tls() {
+        let config = parse_args(["--tls-self-signed".to_string()], "tokio").unwrap();
+        assert!(config.tls_self_signed);
+        assert_eq!(config.config_sources.last().unwrap(), "cli args");
     }
 
     #[test]

@@ -1,0 +1,31 @@
+[package]
+name = "nacelle-core"
+version = "0.1.0"
+edition = "2024"
+description = "Shared request, response, body, limits, lifecycle, telemetry, and TLS primitives for Nacelle."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../README.md"
+keywords = ["networking", "tokio", "async"]
+categories = ["asynchronous", "network-programming"]
+
+[features]
+default = []
+http-types = ["dep:http"]
+tls = ["dep:pem", "dep:rustls"]
+tls-self-signed = ["tls", "dep:rcgen"]
+otel = ["dep:opentelemetry"]
+tower = ["dep:tower"]
+
+[dependencies]
+bytes = "1.10.1"
+futures-core = "0.3.31"
+http = { version = "1", optional = true }
+opentelemetry = { version = "0.32", optional = true }
+pem = { version = "3.0.6", optional = true }
+rcgen = { version = "0.14.8", optional = true }
+rustls = { version = "0.23.40", optional = true }
+tokio = { version = "1.47.1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tower = { version = "0.5", features = ["util"], optional = true }
+tracing = "0.1.44"

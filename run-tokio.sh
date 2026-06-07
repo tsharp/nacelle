@@ -8,9 +8,55 @@ DURATION="30"
 CONNECTIONS="256"
 PIPELINE="8"
 PAYLOAD="256"
+CONFIG_PATH="config.toml"
+
+config_bool_value() {
+    local config_path="$1"
+    local key="$2"
+    if [[ ! -f "$config_path" ]]; then
+        return
+    fi
+
+    awk '
+        BEGIN {
+            key = ARGV[1]
+            ARGV[1] = ""
+        }
+        {
+            sub(/[[:space:]]*#.*/, "", $0)
+            pattern = "^[[:space:]]*" key "[[:space:]]*="
+            if ($0 ~ pattern) {
+                value = $0
+                sub(/^[^=]*=/, "", value)
+                gsub(/[[:space:]]/, "", value)
+                print tolower(value)
+                exit
+            }
+        }
+    ' "$key" "$config_path"
+}
+
+effective_tls_self_signed() {
+    local value
+    value="$(config_bool_value "config.toml" "tls_self_signed")"
+    if [[ -z "$value" ]]; then
+        value="false"
+    fi
+
+    if [[ "$CONFIG_PATH" != "config.toml" && "$CONFIG_PATH" != "./config.toml" ]]; then
+        local override
+        override="$(config_bool_value "$CONFIG_PATH" "tls_self_signed")"
+        if [[ -n "$override" ]]; then
+            value="$override"
+        fi
+    fi
+
+    echo "$value"
+}
 
 usage() {
-    echo "Usage: $0 [--bind ADDR] [--server-threads N] [--connections N] [--pipeline N] [--duration-secs S] [--payload-bytes N]"
+    echo "Usage: $0 [--config PATH] [--bind ADDR] [--server-threads N] [--connections N] [--pipeline N] [--duration-secs S] [--payload-bytes N]"
+    echo "Uses ./config.toml by default; client TLS mode follows the effective tls_self_signed value."
     exit 0
 }
 
@@ -22,6 +68,7 @@ while [[ $# -gt 0 ]]; do
         --pipeline)       PIPELINE="$2";       shift 2 ;;
         --duration-secs)  DURATION="$2";       shift 2 ;;
         --payload-bytes)  PAYLOAD="$2";        shift 2 ;;
+        --config)         CONFIG_PATH="$2";    shift 2 ;;
         --help|-h)        usage ;;
         *) echo "Unknown option: $1"; usage ;;
     esac
@@ -37,10 +84,17 @@ if [[ ! -x artifacts/tokio-server || ! -x artifacts/nacelle-stress-test ]]; then
     exit 1
 fi
 
+SERVER_ARGS=(
+    --bind "$BIND"
+    --server-threads "$SERVER_THREADS"
+)
+
+if [[ "$CONFIG_PATH" != "config.toml" && "$CONFIG_PATH" != "./config.toml" ]]; then
+    SERVER_ARGS+=(--config "$CONFIG_PATH")
+fi
+
 # Start server in background
-./artifacts/tokio-server \
-    --bind "$BIND" \
-    --server-threads "$SERVER_THREADS" &
+./artifacts/tokio-server "${SERVER_ARGS[@]}" &
 SERVER_PID=$!
 trap 'kill $SERVER_PID 2>/dev/null' EXIT
 
@@ -54,9 +108,16 @@ done
 
 echo "--- tokio  threads=$SERVER_THREADS  connections=$CONNECTIONS  pipeline=$PIPELINE ---"
 
-./artifacts/nacelle-stress-test \
-    --addr "$BIND" \
-    --connections "$CONNECTIONS" \
-    --pipeline "$PIPELINE" \
-    --duration-secs "$DURATION" \
+CLIENT_ARGS=(
+    --addr "$BIND"
+    --connections "$CONNECTIONS"
+    --pipeline "$PIPELINE"
+    --duration-secs "$DURATION"
     --payload-bytes "$PAYLOAD"
+)
+
+if [[ "$(effective_tls_self_signed)" == "true" ]]; then
+    CLIENT_ARGS+=(--tls-insecure)
+fi
+
+./artifacts/nacelle-stress-test "${CLIENT_ARGS[@]}"

@@ -1,6 +1,18 @@
 [workspace]
-members = ["nacelle", "nacelle-stress-test", "nacelle-stress-server"]
+members = [
+    "nacelle-core",
+    "nacelle-tcp",
+    "nacelle-http",
+    "nacelle",
+    "nacelle-stress-test",
+    "nacelle-stress-server",
+]
 resolver = "2"
+
+[workspace.package]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tsharp/nacelle"
+homepage = "https://github.com/tsharp/nacelle"
 
 [profile.release]
 opt-level = 3

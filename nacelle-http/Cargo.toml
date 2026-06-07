@@ -1,0 +1,29 @@
+[package]
+name = "nacelle-http"
+version = "0.1.0"
+edition = "2024"
+description = "Hyper HTTP/1 transport and HTTP edge policy runtime for Nacelle streaming handlers."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../README.md"
+keywords = ["networking", "tokio", "http"]
+categories = ["asynchronous", "network-programming"]
+
+[features]
+default = []
+tls = ["dep:rustls", "dep:tokio-rustls", "nacelle-core/tls"]
+tls-self-signed = ["tls", "nacelle-core/tls-self-signed"]
+
+[dependencies]
+bytes = "1.10.1"
+futures-core = "0.3.31"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
+nacelle-core = { path = "../nacelle-core", features = ["http-types"] }
+rustls = { version = "0.23.40", optional = true }
+tokio = { version = "1.47.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-rustls = { version = "0.26.4", optional = true }
+tracing = "0.1.44"

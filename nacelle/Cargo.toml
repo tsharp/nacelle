@@ -2,29 +2,33 @@
 name = "nacelle"
 version = "0.1.0"
 edition = "2024"
+description = "Convenience crate for Nacelle streaming handlers, transport re-exports, and the reference raw TCP protocol."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../README.md"
+keywords = ["networking", "tokio", "http", "tcp"]
+categories = ["asynchronous", "network-programming"]
 
 [features]
 default = ["raw_tcp"]
-raw_tcp = []
+raw_tcp = ["dep:nacelle-tcp"]
 reference_protocol = ["raw_tcp"]
-http = ["dep:http", "dep:http-body-util", "dep:hyper", "dep:hyper-util"]
-otel = ["dep:opentelemetry"]
-tower = ["dep:tower"]
+http = ["dep:http", "dep:nacelle-http", "nacelle-core/http-types"]
+tls = ["nacelle-core/tls", "nacelle-http?/tls", "nacelle-tcp?/tls"]
+tls-self-signed = ["tls", "nacelle-core/tls-self-signed", "nacelle-http?/tls-self-signed", "nacelle-tcp?/tls-self-signed"]
+otel = ["nacelle-core/otel"]
+tower = ["nacelle-core/tower"]
 bench = []
 fuzzing = []
 
 [dependencies]
 bytes = "1.10.1"
-mimalloc = { version = "0.1", default-features = false }
-futures-core = "0.3.31"
 http = { version = "1", optional = true }
-http-body-util = { version = "0.1", optional = true }
-hyper = { version = "1", features = ["http1", "server"], optional = true }
-hyper-util = { version = "0.1", features = ["server", "tokio"], optional = true }
-opentelemetry = { version = "0.32", optional = true }
-tower = { version = "0.5", features = ["util"], optional = true }
+nacelle-core = { path = "../nacelle-core" }
+nacelle-http = { path = "../nacelle-http", optional = true }
+nacelle-tcp = { path = "../nacelle-tcp", optional = true }
 tokio = { version = "1.47.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
-tracing = "0.1.44"
 
 [dev-dependencies]
 criterion = "0.8.2"
@@ -44,6 +48,16 @@ required-features = ["reference_protocol"]
 name = "http_echo"
 path = "examples/http_echo.rs"
 required-features = ["http"]
+
+[[example]]
+name = "tls_http_echo"
+path = "examples/tls_http_echo.rs"
+required-features = ["http", "tls-self-signed"]
+
+[[example]]
+name = "tls_echo"
+path = "examples/tls_echo.rs"
+required-features = ["reference_protocol", "tls-self-signed"]
 
 [[example]]
 name = "dual_echo"

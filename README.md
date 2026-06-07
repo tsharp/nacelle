@@ -7,6 +7,8 @@ The current transports are:
 - `raw_tcp` (default) — custom protocol transport over TCP
 - `reference_protocol` — optional length-delimited example protocol
 - `http` — Hyper HTTP/1 server transport
+- `tls` — Rustls-backed TLS termination for HTTP and raw TCP
+- `tls-self-signed` — optional self-signed TLS generation for local load tests and auto-deploy flows
 - `otel` — OpenTelemetry metrics API integration
 - `tower` — adapter for `tower::Service<NacelleRequest>`
 
@@ -17,6 +19,19 @@ async fn handle(request: NacelleRequest) -> Result<NacelleResponse, NacelleError
 ```
 
 `NacelleBody` is streaming, so handlers can consume request chunks and return response chunks without forcing full buffering.
+
+## Crate Layout
+
+The workspace is split by responsibility:
+
+- `nacelle-core` owns shared handler, body, limits, telemetry, lifecycle, and TLS primitives.
+- `nacelle-tcp` owns the raw TCP transport and protocol trait.
+- `nacelle-http` owns the Hyper HTTP/1 transport and HTTP edge policy.
+- `nacelle` is the convenience crate that re-exports the transport crates and owns the reference length-delimited protocol.
+
+TLS is shared core infrastructure. Rustls is the implemented provider today;
+`NacelleTlsProvider` keeps the provider boundary visible so a future OpenSSL
+backend can plug in without changing the HTTP or raw TCP listener APIs.
 
 ## Raw TCP Example
 
@@ -148,28 +163,31 @@ Nacelle emits structured `tracing` events for listener, connection, request comp
 
 Production notes:
 
-- [Usage guide](docs/usage.md)
-- [Architecture](docs/architecture.md)
-- [Operations](docs/operations.md)
-- [HTTP hardening](docs/http-hardening.md)
-- [Production configuration](docs/production-configuration.md)
-- [Stress testing](docs/stress-testing.md)
-- [Security scanning](docs/security-scanning.md)
-- [Performance tuning](docs/performance-tuning.md)
-- [API stability](docs/api-stability.md)
+- [Getting started](docs/tutorials/getting-started.md)
+- [Architecture](docs/topics/architecture.md)
+- [Operations](docs/topics/operations.md)
+- [HTTP hardening](docs/how-to/harden-http.md)
+- [Production configuration](docs/how-to/configure-production.md)
+- [Stress testing](docs/how-to/run-stress-tests.md)
+- [Security scanning](docs/how-to/security-scanning.md)
+- [Performance tuning](docs/how-to/compare-performance.md)
+- [API stability](docs/reference/api-stability.md)
 
-Generate the Markdown documentation site with DocFX:
+Generate the mdBook narrative documentation site:
 
 ```bash
-dotnet tool restore
-dotnet docfx docfx.json
+mdbook build
 ```
 
-On Windows, the same build can be run with:
+On Windows, the build script installs mdBook if needed:
 
 ```powershell
-.\scripts\build-docs.ps1
+.\scripts\build-book.ps1
 ```
+
+The mdBook source follows a Django-style organization: tutorials, topic guides,
+how-to guides, and reference. The generated output is written to
+`target/docs/book`.
 
 Generate Rust API reference with `cargo doc`:
 
@@ -184,7 +202,7 @@ Or on Windows:
 ```
 
 Internal readiness plans, assessments, and checklists live under `docs/internal`
-and are excluded from the generated DocFX site.
+and are excluded from generated public documentation sites.
 
 Exporter/subscriber setup stays in the application so production can choose OTLP, stdout, Prometheus, or another pipeline.
 
@@ -199,6 +217,12 @@ cargo run --features reference_protocol --example echo -- 127.0.0.1:8080
 # HTTP echo
 cargo run --no-default-features --features http --example http_echo -- 127.0.0.1:8080
 
+# HTTPS echo with an ephemeral self-signed certificate
+cargo run --no-default-features --features http,tls-self-signed --example tls_http_echo -- 127.0.0.1:8443
+
+# Raw TCP echo with an ephemeral self-signed certificate
+cargo run --features reference_protocol,tls-self-signed --example tls_echo -- 127.0.0.1:8443
+
 # Raw TCP and HTTP with one shared handler and one host
 cargo run --features reference_protocol,http --example dual_echo -- 127.0.0.1:8080 127.0.0.1:8081
 ```
@@ -208,22 +232,30 @@ cargo run --features reference_protocol,http --example dual_echo -- 127.0.0.1:80
 ```bash
 cargo run --release --package nacelle-stress-server --bin tokio-server
 
-# If ./config.toml exists, the stress server loads it automatically.
+# If ./config.toml exists, the stress server loads it automatically. The
+# checked-in root config enables self-signed raw TCP TLS for local runs.
 
 # Or load server limits and buffer sizing from TOML:
 cargo run --release --package nacelle-stress-server --bin tokio-server -- \
   --config nacelle-stress-server/config.example.toml
 
+# The stress server default build includes raw TCP TLS support. Plain TCP
+# remains the runtime default; add --tls-self-signed to serve with an ephemeral
+# self-signed certificate.
+cargo run --release --package nacelle-stress-server --bin tokio-server -- \
+  --tls-self-signed
+
 # In another shell:
 cargo run --release --package nacelle-stress-test -- \
+  --tls-insecure \
   --connections 32 \
   --pipeline 16 \
   --duration-secs 15
 ```
 
-The optional reference protocol contract is documented in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+The optional reference protocol contract is documented in [docs/reference/protocol.md](docs/reference/protocol.md).
 
-TLS, authentication, and compression are not implemented in this prototype.
+Authentication and compression are not implemented in this prototype.
 
 ## License
 

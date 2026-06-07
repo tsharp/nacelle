@@ -3,12 +3,14 @@ use std::net::SocketAddr;
 
 use tokio::task::JoinSet;
 
-use crate::error::NacelleError;
-use crate::lifecycle::{NacelleDrainDeadline, NacelleShutdown, NacelleShutdownToken};
-use crate::limits::{NacelleLimits, NacelleRuntimeState};
-use crate::telemetry::NacelleTelemetry;
+use nacelle_core::error::NacelleError;
+use nacelle_core::lifecycle::{NacelleDrainDeadline, NacelleShutdown, NacelleShutdownToken};
+use nacelle_core::limits::{NacelleLimits, NacelleRuntimeState};
+use nacelle_core::telemetry::NacelleTelemetry;
 #[cfg(any(feature = "raw_tcp", feature = "http"))]
-use crate::telemetry::NacelleTransport;
+use nacelle_core::telemetry::NacelleTransport;
+#[cfg(all(any(feature = "raw_tcp", feature = "http"), feature = "tls"))]
+use nacelle_core::tls::NacelleTlsConfig;
 
 pub struct NacelleHost {
     telemetry: NacelleTelemetry,
@@ -69,12 +71,12 @@ impl NacelleHost {
         &mut self,
         name: impl Into<String>,
         addr: SocketAddr,
-        server: crate::server::RawTcpServer<Req, P, H>,
+        server: nacelle_tcp::RawTcpServer<Req, P, H>,
     ) -> &mut Self
     where
-        Req: crate::request::RequestMetadata + Send + 'static,
-        P: crate::protocol::Protocol<Req> + Send + Sync + 'static,
-        H: crate::handler::Handler,
+        Req: nacelle_core::request::RequestMetadata + Send + 'static,
+        P: nacelle_tcp::Protocol<Req> + Send + Sync + 'static,
+        H: nacelle_core::handler::Handler,
     {
         let name = name.into();
         let telemetry = self.telemetry.clone();
@@ -83,9 +85,50 @@ impl NacelleHost {
         let server = server.with_runtime_state(self.runtime_state.clone());
         telemetry.listener_configured(NacelleTransport::RawTcp, &name, &addr.to_string());
         self.tasks.spawn(async move {
-            let result = crate::runtime::serve_tcp_with_shutdown_deadline(
+            let result = nacelle_tcp::runtime::serve_tcp_with_shutdown_deadline(
                 std::sync::Arc::new(server),
                 addr,
+                shutdown,
+                drain_deadline,
+            )
+            .await;
+            if let Err(error) = &result {
+                telemetry.listener_failed(
+                    NacelleTransport::RawTcp,
+                    &name,
+                    &addr.to_string(),
+                    error,
+                );
+            }
+            result
+        });
+        self
+    }
+
+    #[cfg(all(feature = "raw_tcp", feature = "tls"))]
+    pub fn enable_raw_tcp_tls<Req, P, H>(
+        &mut self,
+        name: impl Into<String>,
+        addr: SocketAddr,
+        server: nacelle_tcp::RawTcpServer<Req, P, H>,
+        tls_config: NacelleTlsConfig,
+    ) -> &mut Self
+    where
+        Req: nacelle_core::request::RequestMetadata + Send + 'static,
+        P: nacelle_tcp::Protocol<Req> + Send + Sync + 'static,
+        H: nacelle_core::handler::Handler,
+    {
+        let name = name.into();
+        let telemetry = self.telemetry.clone();
+        let shutdown = self.shutdown.token();
+        let drain_deadline = self.drain_deadline.clone();
+        let server = server.with_runtime_state(self.runtime_state.clone());
+        telemetry.listener_configured(NacelleTransport::RawTcp, &name, &addr.to_string());
+        self.tasks.spawn(async move {
+            let result = nacelle_tcp::runtime::serve_tcp_tls_with_shutdown_deadline(
+                std::sync::Arc::new(server),
+                addr,
+                tls_config,
                 shutdown,
                 drain_deadline,
             )
@@ -108,10 +151,10 @@ impl NacelleHost {
         &mut self,
         name: impl Into<String>,
         addr: SocketAddr,
-        server: crate::http_server::HyperServer<H>,
+        server: nacelle_http::HyperServer<H>,
     ) -> &mut Self
     where
-        H: crate::handler::Handler,
+        H: nacelle_core::handler::Handler,
     {
         let name = name.into();
         let telemetry = self.telemetry.clone();
@@ -122,6 +165,41 @@ impl NacelleHost {
         self.tasks.spawn(async move {
             let result = server
                 .serve_with_shutdown_deadline(addr, shutdown, drain_deadline)
+                .await;
+            if let Err(error) = &result {
+                telemetry.listener_failed(NacelleTransport::Http, &name, &addr.to_string(), error);
+            }
+            result
+        });
+        self
+    }
+
+    #[cfg(all(feature = "http", feature = "tls"))]
+    pub fn enable_http_tls<H>(
+        &mut self,
+        name: impl Into<String>,
+        addr: SocketAddr,
+        server: nacelle_http::HyperServer<H>,
+        tls_config: NacelleTlsConfig,
+    ) -> &mut Self
+    where
+        H: nacelle_core::handler::Handler,
+    {
+        let name = name.into();
+        let telemetry = self.telemetry.clone();
+        let shutdown = self.shutdown.token();
+        let drain_deadline = self.drain_deadline.clone();
+        let server = server.with_runtime_state(self.runtime_state.clone());
+        telemetry.listener_configured(NacelleTransport::Http, &name, &addr.to_string());
+        self.tasks.spawn(async move {
+            let listener = tokio::net::TcpListener::bind(addr).await?;
+            let result = server
+                .serve_tls_listener_with_shutdown_deadline(
+                    listener,
+                    tls_config,
+                    shutdown,
+                    drain_deadline,
+                )
                 .await;
             if let Err(error) = &result {
                 telemetry.listener_failed(NacelleTransport::Http, &name, &addr.to_string(), error);

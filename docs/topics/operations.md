@@ -1,0 +1,67 @@
+# Operations model
+
+## Deployment Shape
+
+Recommended internet-facing shape:
+
+```text
+client -> proxy/load balancer/TLS -> Nacelle service
+```
+
+The proxy should own TLS, coarse connection filtering, and external idle
+timeouts. Nacelle owns application limits, protocol handling, body limits, and
+graceful shutdown.
+
+## Startup
+
+Use explicit limits and print the effective config for stress or benchmark
+services. For production services, record:
+
+- process version and git SHA
+- configured limits
+- listener addresses
+- feature flags
+- allocator settings
+
+## Shutdown
+
+Wire OS signals to `NacelleHost::shutdown_and_wait_timeout`. Pick a drain
+deadline that matches service semantics. Short deadlines protect deploy velocity
+but can abort in-flight work.
+
+Expected shutdown telemetry:
+
+- shutdown requested
+- listener stopped accepting
+- drain started
+- drain completed or timed out
+- active connections aborted
+
+## Metrics To Watch
+
+- `nacelle.connections.active`
+- `nacelle.requests.active`
+- `nacelle.streaming_tasks.active`
+- `nacelle.memory.used_bytes`
+- `nacelle.rejections`
+- `nacelle.timeouts`
+- `nacelle.request_errors`
+- `nacelle.request_bytes`
+- `nacelle.response_bytes`
+
+Alerts should focus on sustained saturation, rising rejections, timeout spikes,
+and memory approaching the configured budget.
+
+## Benchmarking
+
+Use the stress server with `stats_enabled = false` for peak throughput. Enable
+`--stats` only for diagnostic runs; server-side per-request stats use atomics
+and can affect RPS.
+
+Run microbenchmarks before and after hot-path changes:
+
+```bash
+cargo bench -p nacelle --features bench,reference_protocol
+```
+
+
