@@ -17,17 +17,14 @@ Then run the convenience script:
 ./run-tokio.sh
 ```
 
-The script reads root `config.toml`. If `tls_self_signed = true`, it passes
-`--tls-insecure` to the client so the server and client speak the same
-transport.
+The script reads root `config.toml` by default. Pass `--config` to select a
+repeatable benchmark profile. If the effective `tls_self_signed` value is true,
+it passes `--tls-insecure` to the client so the server and client speak the
+same transport.
 
-For a plain raw TCP baseline, use a config with:
-
-```toml
-tls_self_signed = false
-```
+For a plain raw TCP baseline, use
+`nacelle-stress-server/configs/raw-tcp.toml`.
 
 For full details, see the how-to guide:
 
 {{#include ../../stress-testing.md}}
-

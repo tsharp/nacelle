@@ -5,6 +5,7 @@ param(
     [int]$Connections = 256,
     [int]$Pipeline = 8,
     [int]$PayloadBytes = 256,
+    [string]$Config = "config.toml",
     [switch]$Debug
 )
 
@@ -59,20 +60,48 @@ function Wait-PortOpen {
     throw "Timed out waiting for $Bind to accept connections"
 }
 
-function Get-TlsSelfSignedFromConfig {
-    $configPath = Join-Path $PSScriptRoot "config.toml"
+function Get-TomlBool {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$Key
+    )
+
+    $configPath = if ([System.IO.Path]::IsPathRooted($Path)) {
+        $Path
+    } else {
+        Join-Path $PSScriptRoot $Path
+    }
+
     if (-not (Test-Path -Path $configPath)) {
-        return $false
+        return $null
     }
 
     foreach ($line in Get-Content -Path $configPath) {
         $withoutComment = ($line -replace '\s*#.*$', '').Trim()
-        if ($withoutComment -match '^tls_self_signed\s*=\s*(true|false)\s*$') {
+        if ($withoutComment -match "^$([regex]::Escape($Key))\s*=\s*(true|false)\s*$") {
             return $Matches[1] -eq "true"
         }
     }
 
-    return $false
+    return $null
+}
+
+function Get-EffectiveTlsSelfSigned {
+    $value = Get-TomlBool -Path "config.toml" -Key "tls_self_signed"
+    if ($null -eq $value) {
+        $value = $false
+    }
+
+    if ($Config -ne "config.toml" -and $Config -ne ".\config.toml" -and $Config -ne "./config.toml") {
+        $override = Get-TomlBool -Path $Config -Key "tls_self_signed"
+        if ($null -ne $override) {
+            $value = $override
+        }
+    }
+
+    return $value
 }
 
 $profile = if ($Debug) { "debug" } else { "release" }
@@ -103,6 +132,9 @@ $serverArgs = @(
     "--bind", $Bind,
     "--server-threads", "$ServerThreads"
 )
+if ($Config -ne "config.toml" -and $Config -ne ".\config.toml" -and $Config -ne "./config.toml") {
+    $serverArgs += @("--config", $Config)
+}
 
 $server = $null
 try {
@@ -120,7 +152,7 @@ try {
         "--duration-secs", "$DurationSecs",
         "--payload-bytes", "$PayloadBytes"
     )
-    if (Get-TlsSelfSignedFromConfig) {
+    if (Get-EffectiveTlsSelfSigned) {
         $clientArgs += "--tls-insecure"
     }
     & $clientExe @clientArgs

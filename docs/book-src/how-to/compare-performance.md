@@ -12,22 +12,17 @@ do not compare two runs if the stress client version changed.
 
 Recommended plain raw TCP baseline config:
 
-```toml
-low_memory = true
-tls_self_signed = false
-
-[limits]
-max_memory_bytes = 536870912
+```text
+nacelle-stress-server/configs/raw-tcp.toml
 ```
 
 Then run:
 
 ```bash
 ./build-all.sh
-./run-tokio.sh --connections 256 --pipeline 8 --duration-secs 30 --payload-bytes 256
+./run-tokio.sh --config nacelle-stress-server/configs/raw-tcp.toml --connections 256 --pipeline 8 --duration-secs 30 --payload-bytes 256
 ```
 
 More background:
 
 {{#include ../../performance-tuning.md}}
-
