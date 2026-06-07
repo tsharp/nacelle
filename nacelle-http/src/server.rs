@@ -463,15 +463,15 @@ where
         if let Some(rejection) = validate_http_policy(&self.http_policy, &request) {
             self.telemetry
                 .request_rejected(NacelleTransport::Http, rejection.reason);
-            self.access_log(
-                &method,
-                &uri,
-                effective_peer_ip,
-                rejection.status,
-                0,
-                request_started.elapsed(),
-                Some(rejection.reason),
-            );
+            self.access_log(HttpAccessLog {
+                method: &method,
+                uri: &uri,
+                peer_ip: effective_peer_ip,
+                status: rejection.status,
+                request_bytes: 0,
+                elapsed: request_started.elapsed(),
+                reason: Some(rejection.reason),
+            });
             return response_to_http(
                 NacelleResponse::http_bytes(rejection.status, rejection.reason),
                 self.runtime_state.clone(),
@@ -484,15 +484,15 @@ where
         {
             self.telemetry
                 .request_rejected(NacelleTransport::Http, "peer_rate");
-            self.access_log(
-                &method,
-                &uri,
-                effective_peer_ip,
-                StatusCode::TOO_MANY_REQUESTS,
-                0,
-                request_started.elapsed(),
-                Some("peer_rate"),
-            );
+            self.access_log(HttpAccessLog {
+                method: &method,
+                uri: &uri,
+                peer_ip: effective_peer_ip,
+                status: StatusCode::TOO_MANY_REQUESTS,
+                request_bytes: 0,
+                elapsed: request_started.elapsed(),
+                reason: Some("peer_rate"),
+            });
             return response_to_http(
                 NacelleResponse::http_bytes(StatusCode::TOO_MANY_REQUESTS, "peer_rate"),
                 self.runtime_state.clone(),
@@ -509,15 +509,15 @@ where
                     request_started.elapsed(),
                     &error,
                 );
-                self.access_log(
-                    &method,
-                    &uri,
-                    effective_peer_ip,
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    0,
-                    request_started.elapsed(),
-                    Some("in_flight_requests"),
-                );
+                self.access_log(HttpAccessLog {
+                    method: &method,
+                    uri: &uri,
+                    peer_ip: effective_peer_ip,
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    request_bytes: 0,
+                    elapsed: request_started.elapsed(),
+                    reason: Some("in_flight_requests"),
+                });
                 return response_to_http(
                     NacelleResponse::http_bytes(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
                     self.runtime_state.clone(),
@@ -567,15 +567,15 @@ where
                     &self.http_policy,
                 );
                 if let Ok(response) = &response {
-                    self.access_log(
-                        &method,
-                        &uri,
-                        effective_peer_ip,
-                        response.status(),
+                    self.access_log(HttpAccessLog {
+                        method: &method,
+                        uri: &uri,
+                        peer_ip: effective_peer_ip,
+                        status: response.status(),
                         request_bytes,
-                        request_started.elapsed(),
-                        None,
-                    );
+                        elapsed: request_started.elapsed(),
+                        reason: None,
+                    });
                 }
                 self.telemetry.request_completed(
                     NacelleTransport::Http,
@@ -604,15 +604,15 @@ where
                     &self.http_policy,
                 );
                 if let Ok(response) = &response {
-                    self.access_log(
-                        &method,
-                        &uri,
-                        effective_peer_ip,
-                        response.status(),
+                    self.access_log(HttpAccessLog {
+                        method: &method,
+                        uri: &uri,
+                        peer_ip: effective_peer_ip,
+                        status: response.status(),
                         request_bytes,
-                        request_started.elapsed(),
-                        Some("handler"),
-                    );
+                        elapsed: request_started.elapsed(),
+                        reason: Some("handler"),
+                    });
                 }
                 self.telemetry.request_completed(
                     NacelleTransport::Http,
@@ -658,9 +658,7 @@ where
         socket_peer_ip: Option<IpAddr>,
         request: &Request<Incoming>,
     ) -> Option<IpAddr> {
-        let Some(socket_peer_ip) = socket_peer_ip else {
-            return None;
-        };
+        let socket_peer_ip = socket_peer_ip?;
         let Some(trusted_proxy_ips) = &self.http_policy.trusted_proxy_ips else {
             return Some(socket_peer_ip);
         };
@@ -670,32 +668,33 @@ where
         Some(forwarded_peer_ip(request).unwrap_or(socket_peer_ip))
     }
 
-    fn access_log(
-        &self,
-        method: &Method,
-        uri: &http::Uri,
-        peer_ip: Option<IpAddr>,
-        status: StatusCode,
-        request_bytes: usize,
-        elapsed: Duration,
-        reason: Option<&'static str>,
-    ) {
+    fn access_log(&self, log: HttpAccessLog<'_>) {
         if !self.access_log_enabled {
             return;
         }
         tracing::info!(
             target: "nacelle::access",
             transport = "http",
-            method = %method,
-            uri = %uri,
-            peer_ip = ?peer_ip,
-            status = status.as_u16(),
-            request_bytes,
-            elapsed_us = elapsed.as_micros() as u64,
-            reason,
+            method = %log.method,
+            uri = %log.uri,
+            peer_ip = ?log.peer_ip,
+            status = log.status.as_u16(),
+            request_bytes = log.request_bytes,
+            elapsed_us = log.elapsed.as_micros() as u64,
+            reason = log.reason,
             "http access"
         );
     }
+}
+
+struct HttpAccessLog<'a> {
+    method: &'a Method,
+    uri: &'a http::Uri,
+    peer_ip: Option<IpAddr>,
+    status: StatusCode,
+    request_bytes: usize,
+    elapsed: Duration,
+    reason: Option<&'static str>,
 }
 
 fn incoming_to_body(
