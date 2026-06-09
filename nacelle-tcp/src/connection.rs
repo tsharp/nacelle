@@ -46,6 +46,7 @@ where
 }
 
 /// Drive one TCP framed connection with caller-supplied connection metadata.
+#[allow(clippy::too_many_arguments)]
 pub async fn serve_connection_with_connection_meta<Req, P, H, R, W>(
     mut reader: R,
     mut writer: W,
