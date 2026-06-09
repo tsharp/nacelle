@@ -32,7 +32,10 @@ pub mod runtime {
     pub use nacelle_core::runtime::*;
     #[cfg(feature = "raw_tcp")]
     pub use nacelle_tcp::runtime::{
-        serve_tcp, serve_tcp_listener_with_shutdown_deadline, serve_tcp_with_shutdown,
+        serve_tcp, serve_tcp_listener_with_options_and_shutdown_deadline,
+        serve_tcp_listener_with_shutdown_deadline, serve_tcp_with_options,
+        serve_tcp_with_options_and_shutdown, serve_tcp_with_options_and_shutdown_deadline,
+        serve_tcp_with_options_and_shutdown_timeout, serve_tcp_with_shutdown,
         serve_tcp_with_shutdown_deadline, serve_tcp_with_shutdown_timeout,
     };
     #[cfg(all(feature = "raw_tcp", feature = "openssl"))]
@@ -48,7 +51,9 @@ pub mod runtime {
     };
     #[cfg(all(feature = "raw_tcp", unix))]
     pub use nacelle_tcp::runtime::{
-        serve_unix, serve_unix_listener_with_shutdown_deadline, serve_unix_with_shutdown,
+        serve_unix, serve_unix_listener_with_shutdown_deadline, serve_unix_with_options,
+        serve_unix_with_options_and_shutdown, serve_unix_with_options_and_shutdown_deadline,
+        serve_unix_with_options_and_shutdown_timeout, serve_unix_with_shutdown,
         serve_unix_with_shutdown_deadline, serve_unix_with_shutdown_timeout,
     };
 }
@@ -83,10 +88,12 @@ pub use nacelle_core::{
 pub use nacelle_core::{HttpRequestMeta, HttpResponseMeta};
 #[cfg(feature = "http")]
 pub use nacelle_http::{HyperServer, NacelleHttpPolicy};
+#[cfg(all(feature = "raw_tcp", unix))]
+pub use nacelle_tcp::NacelleUnixSocketOptions;
 #[cfg(feature = "raw_tcp")]
 pub use nacelle_tcp::{
-    DecodedRequest, NacelleServer, NacelleServerBuilder, Protocol, RawTcpServer, serve_connection,
-    serve_stream,
+    DecodedRequest, NacelleServer, NacelleServerBuilder, NacelleTcpKeepalive, NacelleTcpOptions,
+    Protocol, RawTcpServer, serve_connection, serve_stream,
 };
 #[cfg(feature = "reference_protocol")]
 pub use reference_protocol::{

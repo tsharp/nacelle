@@ -8,6 +8,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::options::NacelleTcpOptions;
+#[cfg(unix)]
+use crate::options::NacelleUnixSocketOptions;
 use crate::protocol::Protocol;
 use crate::server::NacelleServer;
 use nacelle_core::error::NacelleError;
@@ -76,6 +79,67 @@ where
     .await
 }
 
+/// Listen on `addr` with explicit TCP socket options.
+pub async fn serve_tcp_with_options<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tcp_options: NacelleTcpOptions,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let (_shutdown, token) = nacelle_core::lifecycle::NacelleShutdown::pair();
+    serve_tcp_with_options_and_shutdown(server, addr, tcp_options, token).await
+}
+
+/// Listen on `addr` with explicit TCP socket options until shutdown is requested.
+pub async fn serve_tcp_with_options_and_shutdown<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tcp_options: NacelleTcpOptions,
+    shutdown: NacelleShutdownToken,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    serve_tcp_with_options_and_shutdown_timeout(
+        server,
+        addr,
+        tcp_options,
+        shutdown,
+        Duration::from_secs(30),
+    )
+    .await
+}
+
+/// Listen on `addr` with explicit TCP socket options, then drain or abort active
+/// connection tasks after `drain_timeout`.
+pub async fn serve_tcp_with_options_and_shutdown_timeout<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tcp_options: NacelleTcpOptions,
+    shutdown: NacelleShutdownToken,
+    drain_timeout: Duration,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    serve_tcp_with_options_and_shutdown_deadline(
+        server,
+        addr,
+        tcp_options,
+        shutdown,
+        NacelleDrainDeadline::new(drain_timeout),
+    )
+    .await
+}
+
 /// Listen on a Unix domain socket and serve each accepted connection.
 ///
 /// The socket path is passed directly to Tokio. Existing socket files are not
@@ -126,6 +190,71 @@ where
     serve_unix_with_shutdown_deadline(
         server,
         path,
+        shutdown,
+        NacelleDrainDeadline::new(drain_timeout),
+    )
+    .await
+}
+
+/// Listen on a Unix domain socket with explicit socket-file lifecycle options.
+#[cfg(unix)]
+pub async fn serve_unix_with_options<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    path: impl AsRef<Path>,
+    unix_options: NacelleUnixSocketOptions,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let (_shutdown, token) = nacelle_core::lifecycle::NacelleShutdown::pair();
+    serve_unix_with_options_and_shutdown(server, path, unix_options, token).await
+}
+
+/// Listen on a Unix domain socket with explicit lifecycle options until
+/// shutdown is requested.
+#[cfg(unix)]
+pub async fn serve_unix_with_options_and_shutdown<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    path: impl AsRef<Path>,
+    unix_options: NacelleUnixSocketOptions,
+    shutdown: NacelleShutdownToken,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    serve_unix_with_options_and_shutdown_timeout(
+        server,
+        path,
+        unix_options,
+        shutdown,
+        Duration::from_secs(30),
+    )
+    .await
+}
+
+/// Listen on a Unix domain socket with explicit lifecycle options, then drain
+/// or abort active connection tasks after `drain_timeout`.
+#[cfg(unix)]
+pub async fn serve_unix_with_options_and_shutdown_timeout<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    path: impl AsRef<Path>,
+    unix_options: NacelleUnixSocketOptions,
+    shutdown: NacelleShutdownToken,
+    drain_timeout: Duration,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    serve_unix_with_options_and_shutdown_deadline(
+        server,
+        path,
+        unix_options,
         shutdown,
         NacelleDrainDeadline::new(drain_timeout),
     )
@@ -259,7 +388,14 @@ where
     H: Handler,
 {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    serve_tcp_listener_with_shutdown_deadline(server, listener, shutdown, drain_deadline).await
+    serve_tcp_listener_with_options_and_shutdown_deadline(
+        server,
+        listener,
+        NacelleTcpOptions::default(),
+        shutdown,
+        drain_deadline,
+    )
+    .await
 }
 
 #[cfg(feature = "rustls")]
@@ -325,8 +461,58 @@ where
     P: Protocol<Req> + Send + Sync + 'static,
     H: Handler,
 {
+    serve_unix_with_options_and_shutdown_deadline(
+        server,
+        path,
+        NacelleUnixSocketOptions::default(),
+        shutdown,
+        drain_deadline,
+    )
+    .await
+}
+
+#[doc(hidden)]
+pub async fn serve_tcp_with_options_and_shutdown_deadline<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tcp_options: NacelleTcpOptions,
+    shutdown: NacelleShutdownToken,
+    drain_deadline: NacelleDrainDeadline,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    serve_tcp_listener_with_options_and_shutdown_deadline(
+        server,
+        listener,
+        tcp_options,
+        shutdown,
+        drain_deadline,
+    )
+    .await
+}
+
+#[cfg(unix)]
+#[doc(hidden)]
+pub async fn serve_unix_with_options_and_shutdown_deadline<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    path: impl AsRef<Path>,
+    unix_options: NacelleUnixSocketOptions,
+    shutdown: NacelleShutdownToken,
+    drain_deadline: NacelleDrainDeadline,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
     let path = path.as_ref();
+    unix_options.prepare_path(path)?;
     let listener = UnixListener::bind(path)?;
+    unix_options.apply_to_path(path)?;
     serve_unix_listener_with_shutdown_deadline(
         server,
         listener,
@@ -341,6 +527,29 @@ where
 pub async fn serve_tcp_listener_with_shutdown_deadline<Req, P, H>(
     server: Arc<NacelleServer<Req, P, H>>,
     listener: tokio::net::TcpListener,
+    shutdown: NacelleShutdownToken,
+    drain_deadline: NacelleDrainDeadline,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    serve_tcp_listener_with_options_and_shutdown_deadline(
+        server,
+        listener,
+        NacelleTcpOptions::default(),
+        shutdown,
+        drain_deadline,
+    )
+    .await
+}
+
+#[doc(hidden)]
+pub async fn serve_tcp_listener_with_options_and_shutdown_deadline<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    listener: tokio::net::TcpListener,
+    tcp_options: NacelleTcpOptions,
     mut shutdown: NacelleShutdownToken,
     drain_deadline: NacelleDrainDeadline,
 ) -> Result<(), NacelleError>
@@ -361,7 +570,7 @@ where
             }
             accepted = listener.accept() => {
                 let (stream, peer_addr) = accepted?;
-                let _ = stream.set_nodelay(true);
+                tcp_options.apply_to_stream(&stream)?;
                 let connection = NacelleConnectionMeta::raw_tcp(Some(peer_addr), local_addr);
                 let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
                     Ok(permit) => permit,

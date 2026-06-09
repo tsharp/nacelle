@@ -5,6 +5,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::connection::{serve_connection_with_connection_meta, serve_stream_with_connection_meta};
+use crate::options::NacelleTcpOptions;
+#[cfg(unix)]
+use crate::options::NacelleUnixSocketOptions;
 use crate::protocol::Protocol;
 use nacelle_core::config::NacelleConfig;
 use nacelle_core::error::NacelleError;
@@ -242,6 +245,51 @@ where
         .await
     }
 
+    pub async fn serve_tcp_with_options(
+        &self,
+        addr: SocketAddr,
+        tcp_options: NacelleTcpOptions,
+    ) -> Result<(), NacelleError> {
+        crate::runtime::serve_tcp_with_options(
+            Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
+            addr,
+            tcp_options,
+        )
+        .await
+    }
+
+    pub async fn serve_tcp_with_options_and_shutdown(
+        &self,
+        addr: SocketAddr,
+        tcp_options: NacelleTcpOptions,
+        shutdown: nacelle_core::lifecycle::NacelleShutdownToken,
+    ) -> Result<(), NacelleError> {
+        crate::runtime::serve_tcp_with_options_and_shutdown(
+            Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
+            addr,
+            tcp_options,
+            shutdown,
+        )
+        .await
+    }
+
+    pub async fn serve_tcp_with_options_and_shutdown_timeout(
+        &self,
+        addr: SocketAddr,
+        tcp_options: NacelleTcpOptions,
+        shutdown: nacelle_core::lifecycle::NacelleShutdownToken,
+        drain_timeout: std::time::Duration,
+    ) -> Result<(), NacelleError> {
+        crate::runtime::serve_tcp_with_options_and_shutdown_timeout(
+            Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
+            addr,
+            tcp_options,
+            shutdown,
+            drain_timeout,
+        )
+        .await
+    }
+
     #[cfg(unix)]
     pub async fn serve_unix(&self, path: impl AsRef<Path>) -> Result<(), NacelleError> {
         crate::runtime::serve_unix(Arc::<NacelleServer<Req, P, H>>::new(self.clone()), path).await
@@ -271,6 +319,54 @@ where
         crate::runtime::serve_unix_with_shutdown_timeout(
             Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
             path,
+            shutdown,
+            drain_timeout,
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    pub async fn serve_unix_with_options(
+        &self,
+        path: impl AsRef<Path>,
+        unix_options: NacelleUnixSocketOptions,
+    ) -> Result<(), NacelleError> {
+        crate::runtime::serve_unix_with_options(
+            Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
+            path,
+            unix_options,
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    pub async fn serve_unix_with_options_and_shutdown(
+        &self,
+        path: impl AsRef<Path>,
+        unix_options: NacelleUnixSocketOptions,
+        shutdown: nacelle_core::lifecycle::NacelleShutdownToken,
+    ) -> Result<(), NacelleError> {
+        crate::runtime::serve_unix_with_options_and_shutdown(
+            Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
+            path,
+            unix_options,
+            shutdown,
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    pub async fn serve_unix_with_options_and_shutdown_timeout(
+        &self,
+        path: impl AsRef<Path>,
+        unix_options: NacelleUnixSocketOptions,
+        shutdown: nacelle_core::lifecycle::NacelleShutdownToken,
+        drain_timeout: std::time::Duration,
+    ) -> Result<(), NacelleError> {
+        crate::runtime::serve_unix_with_options_and_shutdown_timeout(
+            Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
+            path,
+            unix_options,
             shutdown,
             drain_timeout,
         )

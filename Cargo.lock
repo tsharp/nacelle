@@ -823,6 +823,7 @@ dependencies = [
  "nacelle-core",
  "openssl",
  "rustls",
+ "socket2",
  "tokio",
  "tokio-openssl",
  "tokio-rustls",
