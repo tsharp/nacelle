@@ -1,8 +1,9 @@
 # Reference protocol
 
 This document describes the optional `LengthDelimitedProtocol` reference
-implementation enabled by the `reference_protocol` feature. Custom raw TCP
-protocols can implement `Protocol<Req>` directly.
+implementation enabled by the `reference_protocol` feature. Custom raw
+protocols can implement `Protocol<Req>` directly and run over TCP or Unix
+domain sockets.
 
 ## Frame Layout
 
@@ -43,9 +44,10 @@ draining the body and returns an error, the server encodes that error as a
 response frame.
 
 Handlers also receive connection metadata through `NacelleRequest::connection`.
-Raw TCP listeners populate peer/local socket addresses and TLS metadata when a
-TLS backend is active. Servers can attach typed per-connection state with
-`connection_extension_factory(...)`; handlers retrieve it with
+TCP listeners populate peer/local socket addresses and TLS metadata when a TLS
+backend is active. Unix socket listeners populate `transport =
+NacelleTransport::UnixSocket` and `local_path`. Servers can attach typed
+per-connection state with `connection_extension_factory(...)`; handlers retrieve it with
 `request.connection.extension::<T>()`.
 
 ## Responses
@@ -84,4 +86,3 @@ concurrently for one raw TCP connection. Streaming request bodies use
 `request_body_channel_capacity` for backpressure between socket reads and the
 handler, and declared streaming body bytes are reserved against the memory
 budget until the streaming request finishes.
-

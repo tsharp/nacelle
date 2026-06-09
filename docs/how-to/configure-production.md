@@ -9,6 +9,7 @@ Recommended presets:
 - Proxy-aware HTTP: configure `NacelleHttpPolicy::with_trusted_proxy_ips(...)` only with known proxy addresses before allowing `Forwarded` or `X-Forwarded-For` to affect per-peer request limits or request metadata.
 - Direct HTTPS listener: enable `http,tls`, load certificate/key material through `NacelleTlsConfig`, configure an SNI allowlist with `from_pem_with_allowed_server_names` or `from_der_with_allowed_server_names`, set a short TLS handshake timeout, configure `max_connections_per_peer` and `max_connection_opens_per_peer_per_second`, enable HTTP access logs, and attach `NacelleHttpPolicy` with Host, method, URI, header, security-header, and per-peer request-rate limits.
 - Direct raw TCP TLS listener: enable `raw_tcp,tls` with `NacelleTlsConfig` or `raw_tcp,openssl` with `NacelleOpenSslConfig`, and keep protocol-level authentication/authorization in the application protocol.
+- Unix socket listener: enable `raw_tcp` on Unix and call `serve_unix(...)` or `NacelleHost::enable_unix_socket(...)`; manage stale socket-file cleanup and filesystem permissions outside Nacelle.
 - Local load-test/autodeploy HTTPS: enable `tls-self-signed` and call `NacelleTlsConfig::self_signed(...)`; do not treat generated certificates as a public trust or rotation strategy.
 - High concurrency: reduce raw TCP buffer capacities before raising `max_connections`.
 

@@ -4,7 +4,7 @@
 
 The current transports are:
 
-- `raw_tcp` (default) — custom protocol transport over TCP
+- `raw_tcp` (default) — custom protocol transport over TCP and Unix sockets
 - `reference_protocol` — optional length-delimited example protocol
 - `http` — Hyper HTTP/1 server transport
 - `tls` — provider-neutral TLS capability shared by TLS backends
@@ -64,6 +64,16 @@ let server = RawTcpServer::<FrameRequest, ()>::builder()
 server.serve_tcp("127.0.0.1:8080".parse()?).await?;
 ```
 
+On Unix, the same raw protocol can listen on a Unix domain socket:
+
+```rust
+server.serve_unix("/tmp/nacelle.sock").await?;
+```
+
+Nacelle does not remove existing socket files before binding; clear stale paths
+and set directory/file permissions in your process supervisor or deployment
+script.
+
 ## Shared Application State
 
 Nacelle does not bake in service registries. Capture your app state in the concrete handler:
@@ -96,7 +106,7 @@ let handler = handler_fn({
 ## Connection Metadata
 
 Every handler receives `request.connection`, which includes transport, peer
-address, local address, effective peer IP, and TLS metadata when available. Raw
+address, local address, local Unix socket path, effective peer IP, and TLS metadata when available. Raw
 TCP servers can attach a typed per-connection extension at accept time:
 
 ```rust

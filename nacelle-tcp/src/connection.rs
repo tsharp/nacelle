@@ -13,7 +13,7 @@ use nacelle_core::request::{
     NacelleBody, NacelleConnectionMeta, NacelleRequest, NacelleRequestMeta, RequestMetadata,
 };
 use nacelle_core::response::NacelleResponse;
-use nacelle_core::telemetry::{NacelleTelemetry, NacelleTransport};
+use nacelle_core::telemetry::NacelleTelemetry;
 
 /// Drive one raw TCP framed connection and coalesce completed responses into writes.
 pub async fn serve_connection<Req, P, H, R, W>(
@@ -67,7 +67,8 @@ where
     let _buffer_reservation = reserve_connection_buffers(&config, &runtime_state)?;
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     let mut write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
-    telemetry.connection_opened(NacelleTransport::RawTcp);
+    let transport = connection.transport;
+    telemetry.connection_opened(transport);
 
     let result: Result<(), NacelleError> = async {
         'conn: loop {
@@ -177,7 +178,8 @@ where
     let _buffer_reservation = reserve_connection_buffers(&config, &runtime_state)?;
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     let mut write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
-    telemetry.connection_opened(NacelleTransport::RawTcp);
+    let transport = connection.transport;
+    telemetry.connection_opened(transport);
 
     let result: Result<(), NacelleError> = async {
         'conn: loop {
@@ -281,7 +283,8 @@ where
     let _buffer_reservation = reserve_connection_buffers(&config, &runtime_state)?;
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     let mut write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
-    telemetry.connection_opened(NacelleTransport::RawTcp);
+    let transport = connection.transport;
+    telemetry.connection_opened(transport);
 
     let result: Result<(), NacelleError> = async {
         'conn: loop {
@@ -367,7 +370,7 @@ where
     if decoded.body_len > runtime_state.limits().max_request_body_bytes {
         let error = NacelleError::ResourceLimit("request_body_bytes");
         telemetry.request_failed(
-            NacelleTransport::RawTcp,
+            connection.transport,
             Some(opcode),
             request_started.elapsed(),
             &error,
@@ -445,7 +448,7 @@ where
             )
             .await?;
             telemetry.request_completed(
-                NacelleTransport::RawTcp,
+                connection.transport,
                 Some(opcode),
                 request_bytes,
                 write_buf.len().saturating_sub(prev_response_len),
@@ -455,7 +458,7 @@ where
         Err(error) => {
             let prev_response_len = write_buf.len();
             telemetry.request_failed(
-                NacelleTransport::RawTcp,
+                connection.transport,
                 Some(opcode),
                 request_started.elapsed(),
                 &error,
@@ -468,7 +471,7 @@ where
                 config.response_buffer_capacity,
             )?;
             telemetry.request_completed(
-                NacelleTransport::RawTcp,
+                connection.transport,
                 Some(opcode),
                 request_bytes,
                 write_buf.len().saturating_sub(prev_response_len),

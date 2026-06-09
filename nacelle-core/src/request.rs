@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -57,6 +58,7 @@ pub struct NacelleConnectionMeta {
     pub peer_addr: Option<SocketAddr>,
     pub peer_ip: Option<IpAddr>,
     pub local_addr: Option<SocketAddr>,
+    pub local_path: Option<PathBuf>,
     pub tls: Option<NacelleConnectionTlsMeta>,
     extension: Option<NacelleConnectionExtension>,
 }
@@ -68,6 +70,7 @@ impl fmt::Debug for NacelleConnectionMeta {
             .field("peer_addr", &self.peer_addr)
             .field("peer_ip", &self.peer_ip)
             .field("local_addr", &self.local_addr)
+            .field("local_path", &self.local_path)
             .field("tls", &self.tls)
             .field("extension", &self.extension.as_ref().map(|_| "<extension>"))
             .finish()
@@ -81,6 +84,19 @@ impl NacelleConnectionMeta {
             peer_ip: peer_addr.map(|addr| addr.ip()),
             peer_addr,
             local_addr,
+            local_path: None,
+            tls: None,
+            extension: None,
+        }
+    }
+
+    pub fn unix_socket(local_path: Option<PathBuf>) -> Self {
+        Self {
+            transport: NacelleTransport::UnixSocket,
+            peer_addr: None,
+            peer_ip: None,
+            local_addr: None,
+            local_path,
             tls: None,
             extension: None,
         }
@@ -92,6 +108,7 @@ impl NacelleConnectionMeta {
             peer_addr: None,
             peer_ip,
             local_addr: None,
+            local_path: None,
             tls: None,
             extension: None,
         }
@@ -356,5 +373,22 @@ impl Stream for NacelleBody {
                 other => other,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unix_socket_connection_meta_sets_transport_and_path() {
+        let path = PathBuf::from("/tmp/nacelle.sock");
+        let meta = NacelleConnectionMeta::unix_socket(Some(path.clone()));
+
+        assert_eq!(meta.transport, NacelleTransport::UnixSocket);
+        assert_eq!(meta.local_path, Some(path));
+        assert_eq!(meta.peer_addr, None);
+        assert_eq!(meta.peer_ip, None);
+        assert_eq!(meta.local_addr, None);
     }
 }

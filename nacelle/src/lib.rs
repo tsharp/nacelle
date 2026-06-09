@@ -46,6 +46,11 @@ pub mod runtime {
         serve_tcp_tls, serve_tcp_tls_listener_with_shutdown_deadline, serve_tcp_tls_with_shutdown,
         serve_tcp_tls_with_shutdown_deadline, serve_tcp_tls_with_shutdown_timeout,
     };
+    #[cfg(all(feature = "raw_tcp", unix))]
+    pub use nacelle_tcp::runtime::{
+        serve_unix, serve_unix_listener_with_shutdown_deadline, serve_unix_with_shutdown,
+        serve_unix_with_shutdown_deadline, serve_unix_with_shutdown_timeout,
+    };
 }
 #[cfg(any(feature = "tls", feature = "openssl"))]
 pub use nacelle_core::tls;

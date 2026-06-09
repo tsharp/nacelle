@@ -1,5 +1,7 @@
 use std::marker::PhantomData;
 use std::net::SocketAddr;
+#[cfg(unix)]
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::connection::{serve_connection_with_connection_meta, serve_stream_with_connection_meta};
@@ -234,6 +236,41 @@ where
         crate::runtime::serve_tcp_with_shutdown_timeout(
             Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
             addr,
+            shutdown,
+            drain_timeout,
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    pub async fn serve_unix(&self, path: impl AsRef<Path>) -> Result<(), NacelleError> {
+        crate::runtime::serve_unix(Arc::<NacelleServer<Req, P, H>>::new(self.clone()), path).await
+    }
+
+    #[cfg(unix)]
+    pub async fn serve_unix_with_shutdown(
+        &self,
+        path: impl AsRef<Path>,
+        shutdown: nacelle_core::lifecycle::NacelleShutdownToken,
+    ) -> Result<(), NacelleError> {
+        crate::runtime::serve_unix_with_shutdown(
+            Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
+            path,
+            shutdown,
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    pub async fn serve_unix_with_shutdown_timeout(
+        &self,
+        path: impl AsRef<Path>,
+        shutdown: nacelle_core::lifecycle::NacelleShutdownToken,
+        drain_timeout: std::time::Duration,
+    ) -> Result<(), NacelleError> {
+        crate::runtime::serve_unix_with_shutdown_timeout(
+            Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
+            path,
             shutdown,
             drain_timeout,
         )

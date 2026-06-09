@@ -5,7 +5,7 @@ Nacelle is organized as a small core plus protocol-specific transport crates.
 ## Crate Layout
 
 - `nacelle-core`: shared handler, request/response body, limits, lifecycle, telemetry, and TLS primitives.
-- `nacelle-tcp`: raw TCP server, protocol trait, connection loop, and listener runtime.
+- `nacelle-tcp`: raw TCP/Unix socket server, protocol trait, connection loop, and listener runtime.
 - `nacelle-http`: Hyper HTTP/1 server, HTTP request policy, and HTTP TLS listener integration.
 - `nacelle`: convenience crate that re-exports the split crates and owns the reference length-delimited protocol.
 
@@ -31,13 +31,14 @@ listener
   -> response body encode/stream
 ```
 
-Raw TCP uses the `nacelle-tcp` `Protocol<Req>` trait to decode request heads and
-encode response frames. HTTP uses `nacelle-http` with Hyper HTTP/1 and maps
-requests into the same `NacelleRequest` / `NacelleResponse` shape.
+Raw TCP and Unix socket listeners use the `nacelle-tcp` `Protocol<Req>` trait to
+decode request heads and encode response frames. HTTP uses `nacelle-http` with
+Hyper HTTP/1 and maps requests into the same `NacelleRequest` /
+`NacelleResponse` shape.
 
 `NacelleRequest::connection` carries transport, peer address, local address,
-effective peer IP, TLS metadata, and an optional typed extension. Raw TCP
-servers can populate that extension with
+local Unix socket path, effective peer IP, TLS metadata, and an optional typed
+extension. Raw protocol servers can populate that extension with
 `connection_extension_factory(...)` for auth/session state derived at accept or
 handshake time.
 
