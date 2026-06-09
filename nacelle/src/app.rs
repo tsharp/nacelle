@@ -1,6 +1,6 @@
 #[cfg(feature = "tcp")]
 use std::net::SocketAddr;
-#[cfg(unix)]
+#[cfg(all(feature = "tcp", unix))]
 use std::path::Path;
 
 use nacelle_core::config::NacelleConfig;
