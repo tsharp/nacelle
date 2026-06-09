@@ -75,6 +75,17 @@ impl NacelleShutdown {
             receiver: self.sender.subscribe(),
         }
     }
+
+    #[cfg(feature = "tokio-util")]
+    pub fn from_cancellation_token(token: tokio_util::sync::CancellationToken) -> Self {
+        let shutdown = Self::new();
+        let relay = shutdown.clone();
+        tokio::spawn(async move {
+            token.cancelled().await;
+            relay.shutdown();
+        });
+        shutdown
+    }
 }
 
 impl NacelleShutdownToken {
@@ -87,6 +98,11 @@ impl NacelleShutdownToken {
             return true;
         }
         self.receiver.changed().await.is_ok() && self.is_shutdown()
+    }
+
+    #[cfg(feature = "tokio-util")]
+    pub fn from_cancellation_token(token: tokio_util::sync::CancellationToken) -> Self {
+        NacelleShutdown::from_cancellation_token(token).token()
     }
 }
 
@@ -101,6 +117,20 @@ mod tests {
         let observed = tokio::time::timeout(std::time::Duration::from_millis(25), token.changed())
             .await
             .expect("already-shutdown token should not wait");
+        assert!(observed);
+    }
+
+    #[cfg(feature = "tokio-util")]
+    #[tokio::test]
+    async fn cancellation_token_triggers_shutdown_token() {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let mut token = super::NacelleShutdownToken::from_cancellation_token(cancellation.clone());
+
+        cancellation.cancel();
+
+        let observed = tokio::time::timeout(std::time::Duration::from_secs(1), token.changed())
+            .await
+            .expect("cancellation should trigger shutdown");
         assert!(observed);
     }
 }

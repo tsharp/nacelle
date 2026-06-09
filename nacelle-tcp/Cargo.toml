@@ -2,7 +2,7 @@
 name = "nacelle-tcp"
 version = "0.1.0"
 edition = "2024"
-description = "Raw TCP transport and protocol runtime for Nacelle streaming handlers."
+description = "TCP transport and protocol runtime for Nacelle streaming handlers."
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -23,6 +23,7 @@ bytes = "1.10.1"
 nacelle-core = { path = "../nacelle-core" }
 openssl = { version = "0.10.79", optional = true }
 rustls = { version = "0.23.40", optional = true }
+socket2 = "0.6.1"
 tokio = { version = "1.47.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-openssl = { version = "0.6.5", optional = true }
 tokio-rustls = { version = "0.26.4", optional = true }

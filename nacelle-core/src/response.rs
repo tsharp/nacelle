@@ -3,7 +3,7 @@ use bytes::Bytes;
 use crate::request::NacelleBody;
 
 #[derive(Debug, Clone, Default)]
-pub struct RawTcpResponseMeta {
+pub struct TcpResponseMeta {
     pub request_id: Option<u64>,
     pub opcode: Option<u64>,
 }
@@ -17,15 +17,15 @@ pub struct HttpResponseMeta {
 
 #[derive(Debug, Clone)]
 pub enum NacelleResponseMeta {
-    RawTcp(RawTcpResponseMeta),
+    Tcp(TcpResponseMeta),
     #[cfg(feature = "http-types")]
     Http(HttpResponseMeta),
 }
 
 impl NacelleResponseMeta {
-    pub fn raw_tcp(&self) -> Option<&RawTcpResponseMeta> {
+    pub fn tcp(&self) -> Option<&TcpResponseMeta> {
         match self {
-            Self::RawTcp(meta) => Some(meta),
+            Self::Tcp(meta) => Some(meta),
             #[cfg(feature = "http-types")]
             Self::Http(_) => None,
         }
@@ -38,26 +38,26 @@ pub struct NacelleResponse {
 }
 
 impl NacelleResponse {
-    pub fn raw_tcp(body: NacelleBody) -> Self {
+    pub fn tcp(body: NacelleBody) -> Self {
         Self {
-            meta: NacelleResponseMeta::RawTcp(RawTcpResponseMeta::default()),
+            meta: NacelleResponseMeta::Tcp(TcpResponseMeta::default()),
             body,
         }
     }
 
-    pub fn raw_tcp_with_meta(meta: RawTcpResponseMeta, body: NacelleBody) -> Self {
+    pub fn tcp_with_meta(meta: TcpResponseMeta, body: NacelleBody) -> Self {
         Self {
-            meta: NacelleResponseMeta::RawTcp(meta),
+            meta: NacelleResponseMeta::Tcp(meta),
             body,
         }
     }
 
-    pub fn raw_tcp_bytes(bytes: impl Into<Bytes>) -> Self {
-        Self::raw_tcp(NacelleBody::bytes(bytes))
+    pub fn tcp_bytes(bytes: impl Into<Bytes>) -> Self {
+        Self::tcp(NacelleBody::bytes(bytes))
     }
 
-    pub fn empty_raw_tcp() -> Self {
-        Self::raw_tcp(NacelleBody::empty())
+    pub fn empty_tcp() -> Self {
+        Self::tcp(NacelleBody::empty())
     }
 
     #[cfg(feature = "http-types")]

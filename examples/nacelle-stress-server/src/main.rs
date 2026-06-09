@@ -1,7 +1,7 @@
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-#[path = "../shared.rs"]
+#[path = "shared.rs"]
 mod shared;
 use shared::{
     StressServerStats, StressServerStatsSnapshot, build_server, configure_allocator, parse_args,
@@ -15,12 +15,11 @@ use std::time::Duration;
 
 #[cfg(feature = "tls-self-signed")]
 use nacelle::NacelleTlsConfig;
-use nacelle::{FrameRequest, Handler, LengthDelimitedProtocol, NacelleError, RawTcpServer};
+use nacelle::{FrameRequest, Handler, LengthDelimitedProtocol, NacelleError, TcpServer};
+use nacelle_stress_common::make_tcp_socket;
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
-
-const SOCKET_BUFFER_BYTES: u32 = 4 * 1024 * 1024;
 
 #[cfg(feature = "tls-self-signed")]
 type StressTlsConfig = NacelleTlsConfig;
@@ -37,62 +36,6 @@ fn clone_tls_config(tls_config: &Option<StressTlsConfig>) -> Option<StressTlsCon
     *tls_config
 }
 
-// ---------------------------------------------------------------------------
-// Platform-specific low-latency socket helpers
-// ---------------------------------------------------------------------------
-
-/// Enables the Windows loopback fast-path (SIO_LOOPBACK_FAST_PATH) on a socket.
-#[cfg(windows)]
-fn set_loopback_fast_path(raw: std::os::windows::io::RawSocket) {
-    unsafe extern "system" {
-        fn WSAIoctl(
-            s: usize,
-            dw_io_control_code: u32,
-            lp_vb_in_buffer: *const std::ffi::c_void,
-            cb_in_buffer: u32,
-            lp_vb_out_buffer: *mut std::ffi::c_void,
-            cb_out_buffer: u32,
-            lpcb_bytes_returned: *mut u32,
-            lp_overlapped: *mut std::ffi::c_void,
-            lp_completion_routine: Option<unsafe extern "system" fn()>,
-        ) -> i32;
-    }
-
-    const SIO_LOOPBACK_FAST_PATH: u32 = 0x9800_0010;
-    let enable: u32 = 1;
-    let mut bytes_returned: u32 = 0;
-
-    let _ = unsafe {
-        WSAIoctl(
-            raw as usize,
-            SIO_LOOPBACK_FAST_PATH,
-            (&enable) as *const u32 as *const std::ffi::c_void,
-            std::mem::size_of::<u32>() as u32,
-            std::ptr::null_mut(),
-            0,
-            &mut bytes_returned,
-            std::ptr::null_mut(),
-            None,
-        )
-    };
-}
-
-fn new_raw_socket(addr: &SocketAddr) -> Result<TcpSocket, std::io::Error> {
-    let socket = if addr.is_ipv4() {
-        TcpSocket::new_v4()?
-    } else {
-        TcpSocket::new_v6()?
-    };
-    socket.set_recv_buffer_size(SOCKET_BUFFER_BYTES)?;
-    socket.set_send_buffer_size(SOCKET_BUFFER_BYTES)?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawSocket;
-        set_loopback_fast_path(socket.as_raw_socket());
-    }
-    Ok(socket)
-}
-
 /// Creates a server-side TCP socket ready for `bind()` + `listen()`.
 ///
 /// When `reuseport` is true and the platform is Linux, `SO_REUSEPORT` is set so
@@ -102,7 +45,7 @@ fn make_server_socket(
     addr: &SocketAddr,
     #[cfg_attr(not(target_os = "linux"), allow(unused_variables))] reuseport: bool,
 ) -> Result<TcpSocket, std::io::Error> {
-    let socket = new_raw_socket(addr)?;
+    let socket = make_tcp_socket(addr)?;
     #[cfg(target_os = "linux")]
     if reuseport {
         socket.set_reuseport(true)?;
@@ -116,7 +59,7 @@ fn make_server_socket(
 
 async fn run_server<H>(
     listener: TcpListener,
-    server: RawTcpServer<FrameRequest, LengthDelimitedProtocol, H>,
+    server: TcpServer<FrameRequest, LengthDelimitedProtocol, H>,
     tls_config: Option<StressTlsConfig>,
     mut shutdown: watch::Receiver<bool>,
     stats: Arc<StressServerStats>,
@@ -150,7 +93,7 @@ where
 }
 
 async fn serve_accepted_stream<H>(
-    server: RawTcpServer<FrameRequest, LengthDelimitedProtocol, H>,
+    server: TcpServer<FrameRequest, LengthDelimitedProtocol, H>,
     stream: TcpStream,
     tls_config: Option<StressTlsConfig>,
 ) -> Result<(), NacelleError>
@@ -179,7 +122,7 @@ where
 
 fn spawn_server_thread<H>(
     listener: TcpListener,
-    server: RawTcpServer<FrameRequest, LengthDelimitedProtocol, H>,
+    server: TcpServer<FrameRequest, LengthDelimitedProtocol, H>,
     tls_config: Option<StressTlsConfig>,
     shutdown: watch::Receiver<bool>,
     stats: Arc<StressServerStats>,
@@ -211,7 +154,7 @@ fn build_tls_config(
     #[cfg(not(feature = "tls-self-signed"))]
     {
         if config.tls_self_signed {
-            return Err("tokio-server was built without tls-self-signed support".into());
+            return Err("nacelle-stress-server was built without tls-self-signed support".into());
         }
         Ok(None)
     }
@@ -445,9 +388,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         listen_addr,
         n_server_threads,
         if config.tls_self_signed {
-            "raw-tcp-tls"
+            "tcp-tls"
         } else {
-            "raw-tcp"
+            "tcp"
         },
     );
 

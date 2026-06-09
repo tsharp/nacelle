@@ -32,7 +32,7 @@ mod tests {
     use tower::service_fn;
 
     use crate::request::{
-        NacelleBody, NacelleConnectionMeta, NacelleRequest, NacelleRequestMeta, RawTcpRequestMeta,
+        NacelleBody, NacelleConnectionMeta, NacelleRequest, NacelleRequestMeta, TcpRequestMeta,
     };
 
     use super::*;
@@ -44,14 +44,14 @@ mod tests {
             while let Some(chunk) = request.body.next_chunk().await {
                 body.extend_from_slice(&chunk?);
             }
-            Ok::<_, NacelleError>(NacelleResponse::raw_tcp_bytes(Bytes::from(body)))
+            Ok::<_, NacelleError>(NacelleResponse::tcp_bytes(Bytes::from(body)))
         });
 
         let handler = handler_from_tower_service::<_, NacelleError>(service);
         let response = handler
             .call(NacelleRequest {
-                connection: NacelleConnectionMeta::raw_tcp(None, None),
-                meta: NacelleRequestMeta::RawTcp(RawTcpRequestMeta {
+                connection: NacelleConnectionMeta::tcp(None, None),
+                meta: NacelleRequestMeta::Tcp(TcpRequestMeta {
                     request_id: Some(1),
                     opcode: 1,
                     flags: 0,

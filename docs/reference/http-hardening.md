@@ -37,9 +37,9 @@ so configure the SNI allowlist and `NacelleHttpPolicy::with_allowed_hosts(...)`
 with the same service names unless you intentionally need a narrower Host
 policy.
 
-`NacelleTlsConfig` is the Rustls config shared with raw TCP TLS.
-`NacelleTlsProvider` reports `Rustls` for that config and `OpenSsl` for the raw
-TCP OpenSSL backend. HTTP TLS currently uses Rustls.
+`NacelleTlsConfig` is the Rustls config shared with TCP TLS.
+`NacelleTlsProvider` reports `Rustls` for that config and `OpenSsl` for the TCP
+OpenSSL backend. HTTP TLS currently uses Rustls.
 
 Enable `HyperServer::with_access_log(true)` when direct edge deployments need structured request logs. Access events are emitted with target `nacelle::access` and include transport, method, URI, status, request bytes, elapsed microseconds, and rejection reason.
 

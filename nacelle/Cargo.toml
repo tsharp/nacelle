@@ -2,7 +2,7 @@
 name = "nacelle"
 version = "0.1.0"
 edition = "2024"
-description = "Convenience crate for Nacelle streaming handlers, transport re-exports, and the reference raw TCP protocol."
+description = "Convenience crate for Nacelle streaming handlers, transport re-exports, and the reference TCP protocol."
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
@@ -11,9 +11,10 @@ keywords = ["networking", "tokio", "http", "tcp"]
 categories = ["asynchronous", "network-programming"]
 
 [features]
-default = ["raw_tcp"]
-raw_tcp = ["dep:nacelle-tcp"]
-reference_protocol = ["raw_tcp"]
+default = ["tcp"]
+tcp = ["dep:nacelle-tcp"]
+raw_tcp = ["tcp"]
+reference_protocol = ["tcp"]
 http = ["dep:http", "dep:nacelle-http", "nacelle-core/http-types"]
 tls = ["nacelle-core/tls", "nacelle-http?/tls", "nacelle-tcp?/tls"]
 rustls = ["tls", "nacelle-core/rustls", "nacelle-http?/rustls", "nacelle-tcp?/rustls"]
@@ -21,6 +22,7 @@ openssl = ["tls", "nacelle-core/openssl", "nacelle-tcp?/openssl"]
 openssl-vendored = ["openssl", "nacelle-core/openssl-vendored", "nacelle-tcp?/openssl-vendored"]
 tls-self-signed = ["rustls", "nacelle-core/tls-self-signed", "nacelle-http?/tls-self-signed", "nacelle-tcp?/tls-self-signed"]
 otel = ["nacelle-core/otel"]
+tokio-util = ["nacelle-core/tokio-util"]
 tower = ["nacelle-core/tower"]
 bench = []
 fuzzing = []

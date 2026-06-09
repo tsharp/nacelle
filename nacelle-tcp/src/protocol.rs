@@ -2,7 +2,7 @@ use bytes::{Bytes, BytesMut};
 
 use nacelle_core::error::NacelleError;
 use nacelle_core::request::RequestMetadata;
-use nacelle_core::response::RawTcpResponseMeta;
+use nacelle_core::response::TcpResponseMeta;
 
 #[derive(Debug)]
 pub struct DecodedRequest<Req> {
@@ -27,10 +27,10 @@ where
 
     fn error_context(&self, req: &Req) -> Self::ErrorContext;
 
-    fn apply_raw_tcp_response_meta(
+    fn apply_tcp_response_meta(
         &self,
         _context: &mut Self::ResponseContext,
-        _meta: &RawTcpResponseMeta,
+        _meta: &TcpResponseMeta,
     ) {
     }
 

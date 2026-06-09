@@ -5,7 +5,7 @@ Nacelle is organized as a small core plus protocol-specific transport crates.
 ## Crate Layout
 
 - `nacelle-core`: shared handler, request/response body, limits, lifecycle, telemetry, and TLS primitives.
-- `nacelle-tcp`: raw TCP/Unix socket server, protocol trait, connection loop, and listener runtime.
+- `nacelle-tcp`: TCP/Unix socket server, protocol trait, connection loop, and listener runtime.
 - `nacelle-http`: Hyper HTTP/1 server, HTTP request policy, and HTTP TLS listener integration.
 - `nacelle`: convenience crate that re-exports the split crates and owns the reference length-delimited protocol.
 
@@ -15,7 +15,7 @@ umbrella `nacelle` crate.
 
 TLS lives in `nacelle-core` because the configuration and provider metadata are
 shared. `tls` is provider-neutral. `rustls` enables the Rustls provider used by
-HTTP and raw TCP. `openssl` enables the OpenSSL provider for raw TCP without
+HTTP and TCP. `openssl` enables the OpenSSL provider for TCP without
 selecting Rustls. Both providers feed `NacelleTlsProvider` and per-connection
 TLS metadata.
 
@@ -31,7 +31,7 @@ listener
   -> response body encode/stream
 ```
 
-Raw TCP and Unix socket listeners use the `nacelle-tcp` `Protocol<Req>` trait to
+TCP and Unix socket listeners use the `nacelle-tcp` `Protocol<Req>` trait to
 decode request heads and encode response frames. HTTP uses `nacelle-http` with
 Hyper HTTP/1 and maps requests into the same `NacelleRequest` /
 `NacelleResponse` shape.
@@ -44,7 +44,7 @@ handshake time.
 
 HTTP-specific edge policy remains in `nacelle-http`: Host, method, URI/header
 shape checks, per-peer request rate limits, access logging, and security header
-injection. Raw TCP keeps protocol semantics in the protocol implementation and
+injection. TCP keeps protocol semantics in the protocol implementation and
 shared lifecycle/limit enforcement in core.
 
 ## Runtime State
@@ -61,10 +61,10 @@ bounded defaults.
 `NacelleBody` has three internal shapes:
 
 - empty/single chunk for fast small responses
-- buffered chunks for decoded raw TCP bodies already in memory
+- buffered chunks for decoded TCP bodies already in memory
 - streaming channel for request/response bodies that move asynchronously
 
-Raw TCP large request bodies reserve their declared length while streaming. HTTP
+TCP large request bodies reserve their declared length while streaming. HTTP
 request bodies reserve `Content-Length` when Hyper exposes a bounded size hint.
 
 ## Shutdown

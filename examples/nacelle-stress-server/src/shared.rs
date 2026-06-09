@@ -12,11 +12,11 @@ use std::time::Instant;
 use bytes::Bytes;
 use nacelle::{
     FrameRequest, Handler, LengthDelimitedProtocol, NacelleConfig, NacelleError, NacelleRequest,
-    NacelleResponse, NacelleRuntimeState, RawTcpServer, handler_fn,
+    NacelleResponse, NacelleRuntimeState, TcpServer, handler_fn,
 };
+use nacelle_stress_common::STRESS_OPCODE;
 use serde::Deserialize;
 
-pub const STRESS_OPCODE: u64 = 1;
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
 
 #[derive(Debug)]
@@ -385,10 +385,10 @@ pub fn configure_allocator(low_memory: bool) {
 pub fn build_server(
     config: &ServerConfig,
     stats: Arc<StressServerStats>,
-) -> Result<RawTcpServer<FrameRequest, LengthDelimitedProtocol, impl Handler>, NacelleError> {
+) -> Result<TcpServer<FrameRequest, LengthDelimitedProtocol, impl Handler>, NacelleError> {
     let response_payload = Bytes::from(vec![0x5A; config.response_bytes]);
     let stats_enabled = stats.enabled();
-    RawTcpServer::<FrameRequest, ()>::builder()
+    TcpServer::<FrameRequest, ()>::builder()
         .protocol(LengthDelimitedProtocol)
         .config(
             NacelleConfig::default()
@@ -403,7 +403,7 @@ pub fn build_server(
             let stats = stats.clone();
             async move {
                 if !stats_enabled {
-                    let opcode = request.raw_tcp_opcode().unwrap_or_default();
+                    let opcode = request.tcp_opcode().unwrap_or_default();
                     while let Some(chunk) = request.body.next_chunk().await {
                         let _ = chunk?;
                     }
@@ -413,11 +413,11 @@ pub fn build_server(
                             opcode
                         ))));
                     }
-                    return Ok(NacelleResponse::raw_tcp_bytes(response_payload));
+                    return Ok(NacelleResponse::tcp_bytes(response_payload));
                 }
 
                 let request_stats = stats.start_request();
-                let opcode = request.raw_tcp_opcode().unwrap_or_default();
+                let opcode = request.tcp_opcode().unwrap_or_default();
                 let mut request_body_bytes = 0_u64;
                 while let Some(chunk) = request.body.next_chunk().await {
                     let chunk = match chunk {
@@ -437,7 +437,7 @@ pub fn build_server(
                     ))));
                 }
                 request_stats.record_completed(request_body_bytes, response_payload.len() as u64);
-                Ok(NacelleResponse::raw_tcp_bytes(response_payload))
+                Ok(NacelleResponse::tcp_bytes(response_payload))
             }
         }))
         .build()
@@ -707,7 +707,7 @@ pub fn print_help(runtime: &str) {
                                                        MIMALLOC_ARENA_EAGER_COMMIT=0\n\
            --stats                                   Enable server-side per-request atomic counters.\n\
                                                      Leave disabled for peak throughput benchmarks.\n\
-           --tls-self-signed                         Serve raw TCP over TLS with an ephemeral\n\
+           --tls-self-signed                         Serve TCP over TLS with an ephemeral\n\
                                                      self-signed certificate. The stress server\n\
                                                      default build includes this capability, but\n\
                                                      plain TCP remains the runtime default.\n\

@@ -4,8 +4,9 @@ members = [
     "nacelle-tcp",
     "nacelle-http",
     "nacelle",
-    "nacelle-stress-test",
-    "nacelle-stress-server",
+    "examples/nacelle-stress-common",
+    "examples/nacelle-stress-test",
+    "examples/nacelle-stress-server",
 ]
 resolver = "2"
 

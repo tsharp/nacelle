@@ -1,15 +1,15 @@
-//! Streaming application handlers across raw TCP and HTTP transports.
+//! Streaming application handlers across TCP and HTTP transports.
 //!
 //! Nacelle centers application code around one async handler shape:
 //!
 //! ```rust,no_run
 //! # use nacelle::{NacelleError, NacelleRequest, NacelleResponse};
 //! async fn handle(request: NacelleRequest) -> Result<NacelleResponse, NacelleError> {
-//!     Ok(NacelleResponse::raw_tcp(request.body))
+//!     Ok(NacelleResponse::tcp(request.body))
 //! }
 //! ```
 //!
-//! Use [`handler_fn`] for simple services, [`RawTcpServer`] for custom raw TCP
+//! Use [`handler_fn`] for simple services, [`TcpServer`] for custom TCP
 //! protocols, [`HyperServer`] for HTTP/1, and [`NacelleHost`] when one process
 //! owns several listeners with shared limits.
 //!
@@ -20,9 +20,10 @@
 //! Additional operational notes live in the repository `docs/` directory.
 
 pub use nacelle_core::{config, error, handler, lifecycle, limits, request, response, telemetry};
-#[cfg(feature = "raw_tcp")]
+#[cfg(feature = "tcp")]
 pub use nacelle_tcp::{connection, protocol, server};
 
+pub mod app;
 pub mod host;
 #[cfg(feature = "http")]
 pub use nacelle_http::server as http_server;
@@ -30,25 +31,36 @@ pub use nacelle_http::server as http_server;
 pub mod reference_protocol;
 pub mod runtime {
     pub use nacelle_core::runtime::*;
-    #[cfg(feature = "raw_tcp")]
+    #[cfg(feature = "tcp")]
     pub use nacelle_tcp::runtime::{
-        serve_tcp, serve_tcp_listener_with_shutdown_deadline, serve_tcp_with_shutdown,
+        serve_tcp, serve_tcp_listener_with_options_and_shutdown_deadline,
+        serve_tcp_listener_with_shutdown_deadline, serve_tcp_with_options,
+        serve_tcp_with_options_and_shutdown, serve_tcp_with_options_and_shutdown_deadline,
+        serve_tcp_with_options_and_shutdown_timeout, serve_tcp_with_shutdown,
         serve_tcp_with_shutdown_deadline, serve_tcp_with_shutdown_timeout,
     };
-    #[cfg(all(feature = "raw_tcp", feature = "openssl"))]
+    #[cfg(all(feature = "tcp", feature = "openssl"))]
     pub use nacelle_tcp::runtime::{
         serve_tcp_openssl, serve_tcp_openssl_listener_with_shutdown_deadline,
         serve_tcp_openssl_with_shutdown, serve_tcp_openssl_with_shutdown_deadline,
-        serve_tcp_openssl_with_shutdown_timeout,
+        serve_tcp_openssl_with_shutdown_timeout, serve_tcp_optional_openssl,
+        serve_tcp_optional_openssl_listener_with_options_and_shutdown_deadline,
+        serve_tcp_optional_openssl_with_options,
+        serve_tcp_optional_openssl_with_options_and_shutdown,
+        serve_tcp_optional_openssl_with_options_and_shutdown_deadline,
+        serve_tcp_optional_openssl_with_options_and_shutdown_timeout,
+        serve_tcp_optional_openssl_with_shutdown, serve_tcp_optional_openssl_with_shutdown_timeout,
     };
-    #[cfg(all(feature = "raw_tcp", feature = "rustls"))]
+    #[cfg(all(feature = "tcp", feature = "rustls"))]
     pub use nacelle_tcp::runtime::{
         serve_tcp_tls, serve_tcp_tls_listener_with_shutdown_deadline, serve_tcp_tls_with_shutdown,
         serve_tcp_tls_with_shutdown_deadline, serve_tcp_tls_with_shutdown_timeout,
     };
-    #[cfg(all(feature = "raw_tcp", unix))]
+    #[cfg(all(feature = "tcp", unix))]
     pub use nacelle_tcp::runtime::{
-        serve_unix, serve_unix_listener_with_shutdown_deadline, serve_unix_with_shutdown,
+        serve_unix, serve_unix_listener_with_shutdown_deadline, serve_unix_with_options,
+        serve_unix_with_options_and_shutdown, serve_unix_with_options_and_shutdown_deadline,
+        serve_unix_with_options_and_shutdown_timeout, serve_unix_with_shutdown,
         serve_unix_with_shutdown_deadline, serve_unix_with_shutdown_timeout,
     };
 }
@@ -59,6 +71,7 @@ pub use nacelle_core::tower;
 #[cfg(feature = "reference_protocol")]
 pub mod util;
 
+pub use app::{NacelleApp, NacelleProtocols, serve};
 pub use host::NacelleHost;
 #[cfg(feature = "tls-self-signed")]
 pub use nacelle_core::NacelleGeneratedTlsConfig;
@@ -76,17 +89,19 @@ pub use nacelle_core::{
     NacelleConnectionTlsMeta, NacelleError, NacelleInMemoryTelemetrySink, NacelleLimits,
     NacelleRequest, NacelleRequestMeta, NacelleResponse, NacelleResponseMeta, NacelleRuntimeState,
     NacelleShutdown, NacelleShutdownToken, NacelleTelemetry, NacelleTelemetryEvent,
-    NacelleTelemetryEventKind, NacelleTelemetrySink, NacelleTransport, RawTcpRequestMeta,
-    RawTcpResponseMeta, RequestBodyMode, RequestMetadata, TrackedPermit, handler_fn,
+    NacelleTelemetryEventKind, NacelleTelemetrySink, NacelleTransport, RequestBodyMode,
+    RequestMetadata, TcpRequestMeta, TcpResponseMeta, TrackedPermit, handler_fn,
 };
 #[cfg(feature = "http")]
 pub use nacelle_core::{HttpRequestMeta, HttpResponseMeta};
 #[cfg(feature = "http")]
 pub use nacelle_http::{HyperServer, NacelleHttpPolicy};
-#[cfg(feature = "raw_tcp")]
+#[cfg(all(feature = "tcp", unix))]
+pub use nacelle_tcp::NacelleUnixSocketOptions;
+#[cfg(feature = "tcp")]
 pub use nacelle_tcp::{
-    DecodedRequest, NacelleServer, NacelleServerBuilder, Protocol, RawTcpServer, serve_connection,
-    serve_stream,
+    DecodedRequest, NacelleServer, NacelleServerBuilder, NacelleTcpKeepalive, NacelleTcpOptions,
+    NacelleTlsDetectionOptions, Protocol, TcpServer, serve_connection, serve_stream,
 };
 #[cfg(feature = "reference_protocol")]
 pub use reference_protocol::{

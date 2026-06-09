@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -e
-cd "$(dirname "$0")"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
 
 BIND="127.0.0.1:7878"
 SERVER_THREADS="$(nproc)"
@@ -75,14 +77,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Kill any stale instances
-pkill -f 'tokio-server' 2>/dev/null || true
+pkill -f 'nacelle-stress-server' 2>/dev/null || true
 sleep 0.2
-
-# Require pre-built artifacts; run ./build-all.sh first
-if [[ ! -x artifacts/tokio-server || ! -x artifacts/nacelle-stress-test ]]; then
-    echo "artifacts not found — run ./build-all.sh first"
-    exit 1
-fi
 
 SERVER_ARGS=(
     --bind "$BIND"
@@ -94,7 +90,7 @@ if [[ "$CONFIG_PATH" != "config.toml" && "$CONFIG_PATH" != "./config.toml" ]]; t
 fi
 
 # Start server in background
-./artifacts/tokio-server "${SERVER_ARGS[@]}" &
+cargo run --release --package nacelle-stress-server -- "${SERVER_ARGS[@]}" &
 SERVER_PID=$!
 trap 'kill $SERVER_PID 2>/dev/null' EXIT
 
@@ -106,7 +102,7 @@ for i in $(seq 1 50); do
     sleep 0.1
 done
 
-echo "--- tokio  threads=$SERVER_THREADS  connections=$CONNECTIONS  pipeline=$PIPELINE ---"
+echo "--- nacelle threads=$SERVER_THREADS connections=$CONNECTIONS pipeline=$PIPELINE ---"
 
 CLIENT_ARGS=(
     --addr "$BIND"
@@ -120,4 +116,4 @@ if [[ "$(effective_tls_self_signed)" == "true" ]]; then
     CLIENT_ARGS+=(--tls-insecure)
 fi
 
-./artifacts/nacelle-stress-test "${CLIENT_ARGS[@]}"
+cargo run --release --package nacelle-stress-test -- "${CLIENT_ARGS[@]}"

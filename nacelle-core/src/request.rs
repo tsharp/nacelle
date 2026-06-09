@@ -78,9 +78,9 @@ impl fmt::Debug for NacelleConnectionMeta {
 }
 
 impl NacelleConnectionMeta {
-    pub fn raw_tcp(peer_addr: Option<SocketAddr>, local_addr: Option<SocketAddr>) -> Self {
+    pub fn tcp(peer_addr: Option<SocketAddr>, local_addr: Option<SocketAddr>) -> Self {
         Self {
-            transport: NacelleTransport::RawTcp,
+            transport: NacelleTransport::Tcp,
             peer_ip: peer_addr.map(|addr| addr.ip()),
             peer_addr,
             local_addr,
@@ -140,7 +140,7 @@ impl NacelleConnectionMeta {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RawTcpRequestMeta {
+pub struct TcpRequestMeta {
     pub request_id: Option<u64>,
     pub opcode: u64,
     pub flags: u32,
@@ -158,7 +158,7 @@ pub struct HttpRequestMeta {
 
 #[derive(Debug, Clone)]
 pub enum NacelleRequestMeta {
-    RawTcp(RawTcpRequestMeta),
+    Tcp(TcpRequestMeta),
     #[cfg(feature = "http-types")]
     Http(HttpRequestMeta),
 }
@@ -166,8 +166,8 @@ pub enum NacelleRequestMeta {
 pub trait RequestMetadata: Send + 'static {
     fn opcode(&self) -> u64;
 
-    fn raw_tcp_meta(&self, body_len: usize) -> RawTcpRequestMeta {
-        RawTcpRequestMeta {
+    fn tcp_meta(&self, body_len: usize) -> TcpRequestMeta {
+        TcpRequestMeta {
             request_id: None,
             opcode: self.opcode(),
             flags: 0,
@@ -183,22 +183,22 @@ pub struct NacelleRequest {
 }
 
 impl NacelleRequest {
-    pub fn raw_tcp_meta(&self) -> Option<&RawTcpRequestMeta> {
+    pub fn tcp_meta(&self) -> Option<&TcpRequestMeta> {
         match &self.meta {
-            NacelleRequestMeta::RawTcp(meta) => Some(meta),
+            NacelleRequestMeta::Tcp(meta) => Some(meta),
             #[cfg(feature = "http-types")]
             NacelleRequestMeta::Http(_) => None,
         }
     }
 
-    pub fn raw_tcp_opcode(&self) -> Option<u64> {
-        self.raw_tcp_meta().map(|meta| meta.opcode)
+    pub fn tcp_opcode(&self) -> Option<u64> {
+        self.tcp_meta().map(|meta| meta.opcode)
     }
 
     #[cfg(feature = "http-types")]
     pub fn http_meta(&self) -> Option<&HttpRequestMeta> {
         match &self.meta {
-            NacelleRequestMeta::RawTcp(_) => None,
+            NacelleRequestMeta::Tcp(_) => None,
             NacelleRequestMeta::Http(meta) => Some(meta),
         }
     }

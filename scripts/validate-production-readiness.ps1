@@ -28,9 +28,10 @@ Invoke-Step "nacelle full tests" { cargo test -p nacelle --features reference_pr
 Invoke-Step "nacelle full clippy" { cargo clippy -p nacelle --features reference_protocol,http,tower,otel --all-targets -- -D warnings }
 Invoke-Step "nacelle http tests" { cargo test -p nacelle --no-default-features --features http --all-targets }
 Invoke-Step "nacelle tls tests" { cargo test -p nacelle --no-default-features --features tls --all-targets }
+Invoke-Step "nacelle raw_tcp compatibility clippy" { cargo clippy -p nacelle --no-default-features --features raw_tcp --all-targets -- -D warnings }
 Invoke-Step "nacelle self-signed tls tests" { cargo test -p nacelle --no-default-features --features tls-self-signed --all-targets }
 Invoke-Step "nacelle https self-signed tests" { cargo test -p nacelle --no-default-features --features http,tls-self-signed --all-targets }
-Invoke-Step "nacelle raw tcp self-signed tests" { cargo test -p nacelle --features reference_protocol,tls-self-signed --all-targets }
+Invoke-Step "nacelle TCP self-signed tests" { cargo test -p nacelle --features reference_protocol,tls-self-signed --all-targets }
 Invoke-Step "nacelle all-feature clippy" { cargo clippy -p nacelle --features reference_protocol,http,tower,otel,tls-self-signed --all-targets -- -D warnings }
 Invoke-Step "nacelle no-default tests" { cargo test -p nacelle --no-default-features --all-targets }
 Invoke-Step "stress client tests" { cargo test -p nacelle-stress-test --all-targets }
@@ -48,9 +49,9 @@ if ($LASTEXITCODE -eq 0) {
     throw "unsafe-libyaml is still present"
 }
 
-cargo tree -p nacelle --no-default-features --features raw_tcp,openssl -i rustls
+cargo tree -p nacelle --no-default-features --features tcp,openssl -i rustls
 if ($LASTEXITCODE -eq 0) {
-    throw "rustls is selected by the raw_tcp,openssl feature set"
+    throw "rustls is selected by the tcp,openssl feature set"
 }
 
 cargo tree --workspace --no-default-features -i rustls
