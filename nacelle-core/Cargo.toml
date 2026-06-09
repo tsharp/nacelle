@@ -19,6 +19,7 @@ openssl = ["tls", "dep:openssl"]
 openssl-vendored = ["openssl", "openssl/vendored"]
 tls-self-signed = ["rustls", "dep:rcgen"]
 otel = ["dep:opentelemetry"]
+tokio-util = ["dep:tokio-util"]
 tower = ["dep:tower"]
 
 [dependencies]
@@ -31,5 +32,6 @@ pem = { version = "3.0.6", optional = true }
 rcgen = { version = "0.14.8", optional = true }
 rustls = { version = "0.23.40", optional = true }
 tokio = { version = "1.47.1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7.17", optional = true }
 tower = { version = "0.5", features = ["util"], optional = true }
 tracing = "0.1.44"
