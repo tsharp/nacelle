@@ -14,9 +14,9 @@ use nacelle::{
     FrameRequest, Handler, LengthDelimitedProtocol, NacelleConfig, NacelleError, NacelleRequest,
     NacelleResponse, NacelleRuntimeState, TcpServer, handler_fn,
 };
+use nacelle_stress_common::STRESS_OPCODE;
 use serde::Deserialize;
 
-pub const STRESS_OPCODE: u64 = 1;
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
 
 #[derive(Debug)]

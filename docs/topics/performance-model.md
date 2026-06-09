@@ -31,7 +31,7 @@ Suggested RPS comparison:
 
 ```bash
 ./build-all.sh
-./run-tokio.sh --config nacelle-stress-server/configs/tcp.toml --server-threads 48 --connections 256 --pipeline 8 --duration-secs 30 --payload-bytes 256
+./run-tokio.sh --config examples/nacelle-stress-server/configs/tcp.toml --server-threads 48 --connections 256 --pipeline 8 --duration-secs 30 --payload-bytes 256
 ```
 
 The stress server defaults `stats_enabled = false` to avoid contended global
@@ -41,13 +41,13 @@ RPS.
 
 The checked-in root `config.toml` enables self-signed TCP TLS for local
 stress runs. For the plain TCP throughput baseline, use
-`nacelle-stress-server/configs/tcp.toml`. Compare TLS and non-TLS runs
+`examples/nacelle-stress-server/configs/tcp.toml`. Compare TLS and non-TLS runs
 separately:
 
 ```bash
-./run-tokio.sh --config nacelle-stress-server/configs/tcp.toml
-./run-tokio.sh --config nacelle-stress-server/configs/tcp-low-memory.toml
-./run-tokio.sh --config nacelle-stress-server/configs/tcp-tls.toml
+./run-tokio.sh --config examples/nacelle-stress-server/configs/tcp.toml
+./run-tokio.sh --config examples/nacelle-stress-server/configs/tcp-low-memory.toml
+./run-tokio.sh --config examples/nacelle-stress-server/configs/tcp-tls.toml
 ```
 
 The `run-tokio.sh` and `run-tokio.ps1` helpers apply root `config.toml` first,

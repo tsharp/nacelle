@@ -791,6 +791,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nacelle-stress-common"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "nacelle",
+ "tokio",
+]
+
+[[package]]
 name = "nacelle-stress-server"
 version = "0.1.0"
 dependencies = [
@@ -798,6 +807,7 @@ dependencies = [
  "libmimalloc-sys",
  "mimalloc",
  "nacelle",
+ "nacelle-stress-common",
  "serde",
  "tokio",
  "tokio-rustls",
@@ -811,6 +821,7 @@ dependencies = [
  "bytes",
  "mimalloc",
  "nacelle",
+ "nacelle-stress-common",
  "rustls",
  "tokio",
  "tokio-rustls",

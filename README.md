@@ -306,7 +306,7 @@ cargo run --release --package nacelle-stress-server --bin tokio-server
 
 # Or load server limits and buffer sizing from TOML:
 cargo run --release --package nacelle-stress-server --bin tokio-server -- \
-  --config nacelle-stress-server/config.example.toml
+  --config examples/nacelle-stress-server/config.example.toml
 
 # The stress server default build includes TCP TLS support. Plain TCP
 # remains the runtime default; add --tls-self-signed to serve with an ephemeral
