@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use crate::connection::{serve_connection_with_connection_meta, serve_stream_with_connection_meta};
 use crate::options::NacelleTcpOptions;
+#[cfg(feature = "openssl")]
+use crate::options::NacelleTlsDetectionOptions;
 #[cfg(unix)]
 use crate::options::NacelleUnixSocketOptions;
 use crate::protocol::Protocol;
@@ -463,6 +465,76 @@ where
             Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
             addr,
             tls_config,
+            shutdown,
+            drain_timeout,
+        )
+        .await
+    }
+
+    #[cfg(feature = "openssl")]
+    pub async fn serve_tcp_optional_openssl(
+        &self,
+        addr: SocketAddr,
+        tls_config: NacelleOpenSslConfig,
+    ) -> Result<(), NacelleError> {
+        crate::runtime::serve_tcp_optional_openssl(
+            Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
+            addr,
+            tls_config,
+        )
+        .await
+    }
+
+    #[cfg(feature = "openssl")]
+    pub async fn serve_tcp_optional_openssl_with_shutdown(
+        &self,
+        addr: SocketAddr,
+        tls_config: NacelleOpenSslConfig,
+        shutdown: nacelle_core::lifecycle::NacelleShutdownToken,
+    ) -> Result<(), NacelleError> {
+        crate::runtime::serve_tcp_optional_openssl_with_shutdown(
+            Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
+            addr,
+            tls_config,
+            shutdown,
+        )
+        .await
+    }
+
+    #[cfg(feature = "openssl")]
+    pub async fn serve_tcp_optional_openssl_with_options(
+        &self,
+        addr: SocketAddr,
+        tls_config: NacelleOpenSslConfig,
+        tcp_options: NacelleTcpOptions,
+        detection_options: NacelleTlsDetectionOptions,
+    ) -> Result<(), NacelleError> {
+        crate::runtime::serve_tcp_optional_openssl_with_options(
+            Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
+            addr,
+            tls_config,
+            tcp_options,
+            detection_options,
+        )
+        .await
+    }
+
+    #[cfg(feature = "openssl")]
+    pub async fn serve_tcp_optional_openssl_with_options_and_shutdown_timeout(
+        &self,
+        addr: SocketAddr,
+        tls_config: NacelleOpenSslConfig,
+        tcp_options: NacelleTcpOptions,
+        detection_options: NacelleTlsDetectionOptions,
+        shutdown: nacelle_core::lifecycle::NacelleShutdownToken,
+        drain_timeout: std::time::Duration,
+    ) -> Result<(), NacelleError> {
+        crate::runtime::serve_tcp_optional_openssl_with_options_and_shutdown_timeout(
+            Arc::<NacelleServer<Req, P, H>>::new(self.clone()),
+            addr,
+            tls_config,
+            tcp_options,
+            detection_options,
             shutdown,
             drain_timeout,
         )

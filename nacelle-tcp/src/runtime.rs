@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::options::NacelleTcpOptions;
+#[cfg(feature = "openssl")]
+use crate::options::NacelleTlsDetectionOptions;
 #[cfg(unix)]
 use crate::options::NacelleUnixSocketOptions;
 use crate::protocol::Protocol;
@@ -375,6 +377,148 @@ where
     .await
 }
 
+#[cfg(feature = "openssl")]
+pub async fn serve_tcp_optional_openssl<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tls_config: NacelleOpenSslConfig,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let (_shutdown, token) = nacelle_core::lifecycle::NacelleShutdown::pair();
+    serve_tcp_optional_openssl_with_shutdown(server, addr, tls_config, token).await
+}
+
+#[cfg(feature = "openssl")]
+pub async fn serve_tcp_optional_openssl_with_shutdown<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tls_config: NacelleOpenSslConfig,
+    shutdown: NacelleShutdownToken,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    serve_tcp_optional_openssl_with_options_and_shutdown(
+        server,
+        addr,
+        tls_config,
+        NacelleTcpOptions::default(),
+        NacelleTlsDetectionOptions::default(),
+        shutdown,
+    )
+    .await
+}
+
+#[cfg(feature = "openssl")]
+pub async fn serve_tcp_optional_openssl_with_shutdown_timeout<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tls_config: NacelleOpenSslConfig,
+    shutdown: NacelleShutdownToken,
+    drain_timeout: Duration,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    serve_tcp_optional_openssl_with_options_and_shutdown_timeout(
+        server,
+        addr,
+        tls_config,
+        NacelleTcpOptions::default(),
+        NacelleTlsDetectionOptions::default(),
+        shutdown,
+        drain_timeout,
+    )
+    .await
+}
+
+#[cfg(feature = "openssl")]
+pub async fn serve_tcp_optional_openssl_with_options<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tls_config: NacelleOpenSslConfig,
+    tcp_options: NacelleTcpOptions,
+    detection_options: NacelleTlsDetectionOptions,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let (_shutdown, token) = nacelle_core::lifecycle::NacelleShutdown::pair();
+    serve_tcp_optional_openssl_with_options_and_shutdown(
+        server,
+        addr,
+        tls_config,
+        tcp_options,
+        detection_options,
+        token,
+    )
+    .await
+}
+
+#[cfg(feature = "openssl")]
+pub async fn serve_tcp_optional_openssl_with_options_and_shutdown<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tls_config: NacelleOpenSslConfig,
+    tcp_options: NacelleTcpOptions,
+    detection_options: NacelleTlsDetectionOptions,
+    shutdown: NacelleShutdownToken,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    serve_tcp_optional_openssl_with_options_and_shutdown_timeout(
+        server,
+        addr,
+        tls_config,
+        tcp_options,
+        detection_options,
+        shutdown,
+        Duration::from_secs(30),
+    )
+    .await
+}
+
+#[cfg(feature = "openssl")]
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_tcp_optional_openssl_with_options_and_shutdown_timeout<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tls_config: NacelleOpenSslConfig,
+    tcp_options: NacelleTcpOptions,
+    detection_options: NacelleTlsDetectionOptions,
+    shutdown: NacelleShutdownToken,
+    drain_timeout: Duration,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    serve_tcp_optional_openssl_with_options_and_shutdown_deadline(
+        server,
+        addr,
+        tls_config,
+        tcp_options,
+        detection_options,
+        shutdown,
+        NacelleDrainDeadline::new(drain_timeout),
+    )
+    .await
+}
+
 #[doc(hidden)]
 pub async fn serve_tcp_with_shutdown_deadline<Req, P, H>(
     server: Arc<NacelleServer<Req, P, H>>,
@@ -442,6 +586,36 @@ where
         server,
         listener,
         tls_config,
+        shutdown,
+        drain_deadline,
+    )
+    .await
+}
+
+#[cfg(feature = "openssl")]
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_tcp_optional_openssl_with_options_and_shutdown_deadline<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tls_config: NacelleOpenSslConfig,
+    tcp_options: NacelleTcpOptions,
+    detection_options: NacelleTlsDetectionOptions,
+    shutdown: NacelleShutdownToken,
+    drain_deadline: NacelleDrainDeadline,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    serve_tcp_optional_openssl_listener_with_options_and_shutdown_deadline(
+        server,
+        listener,
+        tls_config,
+        tcp_options,
+        detection_options,
         shutdown,
         drain_deadline,
     )
@@ -521,6 +695,106 @@ where
         drain_deadline,
     )
     .await
+}
+
+#[cfg(feature = "openssl")]
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_tcp_optional_openssl_listener_with_options_and_shutdown_deadline<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    listener: tokio::net::TcpListener,
+    tls_config: NacelleOpenSslConfig,
+    tcp_options: NacelleTcpOptions,
+    detection_options: NacelleTlsDetectionOptions,
+    mut shutdown: NacelleShutdownToken,
+    drain_deadline: NacelleDrainDeadline,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let handshake_timeout = tls_config.handshake_timeout();
+    let mut connections = tokio::task::JoinSet::new();
+    let local_addr = listener.local_addr().ok();
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.changed() => break,
+            joined = connections.join_next(), if !connections.is_empty() => {
+                log_connection_result(joined, NacelleTransport::RawTcp);
+                continue;
+            }
+            accepted = listener.accept() => {
+                let (stream, peer_addr) = accepted?;
+                tcp_options.apply_to_stream(&stream)?;
+                let connection = NacelleConnectionMeta::raw_tcp(Some(peer_addr), local_addr);
+                let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        server
+                            .telemetry()
+                            .connection_rejected(NacelleTransport::RawTcp, connection_rejection_reason(&error));
+                        continue;
+                    }
+                };
+                let server = server.clone();
+                let acceptor = tls_config.acceptor();
+                let detection_timeout = detection_options.timeout;
+                connections.spawn(async move {
+                    let _connection_permit = connection_permit;
+                    let is_tls = match detect_tls_handshake(&stream, detection_timeout).await {
+                        Ok(is_tls) => is_tls,
+                        Err(error) => {
+                            if matches!(error, NacelleError::Timeout(_)) {
+                                server
+                                    .telemetry()
+                                    .timeout(NacelleTransport::RawTcp, "tls_detect");
+                            }
+                            return Err(error);
+                        }
+                    };
+
+                    if !is_tls {
+                        return server.serve_io_without_connection_limit(stream, connection).await;
+                    }
+
+                    let ssl = Ssl::new(acceptor.context()).map_err(NacelleError::protocol)?;
+                    let mut stream = tokio_openssl::SslStream::new(ssl, stream)
+                        .map_err(NacelleError::protocol)?;
+                    match tokio::time::timeout(
+                        handshake_timeout,
+                        Pin::new(&mut stream).accept(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => return Err(NacelleError::protocol(error)),
+                        Err(_) => {
+                            server
+                                .telemetry()
+                                .timeout(NacelleTransport::RawTcp, "tls_handshake");
+                            return Err(NacelleError::Timeout("tls_handshake"));
+                        }
+                    }
+                    let connection = connection.with_tls(openssl_tls_meta(stream.ssl()));
+                    server.serve_io_without_connection_limit(stream, connection).await
+                });
+            }
+        }
+    }
+    server.telemetry().shutdown_event(
+        NacelleTelemetryEventKind::ListenerStoppedAccepting,
+        NacelleTransport::RawTcp,
+    );
+    drain_connection_tasks(
+        connections,
+        drain_deadline.get(),
+        NacelleTransport::RawTcp,
+        server.telemetry().clone(),
+    )
+    .await;
+    Ok(())
 }
 
 #[doc(hidden)]
@@ -824,6 +1098,44 @@ fn openssl_tls_meta(ssl: &SslRef) -> NacelleConnectionTlsMeta {
     meta
 }
 
+#[cfg(feature = "openssl")]
+async fn detect_tls_handshake(
+    stream: &tokio::net::TcpStream,
+    timeout: Duration,
+) -> Result<bool, NacelleError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut peek_buf = [0_u8; 3];
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(NacelleError::Timeout("tls_detect"));
+        }
+
+        match tokio::time::timeout(remaining, stream.peek(&mut peek_buf)).await {
+            Ok(Ok(0)) => return Err(NacelleError::ConnectionClosed),
+            Ok(Ok(len)) if !peeked_bytes_can_be_tls(&peek_buf[..len]) => return Ok(false),
+            Ok(Ok(len)) if len >= 3 => return Ok(true),
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => return Err(NacelleError::Io(error)),
+            Err(_) => return Err(NacelleError::Timeout("tls_detect")),
+        }
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[cfg(feature = "openssl")]
+fn peeked_bytes_can_be_tls(bytes: &[u8]) -> bool {
+    match bytes {
+        [] => true,
+        [record_type] => *record_type == 0x16,
+        [record_type, major] => *record_type == 0x16 && *major == 0x03,
+        [record_type, major, minor, ..] => {
+            *record_type == 0x16 && *major == 0x03 && (0x01..=0x04).contains(minor)
+        }
+    }
+}
+
 fn log_connection_result(
     result: Option<Result<Result<(), NacelleError>, tokio::task::JoinError>>,
     transport: NacelleTransport,
@@ -1019,5 +1331,24 @@ mod tests {
             .expect("server should stop")
             .expect("server task should join")
             .expect("server should exit");
+    }
+}
+
+#[cfg(all(test, feature = "openssl"))]
+mod openssl_tests {
+    use super::*;
+
+    #[test]
+    fn tls_detection_accepts_tls_handshake_prefix() {
+        assert!(peeked_bytes_can_be_tls(&[0x16]));
+        assert!(peeked_bytes_can_be_tls(&[0x16, 0x03]));
+        assert!(peeked_bytes_can_be_tls(&[0x16, 0x03, 0x03]));
+    }
+
+    #[test]
+    fn tls_detection_rejects_plain_protocol_prefix() {
+        assert!(!peeked_bytes_can_be_tls(&[0x01]));
+        assert!(!peeked_bytes_can_be_tls(&[0x16, 0x02]));
+        assert!(!peeked_bytes_can_be_tls(&[0x16, 0x03, 0x05]));
     }
 }

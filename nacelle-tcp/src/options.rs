@@ -88,6 +88,30 @@ impl Default for NacelleTcpKeepalive {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NacelleTlsDetectionOptions {
+    pub timeout: Duration,
+}
+
+impl Default for NacelleTlsDetectionOptions {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(5),
+        }
+    }
+}
+
+impl NacelleTlsDetectionOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+}
+
 #[cfg(unix)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NacelleUnixSocketOptions {
@@ -156,5 +180,12 @@ mod tests {
 
         assert_eq!(keepalive.time, Some(Duration::from_secs(10)));
         assert_eq!(keepalive.interval, Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn tls_detection_defaults_to_bounded_timeout() {
+        let options = NacelleTlsDetectionOptions::default();
+
+        assert_eq!(options.timeout, Duration::from_secs(5));
     }
 }
