@@ -1,7 +1,7 @@
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-#[path = "../shared.rs"]
+#[path = "shared.rs"]
 mod shared;
 use shared::{
     StressServerStats, StressServerStatsSnapshot, build_server, configure_allocator, parse_args,
@@ -154,7 +154,7 @@ fn build_tls_config(
     #[cfg(not(feature = "tls-self-signed"))]
     {
         if config.tls_self_signed {
-            return Err("tokio-server was built without tls-self-signed support".into());
+            return Err("nacelle-stress-server was built without tls-self-signed support".into());
         }
         Ok(None)
     }

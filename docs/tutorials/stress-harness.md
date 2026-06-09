@@ -2,7 +2,7 @@
 
 The stress harness has two binaries:
 
-- `tokio-server`, from `nacelle-stress-server`
+- `nacelle-stress-server`, from `nacelle-stress-server`
 - `nacelle-stress-test`, from `nacelle-stress-test`
 
 Build both:
@@ -30,7 +30,7 @@ For full details, see the how-to guide:
 Run the server:
 
 ```bash
-cargo run --release --package nacelle-stress-server --bin tokio-server -- --config examples/nacelle-stress-server/configs/tcp.toml
+cargo run --release --package nacelle-stress-server -- --config examples/nacelle-stress-server/configs/tcp.toml
 ```
 
 Run a bounded client smoke test:

@@ -3,7 +3,7 @@
 Run the server:
 
 ```bash
-cargo run --release --package nacelle-stress-server --bin tokio-server -- --config examples/nacelle-stress-server/configs/tcp.toml
+cargo run --release --package nacelle-stress-server -- --config examples/nacelle-stress-server/configs/tcp.toml
 ```
 
 Run a bounded client smoke test:
@@ -61,4 +61,3 @@ CI-friendly scenarios should stay short and deterministic:
 - graceful shutdown under load
 
 Heavy RPS and soak tests should run manually or nightly on dedicated Linux hosts.
-

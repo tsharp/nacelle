@@ -299,19 +299,19 @@ cargo run --features reference_protocol,http --example dual_echo -- 127.0.0.1:80
 ## Stress Harness
 
 ```bash
-cargo run --release --package nacelle-stress-server --bin tokio-server
+cargo run --release --package nacelle-stress-server
 
 # If ./config.toml exists, the stress server loads it automatically. The
 # checked-in root config enables self-signed TCP TLS for local runs.
 
 # Or load server limits and buffer sizing from TOML:
-cargo run --release --package nacelle-stress-server --bin tokio-server -- \
+cargo run --release --package nacelle-stress-server -- \
   --config examples/nacelle-stress-server/config.example.toml
 
 # The stress server default build includes TCP TLS support. Plain TCP
 # remains the runtime default; add --tls-self-signed to serve with an ephemeral
 # self-signed certificate.
-cargo run --release --package nacelle-stress-server --bin tokio-server -- \
+cargo run --release --package nacelle-stress-server -- \
   --tls-self-signed
 
 # In another shell:
