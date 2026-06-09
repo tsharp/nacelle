@@ -12,9 +12,9 @@ Run a bounded client smoke test:
 cargo run --release --package nacelle-stress-test -- --connections 32 --pipeline 16 --duration-secs 15
 ```
 
-The `run-tokio.sh` and `run-tokio.ps1` helpers accept `--config`/`-Config` and
-pass `--tls-insecure` to the stress client only when the effective
-`tls_self_signed` value is true.
+The `examples/run-stress-test.sh` and `examples/run-stress-test.ps1` helpers
+accept `--config`/`-Config` and pass `--tls-insecure` to the stress client only
+when the effective `tls_self_signed` value is true.
 
 The stress client enables its Rustls support by default so `--tls-insecure`
 works with the local self-signed server. For a Rustls-free plain TCP build, run
@@ -33,13 +33,13 @@ Linux example:
 
 ```bash
 ./build-all.sh
-./run-tokio.sh --config examples/nacelle-stress-server/configs/tcp.toml --server-threads 48 --connections 256 --pipeline 8 --duration-secs 30 --payload-bytes 256
+./examples/run-stress-test.sh --config examples/nacelle-stress-server/configs/tcp.toml --server-threads 48 --connections 256 --pipeline 8 --duration-secs 30 --payload-bytes 256
 ```
 
 PowerShell example:
 
 ```powershell
-.\run-tokio.ps1 -Config examples/nacelle-stress-server/configs/tcp.toml -ServerThreads 48 -Connections 256 -Pipeline 8 -DurationSecs 30 -PayloadBytes 256
+.\examples\run-stress-test.ps1 -Config examples/nacelle-stress-server/configs/tcp.toml -ServerThreads 48 -Connections 256 -Pipeline 8 -DurationSecs 30 -PayloadBytes 256
 ```
 
 Server-side stats are disabled by default for peak throughput. Add `--stats`

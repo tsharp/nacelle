@@ -31,7 +31,7 @@ Suggested RPS comparison:
 
 ```bash
 ./build-all.sh
-./run-tokio.sh --config examples/nacelle-stress-server/configs/tcp.toml --server-threads 48 --connections 256 --pipeline 8 --duration-secs 30 --payload-bytes 256
+./examples/run-stress-test.sh --config examples/nacelle-stress-server/configs/tcp.toml --server-threads 48 --connections 256 --pipeline 8 --duration-secs 30 --payload-bytes 256
 ```
 
 The stress server defaults `stats_enabled = false` to avoid contended global
@@ -45,13 +45,14 @@ stress runs. For the plain TCP throughput baseline, use
 separately:
 
 ```bash
-./run-tokio.sh --config examples/nacelle-stress-server/configs/tcp.toml
-./run-tokio.sh --config examples/nacelle-stress-server/configs/tcp-low-memory.toml
-./run-tokio.sh --config examples/nacelle-stress-server/configs/tcp-tls.toml
+./examples/run-stress-test.sh --config examples/nacelle-stress-server/configs/tcp.toml
+./examples/run-stress-test.sh --config examples/nacelle-stress-server/configs/tcp-low-memory.toml
+./examples/run-stress-test.sh --config examples/nacelle-stress-server/configs/tcp-tls.toml
 ```
 
-The `run-tokio.sh` and `run-tokio.ps1` helpers apply root `config.toml` first,
-then the selected profile, and choose the matching client mode automatically.
+The `examples/run-stress-test.sh` and `examples/run-stress-test.ps1` helpers
+apply root `config.toml` first, then the selected profile, and choose the
+matching client mode automatically.
 
 Guardrails:
 
@@ -60,5 +61,4 @@ Guardrails:
 - keep telemetry sinks optional; default operation should not push into in-memory sinks
 - preserve single-chunk body fast paths
 - tune TCP buffer sizes for the connection count instead of relying on large defaults
-
 

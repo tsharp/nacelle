@@ -11,7 +11,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-Set-Location -Path $PSScriptRoot
+$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+Set-Location -Path $RepoRoot
 
 function Invoke-Cargo {
     param(
@@ -71,7 +72,7 @@ function Get-TomlBool {
     $configPath = if ([System.IO.Path]::IsPathRooted($Path)) {
         $Path
     } else {
-        Join-Path $PSScriptRoot $Path
+        Join-Path $RepoRoot $Path
     }
 
     if (-not (Test-Path -Path $configPath)) {
@@ -110,16 +111,15 @@ $cargoProfileArg = if ($Debug) { @() } else { @("--release") }
 Write-Host "==> Building nacelle-stress-test ($profile)"
 Invoke-Cargo -Args (@("build") + $cargoProfileArg + @("--package", "nacelle-stress-test"))
 
-Write-Host "==> Building tokio-server ($profile)"
+Write-Host "==> Building nacelle-stress-server ($profile)"
 Invoke-Cargo -Args (@(
     "build"
 ) + $cargoProfileArg + @(
-    "--package", "nacelle-stress-server",
-    "--bin", "tokio-server"
+    "--package", "nacelle-stress-server"
 ))
 
-$serverExe = Join-Path $PSScriptRoot "target\$profile\tokio-server.exe"
-$clientExe = Join-Path $PSScriptRoot "target\$profile\nacelle-stress-test.exe"
+$serverExe = Join-Path $RepoRoot "target\$profile\nacelle-stress-server.exe"
+$clientExe = Join-Path $RepoRoot "target\$profile\nacelle-stress-test.exe"
 
 if (-not (Test-Path -Path $serverExe)) {
     throw "Missing server binary: $serverExe"
@@ -143,7 +143,7 @@ try {
 
     Wait-PortOpen -Bind $Bind -TimeoutMs 5000
 
-    Write-Host "--- tokio threads=$ServerThreads connections=$Connections pipeline=$Pipeline ---"
+    Write-Host "--- nacelle threads=$ServerThreads connections=$Connections pipeline=$Pipeline ---"
 
     $clientArgs = @(
         "--addr", $Bind,

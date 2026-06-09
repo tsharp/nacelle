@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the Tokio stress server and stress-test client in release mode, then
+# Build the Nacelle stress server and stress-test client in release mode, then
 # copy the resulting binaries into ./artifacts/.
 set -e
 cd "$(dirname "$0")"
@@ -13,10 +13,10 @@ cp target/release/nacelle-stress-test "$ARTIFACTS/"
 echo "    copied nacelle-stress-test"
 
 echo ""
-echo "==> Building tokio-server"
-cargo build --release --package nacelle-stress-server --bin tokio-server
-cp target/release/tokio-server "$ARTIFACTS/"
-echo "    copied tokio-server"
+echo "==> Building nacelle-stress-server"
+cargo build --release --package nacelle-stress-server
+cp target/release/nacelle-stress-server "$ARTIFACTS/"
+echo "    copied nacelle-stress-server"
 
 echo ""
 echo "==> Artifacts written to $ARTIFACTS/"
