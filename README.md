@@ -13,6 +13,7 @@ The current transports are:
 - `openssl-vendored` — build OpenSSL from source when native OpenSSL is unavailable
 - `tls-self-signed` — optional Rustls self-signed TLS generation for local load tests and auto-deploy flows
 - `otel` — OpenTelemetry metrics API integration
+- `tokio-util` — bridge `tokio_util::sync::CancellationToken` into Nacelle shutdown
 - `tower` — adapter for `tower::Service<NacelleRequest>`
 
 Both transports call the same app-facing handler shape:
@@ -64,15 +65,42 @@ let server = RawTcpServer::<FrameRequest, ()>::builder()
 server.serve_tcp("127.0.0.1:8080".parse()?).await?;
 ```
 
+For applications with one handler and one or more protocol listeners, the
+convenience crate also exposes an app-level serve API:
+
+```rust
+use nacelle::{
+    FrameRequest, LengthDelimitedProtocol, NacelleApp, NacelleProtocols, NacelleRequest,
+    NacelleResponse, handler_fn, serve,
+};
+
+let app = NacelleApp::new(handler_fn(|request: NacelleRequest| async move {
+    Ok(NacelleResponse::raw_tcp(request.body))
+}));
+
+let protocols = NacelleProtocols::new().raw_tcp::<FrameRequest, _>(
+    "raw",
+    "127.0.0.1:8080".parse()?,
+    LengthDelimitedProtocol,
+);
+
+serve(protocols, app).await?;
+```
+
 On Unix, the same raw protocol can listen on a Unix domain socket:
 
 ```rust
 server.serve_unix("/tmp/nacelle.sock").await?;
 ```
 
-Nacelle does not remove existing socket files before binding; clear stale paths
-and set directory/file permissions in your process supervisor or deployment
-script.
+By default, Nacelle does not remove existing socket files before binding. Use
+`NacelleUnixSocketOptions` when the process owns the path and should remove a
+stale file or set socket-file permissions.
+
+TCP listeners accept `NacelleTcpOptions` for `TCP_NODELAY` and keepalive. With
+the `openssl` feature, `serve_tcp_optional_openssl(...)` and
+`NacelleProtocols::raw_tcp_optional_openssl(...)` can accept plain and OpenSSL
+TLS clients on the same TCP listener after a bounded TLS-prefix peek.
 
 ## Shared Application State
 
@@ -243,6 +271,9 @@ Internal readiness plans, assessments, and checklists live under `docs/internal`
 and are excluded from generated public documentation sites.
 
 Exporter/subscriber setup stays in the application so production can choose OTLP, stdout, Prometheus, or another pipeline.
+
+For custom telemetry systems, implement `NacelleTelemetrySink` and attach it
+with `NacelleTelemetry::with_sink(...)`.
 
 ## Building
 

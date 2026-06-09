@@ -10,6 +10,8 @@ Recommended presets:
 - Direct HTTPS listener: enable `http,tls`, load certificate/key material through `NacelleTlsConfig`, configure an SNI allowlist with `from_pem_with_allowed_server_names` or `from_der_with_allowed_server_names`, set a short TLS handshake timeout, configure `max_connections_per_peer` and `max_connection_opens_per_peer_per_second`, enable HTTP access logs, and attach `NacelleHttpPolicy` with Host, method, URI, header, security-header, and per-peer request-rate limits.
 - Direct raw TCP Rustls listener: enable `raw_tcp,tls`, load certificate/key material through `NacelleTlsConfig`, use `serve_tcp_tls` or `enable_raw_tcp_tls`, and keep protocol-level authentication/authorization in the application protocol.
 - Direct raw TCP OpenSSL listener: enable `raw_tcp,openssl`, load certificate/key material through `NacelleOpenSslConfig`, use `serve_tcp_openssl` or `enable_raw_tcp_openssl`, and configure the `SslAcceptor` yourself when you need OpenSSL-specific policy.
+- Optional raw TCP OpenSSL listener: enable `raw_tcp,openssl`, use `serve_tcp_optional_openssl` or the matching host/app builder method, and keep `NacelleTlsDetectionOptions::timeout` short enough for your accepted-connection budget.
+- Unix socket listener: enable `raw_tcp` on Unix and use `NacelleUnixSocketOptions` only when this process owns stale-path cleanup or socket-file permissions.
 - Local load-test/autodeploy HTTPS: enable `tls-self-signed` and call `NacelleTlsConfig::self_signed(...)`; do not treat generated certificates as a public trust or rotation strategy.
 - High concurrency: reduce raw TCP buffer capacities before raising `max_connections`.
 
@@ -26,6 +28,9 @@ total_budget =
 
 Raw TCP processes requests sequentially per connection. `request_body_channel_capacity` controls the queued streaming chunks between the socket reader and handler. HTTP uses Hyper's internal buffers plus Nacelle's body queue, so leave extra headroom when enabling large request bodies.
 
+`NacelleTcpOptions` controls TCP listener socket behavior. Defaults preserve the
+existing behavior: `TCP_NODELAY` enabled and TCP keepalive disabled.
+
 Dangerous configurations:
 
 - unbounded connections with large per-connection buffers
@@ -39,6 +44,8 @@ Dangerous configurations:
 - trusting forwarded peer headers without an explicit trusted proxy list
 - generated self-signed certificates used as a long-lived public-edge certificate strategy
 - high keep-alive connection counts without proxy-level idle limits
+- long TLS detection timeouts on optional TLS listeners
+- Unix stale-path cleanup for a socket path not exclusively owned by this process
 
 TLS certificate rotation:
 
