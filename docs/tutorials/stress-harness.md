@@ -5,13 +5,7 @@ The stress harness has two binaries:
 - `nacelle-stress-server`, from `nacelle-stress-server`
 - `nacelle-stress-test`, from `nacelle-stress-test`
 
-Build both:
-
-```bash
-./build-all.sh
-```
-
-Then run the convenience script:
+Run the convenience script:
 
 ```bash
 ./examples/run-stress-test.sh
@@ -59,7 +53,6 @@ Repeatable profiles:
 Linux example:
 
 ```bash
-./build-all.sh
 ./examples/run-stress-test.sh --config examples/nacelle-stress-server/configs/tcp.toml --server-threads 48 --connections 256 --pipeline 8 --duration-secs 30 --payload-bytes 256
 ```
 

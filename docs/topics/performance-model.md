@@ -30,7 +30,6 @@ acquire/drop and memory reservation overhead. Watch it closely after changes to
 Suggested RPS comparison:
 
 ```bash
-./build-all.sh
 ./examples/run-stress-test.sh --config examples/nacelle-stress-server/configs/tcp.toml --server-threads 48 --connections 256 --pipeline 8 --duration-secs 30 --payload-bytes 256
 ```
 
@@ -61,4 +60,3 @@ Guardrails:
 - keep telemetry sinks optional; default operation should not push into in-memory sinks
 - preserve single-chunk body fast paths
 - tune TCP buffer sizes for the connection count instead of relying on large defaults
-
