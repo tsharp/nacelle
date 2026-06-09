@@ -23,6 +23,7 @@ pub use nacelle_core::{config, error, handler, lifecycle, limits, request, respo
 #[cfg(feature = "raw_tcp")]
 pub use nacelle_tcp::{connection, protocol, server};
 
+pub mod app;
 pub mod host;
 #[cfg(feature = "http")]
 pub use nacelle_http::server as http_server;
@@ -70,6 +71,7 @@ pub use nacelle_core::tower;
 #[cfg(feature = "reference_protocol")]
 pub mod util;
 
+pub use app::{NacelleApp, NacelleProtocols, serve};
 pub use host::NacelleHost;
 #[cfg(feature = "tls-self-signed")]
 pub use nacelle_core::NacelleGeneratedTlsConfig;

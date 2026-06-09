@@ -66,6 +66,11 @@ impl NacelleHost {
         self.shutdown.token()
     }
 
+    pub fn with_shutdown(mut self, shutdown: NacelleShutdown) -> Self {
+        self.shutdown = shutdown;
+        self
+    }
+
     pub fn shutdown(&self) {
         self.telemetry.shutdown_requested();
         self.shutdown.shutdown();
