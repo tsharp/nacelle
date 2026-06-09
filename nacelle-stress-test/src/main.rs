@@ -10,8 +10,11 @@ use std::time::{Duration, Instant};
 
 use bytes::{Buf, BytesMut};
 use nacelle::{FRAME_FLAG_END, FRAME_FLAG_ERROR, NacelleError};
+#[cfg(feature = "rustls")]
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+#[cfg(feature = "rustls")]
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+#[cfg(feature = "rustls")]
 use rustls::{ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpSocket;
@@ -178,12 +181,21 @@ async fn run_worker(
     let stream = make_tcp_socket(&server_addr)?.connect(server_addr).await?;
     stream.set_nodelay(true)?;
     if config.tls_insecure {
-        let connector = tokio_rustls::TlsConnector::from(Arc::new(insecure_tls_config()));
-        let server_name = ServerName::try_from("localhost")
-            .map_err(|_| NacelleError::InvalidFrame("invalid TLS server name"))?;
-        let stream = connector.connect(server_name, stream).await?;
-        let (reader, writer) = tokio::io::split(stream);
-        return run_worker_io(worker_id, reader, writer, config, barrier).await;
+        #[cfg(feature = "rustls")]
+        {
+            let connector = tokio_rustls::TlsConnector::from(Arc::new(insecure_tls_config()));
+            let server_name = ServerName::try_from("localhost")
+                .map_err(|_| NacelleError::InvalidFrame("invalid TLS server name"))?;
+            let stream = connector.connect(server_name, stream).await?;
+            let (reader, writer) = tokio::io::split(stream);
+            return run_worker_io(worker_id, reader, writer, config, barrier).await;
+        }
+        #[cfg(not(feature = "rustls"))]
+        {
+            return Err(NacelleError::InvalidFrame(
+                "stress client was built without rustls support",
+            ));
+        }
     }
 
     let (reader, writer) = stream.into_split();
@@ -252,6 +264,7 @@ where
     Ok(result)
 }
 
+#[cfg(feature = "rustls")]
 fn insecure_tls_config() -> ClientConfig {
     let mut config = ClientConfig::builder()
         .dangerous()
@@ -261,9 +274,11 @@ fn insecure_tls_config() -> ClientConfig {
     config
 }
 
+#[cfg(feature = "rustls")]
 #[derive(Debug)]
 struct InsecureCertificateVerifier;
 
+#[cfg(feature = "rustls")]
 impl ServerCertVerifier for InsecureCertificateVerifier {
     fn verify_server_cert(
         &self,
@@ -461,7 +476,14 @@ fn parse_args(
                 config.payload_bytes = parse_value(&arg, args.next())?;
             }
             "--tls-insecure" => {
-                config.tls_insecure = true;
+                #[cfg(feature = "rustls")]
+                {
+                    config.tls_insecure = true;
+                }
+                #[cfg(not(feature = "rustls"))]
+                {
+                    return Err("stress client was built without rustls support".into());
+                }
             }
             other => {
                 return Err(format!("unknown argument: {other}").into());

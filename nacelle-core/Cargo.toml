@@ -13,8 +13,11 @@ categories = ["asynchronous", "network-programming"]
 [features]
 default = []
 http-types = ["dep:http"]
-tls = ["dep:pem", "dep:rustls"]
-tls-self-signed = ["tls", "dep:rcgen"]
+tls = []
+rustls = ["tls", "dep:pem", "dep:rustls"]
+openssl = ["tls", "dep:openssl"]
+openssl-vendored = ["openssl", "openssl/vendored"]
+tls-self-signed = ["rustls", "dep:rcgen"]
 otel = ["dep:opentelemetry"]
 tower = ["dep:tower"]
 
@@ -23,6 +26,7 @@ bytes = "1.10.1"
 futures-core = "0.3.31"
 http = { version = "1", optional = true }
 opentelemetry = { version = "0.32", optional = true }
+openssl = { version = "0.10.79", optional = true }
 pem = { version = "3.0.6", optional = true }
 rcgen = { version = "0.14.8", optional = true }
 rustls = { version = "0.23.40", optional = true }

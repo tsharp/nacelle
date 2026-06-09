@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NacelleTransport {
     RawTcp,
+    UnixSocket,
     Http,
 }
 
@@ -14,6 +15,7 @@ impl NacelleTransport {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::RawTcp => "raw_tcp",
+            Self::UnixSocket => "unix_socket",
             Self::Http => "http",
         }
     }

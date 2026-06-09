@@ -7,8 +7,9 @@ Recommended presets:
 - Internal service: keep defaults, set body limits to the largest expected payload, and run behind process supervision.
 - Internet-facing behind proxy: cap connections and requests to the container budget, keep 30 second header/body/write timeouts, and let the proxy own coarse traffic filtering or certificate automation when desired.
 - Proxy-aware HTTP: configure `NacelleHttpPolicy::with_trusted_proxy_ips(...)` only with known proxy addresses before allowing `Forwarded` or `X-Forwarded-For` to affect per-peer request limits or request metadata.
-- Direct HTTPS listener: enable `tls`, load certificate/key material through `NacelleTlsConfig`, configure an SNI allowlist with `from_pem_with_allowed_server_names` or `from_der_with_allowed_server_names`, set a short TLS handshake timeout, configure `max_connections_per_peer` and `max_connection_opens_per_peer_per_second`, enable HTTP access logs, and attach `NacelleHttpPolicy` with Host, method, URI, header, security-header, and per-peer request-rate limits.
-- Direct raw TCP TLS listener: enable `raw_tcp,tls`, load certificate/key material through `NacelleTlsConfig`, use `serve_tcp_tls` or `enable_raw_tcp_tls`, and keep protocol-level authentication/authorization in the application protocol.
+- Direct HTTPS listener: enable `http,tls`, load certificate/key material through `NacelleTlsConfig`, configure an SNI allowlist with `from_pem_with_allowed_server_names` or `from_der_with_allowed_server_names`, set a short TLS handshake timeout, configure `max_connections_per_peer` and `max_connection_opens_per_peer_per_second`, enable HTTP access logs, and attach `NacelleHttpPolicy` with Host, method, URI, header, security-header, and per-peer request-rate limits.
+- Direct raw TCP TLS listener: enable `raw_tcp,tls` with `NacelleTlsConfig` or `raw_tcp,openssl` with `NacelleOpenSslConfig`, and keep protocol-level authentication/authorization in the application protocol.
+- Unix socket listener: enable `raw_tcp` on Unix and call `serve_unix(...)` or `NacelleHost::enable_unix_socket(...)`; manage stale socket-file cleanup and filesystem permissions outside Nacelle.
 - Local load-test/autodeploy HTTPS: enable `tls-self-signed` and call `NacelleTlsConfig::self_signed(...)`; do not treat generated certificates as a public trust or rotation strategy.
 - High concurrency: reduce raw TCP buffer capacities before raising `max_connections`.
 
@@ -48,5 +49,3 @@ tls.reload_from_pem_files("next-cert.pem", "next-key.pem")?;
 
 Reloads affect new TLS handshakes. Existing connections continue with the
 configuration negotiated when they connected.
-
-

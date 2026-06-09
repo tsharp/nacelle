@@ -16,6 +16,11 @@ The `run-tokio.sh` and `run-tokio.ps1` helpers accept `--config`/`-Config` and
 pass `--tls-insecure` to the stress client only when the effective
 `tls_self_signed` value is true.
 
+The stress client enables its Rustls support by default so `--tls-insecure`
+works with the local self-signed server. For a Rustls-free plain TCP build, run
+both stress binaries with `--no-default-features` and use
+`nacelle-stress-server/configs/raw-tcp.toml`.
+
 Repeatable profiles:
 
 - `nacelle-stress-server/configs/raw-tcp.toml`: plain raw TCP baseline.
@@ -43,7 +48,8 @@ when you want periodic server counters during a diagnostic run.
 The Tokio stress server default build includes `tls-self-signed` support. The
 checked-in root `config.toml` enables `tls_self_signed = true`, so the local
 stress client should use `--tls-insecure` with that default config. Use
-`nacelle-stress-server/configs/raw-tcp.toml` when you need a plain TCP baseline.
+`--no-default-features` with `nacelle-stress-server/configs/raw-tcp.toml` when
+you need a Rustls-free plain TCP baseline.
 
 CI-friendly scenarios should stay short and deterministic:
 
@@ -55,5 +61,4 @@ CI-friendly scenarios should stay short and deterministic:
 - graceful shutdown under load
 
 Heavy RPS and soak tests should run manually or nightly on dedicated Linux hosts.
-
 

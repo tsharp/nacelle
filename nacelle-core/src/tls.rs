@@ -1,13 +1,23 @@
-use std::fs;
-use std::io;
-use std::path::Path;
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
-
+#[cfg(feature = "openssl")]
+use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod};
+#[cfg(feature = "rustls")]
 use rustls::ServerConfig;
+#[cfg(feature = "rustls")]
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+#[cfg(feature = "rustls")]
 use rustls::server::{ClientHello, ResolvesServerCert};
+#[cfg(feature = "rustls")]
 use rustls::sign::CertifiedKey;
+#[cfg(feature = "rustls")]
+use std::fs;
+#[cfg(any(feature = "rustls", feature = "openssl"))]
+use std::io;
+#[cfg(any(feature = "rustls", feature = "openssl"))]
+use std::path::Path;
+#[cfg(any(feature = "rustls", feature = "openssl"))]
+use std::sync::{Arc, RwLock};
+#[cfg(any(feature = "rustls", feature = "openssl"))]
+use std::time::Duration;
 
 #[cfg(feature = "tls-self-signed")]
 #[derive(Debug, Clone)]
@@ -17,6 +27,7 @@ pub struct NacelleGeneratedTlsConfig {
     pub private_key_pem: String,
 }
 
+#[cfg(feature = "rustls")]
 #[derive(Debug, Clone)]
 pub struct NacelleTlsConfig {
     server_config: Arc<RwLock<Arc<ServerConfig>>>,
@@ -24,16 +35,88 @@ pub struct NacelleTlsConfig {
     allowed_server_names: Arc<RwLock<Option<Vec<String>>>>,
 }
 
-/// Identifies the compiled TLS backend for a [`NacelleTlsConfig`].
-///
-/// Rustls is the only backend today. Keeping the provider visible in the
-/// shared core API leaves room for an OpenSSL-backed implementation without
-/// changing the HTTP or raw TCP server entry points.
+/// Identifies a compiled TLS backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NacelleTlsProvider {
+    #[cfg(feature = "rustls")]
     Rustls,
+    #[cfg(feature = "openssl")]
+    OpenSsl,
 }
 
+#[cfg(feature = "openssl")]
+#[derive(Clone)]
+pub struct NacelleOpenSslConfig {
+    acceptor: Arc<RwLock<Arc<SslAcceptor>>>,
+    handshake_timeout: Duration,
+}
+
+#[cfg(feature = "openssl")]
+impl std::fmt::Debug for NacelleOpenSslConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NacelleOpenSslConfig")
+            .field("provider", &NacelleTlsProvider::OpenSsl)
+            .field("handshake_timeout", &self.handshake_timeout)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "openssl")]
+impl NacelleOpenSslConfig {
+    pub fn from_acceptor(acceptor: SslAcceptor) -> Self {
+        Self {
+            acceptor: Arc::new(RwLock::new(Arc::new(acceptor))),
+            handshake_timeout: Duration::from_secs(10),
+        }
+    }
+
+    pub fn from_pem_files(
+        certificate_path: impl AsRef<Path>,
+        private_key_path: impl AsRef<Path>,
+    ) -> io::Result<Self> {
+        let mut builder =
+            SslAcceptor::mozilla_intermediate(SslMethod::tls_server()).map_err(io::Error::other)?;
+        builder
+            .set_private_key_file(private_key_path, SslFiletype::PEM)
+            .map_err(io::Error::other)?;
+        builder
+            .set_certificate_chain_file(certificate_path)
+            .map_err(io::Error::other)?;
+        builder.check_private_key().map_err(io::Error::other)?;
+        Ok(Self::from_acceptor(builder.build()))
+    }
+
+    pub fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
+        self.handshake_timeout = timeout;
+        self
+    }
+
+    pub fn replace_acceptor(&self, acceptor: SslAcceptor) {
+        *self
+            .acceptor
+            .write()
+            .expect("OpenSSL acceptor lock poisoned") = Arc::new(acceptor);
+    }
+
+    pub fn provider(&self) -> NacelleTlsProvider {
+        NacelleTlsProvider::OpenSsl
+    }
+
+    #[doc(hidden)]
+    pub fn acceptor(&self) -> Arc<SslAcceptor> {
+        self.acceptor
+            .read()
+            .expect("OpenSSL acceptor lock poisoned")
+            .clone()
+    }
+
+    #[doc(hidden)]
+    pub fn handshake_timeout(&self) -> Duration {
+        self.handshake_timeout
+    }
+}
+
+#[cfg(feature = "rustls")]
 impl NacelleTlsConfig {
     pub fn from_server_config(server_config: ServerConfig) -> Self {
         Self {
@@ -204,6 +287,7 @@ impl NacelleTlsConfig {
     }
 }
 
+#[cfg(feature = "rustls")]
 fn server_config_from_der(
     certificates: Vec<CertificateDer<'static>>,
     private_key: PrivateKeyDer<'static>,
@@ -225,12 +309,14 @@ fn server_config_from_der(
     }
 }
 
+#[cfg(feature = "rustls")]
 #[derive(Debug)]
 struct SniAllowlistResolver {
     certified_key: Arc<CertifiedKey>,
     allowed_server_names: Vec<String>,
 }
 
+#[cfg(feature = "rustls")]
 impl ResolvesServerCert for SniAllowlistResolver {
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         let server_name = client_hello.server_name()?;
@@ -245,6 +331,7 @@ impl ResolvesServerCert for SniAllowlistResolver {
     }
 }
 
+#[cfg(feature = "rustls")]
 fn normalize_allowed_server_names(
     names: impl IntoIterator<Item = impl Into<String>>,
 ) -> io::Result<Vec<String>> {
@@ -262,6 +349,7 @@ fn normalize_allowed_server_names(
     Ok(names)
 }
 
+#[cfg(feature = "rustls")]
 #[doc(hidden)]
 pub fn parse_pem_certificates(input: &[u8]) -> io::Result<Vec<CertificateDer<'static>>> {
     let certificates = parse_pem_blocks(input)?
@@ -278,6 +366,7 @@ pub fn parse_pem_certificates(input: &[u8]) -> io::Result<Vec<CertificateDer<'st
     Ok(certificates)
 }
 
+#[cfg(feature = "rustls")]
 fn parse_pem_private_key(input: &[u8]) -> io::Result<PrivateKeyDer<'static>> {
     for block in parse_pem_blocks(input)? {
         let tag = block.tag();
@@ -305,15 +394,17 @@ fn parse_pem_private_key(input: &[u8]) -> io::Result<PrivateKeyDer<'static>> {
     ))
 }
 
+#[cfg(feature = "rustls")]
 fn parse_pem_blocks(input: &[u8]) -> io::Result<Vec<pem::Pem>> {
     pem::parse_many(input)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "rustls", feature = "openssl")))]
 mod tests {
     use super::*;
 
+    #[cfg(feature = "rustls")]
     #[test]
     fn tls_config_from_pem_rejects_missing_key() {
         let result = NacelleTlsConfig::from_pem(b"", b"");
@@ -355,5 +446,12 @@ mod tests {
             tls.allowed_server_names(),
             Some(vec!["localhost".to_string()])
         );
+    }
+
+    #[cfg(feature = "openssl")]
+    #[test]
+    fn openssl_config_from_missing_files_fails() {
+        let result = NacelleOpenSslConfig::from_pem_files("missing-cert.pem", "missing-key.pem");
+        assert!(result.is_err());
     }
 }

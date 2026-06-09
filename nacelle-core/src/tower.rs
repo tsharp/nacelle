@@ -31,7 +31,9 @@ mod tests {
     use bytes::Bytes;
     use tower::service_fn;
 
-    use crate::request::{NacelleBody, NacelleRequest, NacelleRequestMeta, RawTcpRequestMeta};
+    use crate::request::{
+        NacelleBody, NacelleConnectionMeta, NacelleRequest, NacelleRequestMeta, RawTcpRequestMeta,
+    };
 
     use super::*;
 
@@ -48,6 +50,7 @@ mod tests {
         let handler = handler_from_tower_service::<_, NacelleError>(service);
         let response = handler
             .call(NacelleRequest {
+                connection: NacelleConnectionMeta::raw_tcp(None, None),
                 meta: NacelleRequestMeta::RawTcp(RawTcpRequestMeta {
                     request_id: Some(1),
                     opcode: 1,

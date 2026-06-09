@@ -1,6 +1,10 @@
 //! Tokio raw TCP listener helpers.
 
 use std::net::SocketAddr;
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
+#[cfg(feature = "openssl")]
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,10 +13,18 @@ use crate::server::NacelleServer;
 use nacelle_core::error::NacelleError;
 use nacelle_core::handler::Handler;
 use nacelle_core::lifecycle::{NacelleDrainDeadline, NacelleShutdownToken};
-use nacelle_core::request::RequestMetadata;
+#[cfg(any(feature = "rustls", feature = "openssl"))]
+use nacelle_core::request::NacelleConnectionTlsMeta;
+use nacelle_core::request::{NacelleConnectionMeta, RequestMetadata};
 use nacelle_core::telemetry::{NacelleTelemetry, NacelleTelemetryEventKind, NacelleTransport};
-#[cfg(feature = "tls")]
+#[cfg(feature = "openssl")]
+use nacelle_core::tls::NacelleOpenSslConfig;
+#[cfg(feature = "rustls")]
 use nacelle_core::tls::NacelleTlsConfig;
+#[cfg(feature = "openssl")]
+use openssl::ssl::{NameType, Ssl, SslRef};
+#[cfg(unix)]
+use tokio::net::UnixListener;
 
 /// Listen on `addr` and serve each accepted TCP connection in its own task.
 pub async fn serve_tcp<Req, P, H>(
@@ -64,7 +76,63 @@ where
     .await
 }
 
-#[cfg(feature = "tls")]
+/// Listen on a Unix domain socket and serve each accepted connection.
+///
+/// The socket path is passed directly to Tokio. Existing socket files are not
+/// removed automatically.
+#[cfg(unix)]
+pub async fn serve_unix<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    path: impl AsRef<Path>,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let (_shutdown, token) = nacelle_core::lifecycle::NacelleShutdown::pair();
+    serve_unix_with_shutdown(server, path, token).await
+}
+
+/// Listen on a Unix domain socket until shutdown is requested.
+#[cfg(unix)]
+pub async fn serve_unix_with_shutdown<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    path: impl AsRef<Path>,
+    shutdown: NacelleShutdownToken,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    serve_unix_with_shutdown_timeout(server, path, shutdown, Duration::from_secs(30)).await
+}
+
+/// Listen on a Unix domain socket until shutdown is requested, then drain or
+/// abort active connection tasks after `drain_timeout`.
+#[cfg(unix)]
+pub async fn serve_unix_with_shutdown_timeout<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    path: impl AsRef<Path>,
+    shutdown: NacelleShutdownToken,
+    drain_timeout: Duration,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    serve_unix_with_shutdown_deadline(
+        server,
+        path,
+        shutdown,
+        NacelleDrainDeadline::new(drain_timeout),
+    )
+    .await
+}
+
+#[cfg(feature = "rustls")]
 pub async fn serve_tcp_tls<Req, P, H>(
     server: Arc<NacelleServer<Req, P, H>>,
     addr: SocketAddr,
@@ -79,7 +147,7 @@ where
     serve_tcp_tls_with_shutdown(server, addr, tls_config, token).await
 }
 
-#[cfg(feature = "tls")]
+#[cfg(feature = "rustls")]
 pub async fn serve_tcp_tls_with_shutdown<Req, P, H>(
     server: Arc<NacelleServer<Req, P, H>>,
     addr: SocketAddr,
@@ -95,7 +163,7 @@ where
         .await
 }
 
-#[cfg(feature = "tls")]
+#[cfg(feature = "rustls")]
 pub async fn serve_tcp_tls_with_shutdown_timeout<Req, P, H>(
     server: Arc<NacelleServer<Req, P, H>>,
     addr: SocketAddr,
@@ -109,6 +177,66 @@ where
     H: Handler,
 {
     serve_tcp_tls_with_shutdown_deadline(
+        server,
+        addr,
+        tls_config,
+        shutdown,
+        NacelleDrainDeadline::new(drain_timeout),
+    )
+    .await
+}
+
+#[cfg(feature = "openssl")]
+pub async fn serve_tcp_openssl<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tls_config: NacelleOpenSslConfig,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let (_shutdown, token) = nacelle_core::lifecycle::NacelleShutdown::pair();
+    serve_tcp_openssl_with_shutdown(server, addr, tls_config, token).await
+}
+
+#[cfg(feature = "openssl")]
+pub async fn serve_tcp_openssl_with_shutdown<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tls_config: NacelleOpenSslConfig,
+    shutdown: NacelleShutdownToken,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    serve_tcp_openssl_with_shutdown_timeout(
+        server,
+        addr,
+        tls_config,
+        shutdown,
+        Duration::from_secs(30),
+    )
+    .await
+}
+
+#[cfg(feature = "openssl")]
+pub async fn serve_tcp_openssl_with_shutdown_timeout<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tls_config: NacelleOpenSslConfig,
+    shutdown: NacelleShutdownToken,
+    drain_timeout: Duration,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    serve_tcp_openssl_with_shutdown_deadline(
         server,
         addr,
         tls_config,
@@ -134,7 +262,7 @@ where
     serve_tcp_listener_with_shutdown_deadline(server, listener, shutdown, drain_deadline).await
 }
 
-#[cfg(feature = "tls")]
+#[cfg(feature = "rustls")]
 #[doc(hidden)]
 pub async fn serve_tcp_tls_with_shutdown_deadline<Req, P, H>(
     server: Arc<NacelleServer<Req, P, H>>,
@@ -159,10 +287,119 @@ where
     .await
 }
 
+#[cfg(feature = "openssl")]
+#[doc(hidden)]
+pub async fn serve_tcp_openssl_with_shutdown_deadline<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tls_config: NacelleOpenSslConfig,
+    shutdown: NacelleShutdownToken,
+    drain_deadline: NacelleDrainDeadline,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    serve_tcp_openssl_listener_with_shutdown_deadline(
+        server,
+        listener,
+        tls_config,
+        shutdown,
+        drain_deadline,
+    )
+    .await
+}
+
+#[cfg(unix)]
+#[doc(hidden)]
+pub async fn serve_unix_with_shutdown_deadline<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    path: impl AsRef<Path>,
+    shutdown: NacelleShutdownToken,
+    drain_deadline: NacelleDrainDeadline,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let path = path.as_ref();
+    let listener = UnixListener::bind(path)?;
+    serve_unix_listener_with_shutdown_deadline(
+        server,
+        listener,
+        Some(path.to_path_buf()),
+        shutdown,
+        drain_deadline,
+    )
+    .await
+}
+
 #[doc(hidden)]
 pub async fn serve_tcp_listener_with_shutdown_deadline<Req, P, H>(
     server: Arc<NacelleServer<Req, P, H>>,
     listener: tokio::net::TcpListener,
+    mut shutdown: NacelleShutdownToken,
+    drain_deadline: NacelleDrainDeadline,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let mut connections = tokio::task::JoinSet::new();
+    let local_addr = listener.local_addr().ok();
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.changed() => break,
+            joined = connections.join_next(), if !connections.is_empty() => {
+                log_connection_result(joined, NacelleTransport::RawTcp);
+                continue;
+            }
+            accepted = listener.accept() => {
+                let (stream, peer_addr) = accepted?;
+                let _ = stream.set_nodelay(true);
+                let connection = NacelleConnectionMeta::raw_tcp(Some(peer_addr), local_addr);
+                let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        server
+                            .telemetry()
+                            .connection_rejected(NacelleTransport::RawTcp, connection_rejection_reason(&error));
+                        continue;
+                    }
+                };
+                let server = server.clone();
+                connections.spawn(async move {
+                    let _connection_permit = connection_permit;
+                    server.serve_io_without_connection_limit(stream, connection).await
+                });
+            }
+        }
+    }
+    server.telemetry().shutdown_event(
+        NacelleTelemetryEventKind::ListenerStoppedAccepting,
+        NacelleTransport::RawTcp,
+    );
+    drain_connection_tasks(
+        connections,
+        drain_deadline.get(),
+        NacelleTransport::RawTcp,
+        server.telemetry().clone(),
+    )
+    .await;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[doc(hidden)]
+pub async fn serve_unix_listener_with_shutdown_deadline<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    listener: UnixListener,
+    local_path: Option<PathBuf>,
     mut shutdown: NacelleShutdownToken,
     drain_deadline: NacelleDrainDeadline,
 ) -> Result<(), NacelleError>
@@ -177,44 +414,44 @@ where
             biased;
             _ = shutdown.changed() => break,
             joined = connections.join_next(), if !connections.is_empty() => {
-                log_connection_result(joined);
+                log_connection_result(joined, NacelleTransport::UnixSocket);
                 continue;
             }
             accepted = listener.accept() => {
-                let (stream, peer_addr) = accepted?;
-        let _ = stream.set_nodelay(true);
-        let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
-            Ok(permit) => permit,
-            Err(error) => {
-                server
-                    .telemetry()
-                    .connection_rejected(NacelleTransport::RawTcp, connection_rejection_reason(&error));
-                continue;
-            }
-        };
-        let server = server.clone();
+                let (stream, _) = accepted?;
+                let connection = NacelleConnectionMeta::unix_socket(local_path.clone());
+                let connection_permit = match server.runtime_state().acquire_connection_tracked() {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        server
+                            .telemetry()
+                            .connection_rejected(NacelleTransport::UnixSocket, connection_rejection_reason(&error));
+                        continue;
+                    }
+                };
+                let server = server.clone();
                 connections.spawn(async move {
-            let _connection_permit = connection_permit;
-                    server.serve_io_without_connection_limit(stream).await
-        });
+                    let _connection_permit = connection_permit;
+                    server.serve_io_without_connection_limit(stream, connection).await
+                });
             }
         }
     }
     server.telemetry().shutdown_event(
         NacelleTelemetryEventKind::ListenerStoppedAccepting,
-        NacelleTransport::RawTcp,
+        NacelleTransport::UnixSocket,
     );
     drain_connection_tasks(
         connections,
         drain_deadline.get(),
-        "raw_tcp",
+        NacelleTransport::UnixSocket,
         server.telemetry().clone(),
     )
     .await;
     Ok(())
 }
 
-#[cfg(feature = "tls")]
+#[cfg(feature = "rustls")]
 #[doc(hidden)]
 pub async fn serve_tcp_tls_listener_with_shutdown_deadline<Req, P, H>(
     server: Arc<NacelleServer<Req, P, H>>,
@@ -230,17 +467,19 @@ where
 {
     let handshake_timeout = tls_config.handshake_timeout();
     let mut connections = tokio::task::JoinSet::new();
+    let local_addr = listener.local_addr().ok();
     loop {
         tokio::select! {
             biased;
             _ = shutdown.changed() => break,
             joined = connections.join_next(), if !connections.is_empty() => {
-                log_connection_result(joined);
+                log_connection_result(joined, NacelleTransport::RawTcp);
                 continue;
             }
             accepted = listener.accept() => {
                 let (stream, peer_addr) = accepted?;
                 let _ = stream.set_nodelay(true);
+                let connection = NacelleConnectionMeta::raw_tcp(Some(peer_addr), local_addr);
                 let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
                     Ok(permit) => permit,
                     Err(error) => {
@@ -264,7 +503,8 @@ where
                             return Err(NacelleError::Timeout("tls_handshake"));
                         }
                     };
-                    server.serve_io_without_connection_limit(stream).await
+                    let connection = connection.with_tls(NacelleConnectionTlsMeta::new("rustls"));
+                    server.serve_io_without_connection_limit(stream, connection).await
                 });
             }
         }
@@ -276,21 +516,116 @@ where
     drain_connection_tasks(
         connections,
         drain_deadline.get(),
-        "raw_tcp",
+        NacelleTransport::RawTcp,
         server.telemetry().clone(),
     )
     .await;
     Ok(())
 }
 
-fn log_connection_result(result: Option<Result<Result<(), NacelleError>, tokio::task::JoinError>>) {
+#[cfg(feature = "openssl")]
+#[doc(hidden)]
+pub async fn serve_tcp_openssl_listener_with_shutdown_deadline<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    listener: tokio::net::TcpListener,
+    tls_config: NacelleOpenSslConfig,
+    mut shutdown: NacelleShutdownToken,
+    drain_deadline: NacelleDrainDeadline,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let handshake_timeout = tls_config.handshake_timeout();
+    let mut connections = tokio::task::JoinSet::new();
+    let local_addr = listener.local_addr().ok();
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown.changed() => break,
+            joined = connections.join_next(), if !connections.is_empty() => {
+                log_connection_result(joined, NacelleTransport::RawTcp);
+                continue;
+            }
+            accepted = listener.accept() => {
+                let (stream, peer_addr) = accepted?;
+                let _ = stream.set_nodelay(true);
+                let connection = NacelleConnectionMeta::raw_tcp(Some(peer_addr), local_addr);
+                let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        server
+                            .telemetry()
+                            .connection_rejected(NacelleTransport::RawTcp, connection_rejection_reason(&error));
+                        continue;
+                    }
+                };
+                let server = server.clone();
+                let acceptor = tls_config.acceptor();
+                connections.spawn(async move {
+                    let _connection_permit = connection_permit;
+                    let ssl = Ssl::new(acceptor.context()).map_err(NacelleError::protocol)?;
+                    let mut stream = tokio_openssl::SslStream::new(ssl, stream)
+                        .map_err(NacelleError::protocol)?;
+                    match tokio::time::timeout(
+                        handshake_timeout,
+                        Pin::new(&mut stream).accept(),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => return Err(NacelleError::protocol(error)),
+                        Err(_) => {
+                            server
+                                .telemetry()
+                                .timeout(NacelleTransport::RawTcp, "tls_handshake");
+                            return Err(NacelleError::Timeout("tls_handshake"));
+                        }
+                    }
+                    let connection = connection.with_tls(openssl_tls_meta(stream.ssl()));
+                    server.serve_io_without_connection_limit(stream, connection).await
+                });
+            }
+        }
+    }
+    server.telemetry().shutdown_event(
+        NacelleTelemetryEventKind::ListenerStoppedAccepting,
+        NacelleTransport::RawTcp,
+    );
+    drain_connection_tasks(
+        connections,
+        drain_deadline.get(),
+        NacelleTransport::RawTcp,
+        server.telemetry().clone(),
+    )
+    .await;
+    Ok(())
+}
+
+#[cfg(feature = "openssl")]
+fn openssl_tls_meta(ssl: &SslRef) -> NacelleConnectionTlsMeta {
+    let mut meta = NacelleConnectionTlsMeta::new("openssl").with_protocol(ssl.version_str());
+    if let Some(cipher) = ssl.current_cipher() {
+        meta = meta.with_cipher_suite(cipher.name());
+    }
+    if let Some(server_name) = ssl.servername(NameType::HOST_NAME) {
+        meta = meta.with_server_name(server_name);
+    }
+    meta
+}
+
+fn log_connection_result(
+    result: Option<Result<Result<(), NacelleError>, tokio::task::JoinError>>,
+    transport: NacelleTransport,
+) {
     match result {
         Some(Ok(Ok(()))) | None => {}
         Some(Ok(Err(error))) => {
-            tracing::debug!(target: "nacelle", transport = "raw_tcp", error = %error, "connection finished with error");
+            tracing::debug!(target: "nacelle", transport = transport.as_str(), error = %error, "connection finished with error");
         }
         Some(Err(error)) => {
-            tracing::warn!(target: "nacelle", transport = "raw_tcp", error = %error, "connection task failed");
+            tracing::warn!(target: "nacelle", transport = transport.as_str(), error = %error, "connection task failed");
         }
     }
 }
@@ -305,38 +640,29 @@ fn connection_rejection_reason(error: &NacelleError) -> &'static str {
 async fn drain_connection_tasks(
     mut connections: tokio::task::JoinSet<Result<(), NacelleError>>,
     drain_timeout: Duration,
-    transport: &'static str,
+    transport: NacelleTransport,
     telemetry: NacelleTelemetry,
 ) {
-    telemetry.shutdown_event(
-        NacelleTelemetryEventKind::DrainStarted,
-        NacelleTransport::RawTcp,
-    );
+    telemetry.shutdown_event(NacelleTelemetryEventKind::DrainStarted, transport);
     let drain = async {
         while let Some(result) = connections.join_next().await {
-            log_connection_result(Some(result));
+            log_connection_result(Some(result), transport);
         }
     };
 
     if tokio::time::timeout(drain_timeout, drain).await.is_ok() {
-        tracing::info!(target: "nacelle", transport, "connection drain completed");
-        telemetry.shutdown_event(
-            NacelleTelemetryEventKind::DrainCompleted,
-            NacelleTransport::RawTcp,
-        );
+        tracing::info!(target: "nacelle", transport = transport.as_str(), "connection drain completed");
+        telemetry.shutdown_event(NacelleTelemetryEventKind::DrainCompleted, transport);
         return;
     }
 
     let aborted = connections.len();
-    tracing::warn!(target: "nacelle", transport, aborted, "connection drain timed out; aborting active tasks");
-    telemetry.shutdown_event(
-        NacelleTelemetryEventKind::DrainTimedOut,
-        NacelleTransport::RawTcp,
-    );
-    telemetry.connections_aborted(NacelleTransport::RawTcp, aborted);
+    tracing::warn!(target: "nacelle", transport = transport.as_str(), aborted, "connection drain timed out; aborting active tasks");
+    telemetry.shutdown_event(NacelleTelemetryEventKind::DrainTimedOut, transport);
+    telemetry.connections_aborted(transport, aborted);
     connections.abort_all();
     while let Some(result) = connections.join_next().await {
-        log_connection_result(Some(result));
+        log_connection_result(Some(result), transport);
     }
 }
 

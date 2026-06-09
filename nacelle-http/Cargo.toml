@@ -12,8 +12,9 @@ categories = ["asynchronous", "network-programming"]
 
 [features]
 default = []
-tls = ["dep:rustls", "dep:tokio-rustls", "nacelle-core/tls"]
-tls-self-signed = ["tls", "nacelle-core/tls-self-signed"]
+tls = []
+rustls = ["tls", "dep:rustls", "dep:tokio-rustls", "nacelle-core/rustls"]
+tls-self-signed = ["rustls", "nacelle-core/tls-self-signed"]
 
 [dependencies]
 bytes = "1.10.1"
