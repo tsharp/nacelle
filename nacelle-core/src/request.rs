@@ -1,6 +1,8 @@
-#[cfg(feature = "http-types")]
-use std::net::IpAddr;
+use std::any::Any;
+use std::fmt;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -9,6 +11,116 @@ use tokio::sync::mpsc;
 
 use crate::error::NacelleError;
 use crate::limits::MemoryReservation;
+use crate::telemetry::NacelleTransport;
+
+pub type NacelleConnectionExtension = Arc<dyn Any + Send + Sync>;
+pub type NacelleConnectionExtensionFactory =
+    Arc<dyn Fn(&NacelleConnectionMeta) -> Option<NacelleConnectionExtension> + Send + Sync>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NacelleConnectionTlsMeta {
+    pub provider: &'static str,
+    pub protocol: Option<String>,
+    pub cipher_suite: Option<String>,
+    pub server_name: Option<String>,
+}
+
+impl NacelleConnectionTlsMeta {
+    pub fn new(provider: &'static str) -> Self {
+        Self {
+            provider,
+            protocol: None,
+            cipher_suite: None,
+            server_name: None,
+        }
+    }
+
+    pub fn with_protocol(mut self, protocol: impl Into<String>) -> Self {
+        self.protocol = Some(protocol.into());
+        self
+    }
+
+    pub fn with_cipher_suite(mut self, cipher_suite: impl Into<String>) -> Self {
+        self.cipher_suite = Some(cipher_suite.into());
+        self
+    }
+
+    pub fn with_server_name(mut self, server_name: impl Into<String>) -> Self {
+        self.server_name = Some(server_name.into());
+        self
+    }
+}
+
+#[derive(Clone)]
+pub struct NacelleConnectionMeta {
+    pub transport: NacelleTransport,
+    pub peer_addr: Option<SocketAddr>,
+    pub peer_ip: Option<IpAddr>,
+    pub local_addr: Option<SocketAddr>,
+    pub tls: Option<NacelleConnectionTlsMeta>,
+    extension: Option<NacelleConnectionExtension>,
+}
+
+impl fmt::Debug for NacelleConnectionMeta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NacelleConnectionMeta")
+            .field("transport", &self.transport)
+            .field("peer_addr", &self.peer_addr)
+            .field("peer_ip", &self.peer_ip)
+            .field("local_addr", &self.local_addr)
+            .field("tls", &self.tls)
+            .field("extension", &self.extension.as_ref().map(|_| "<extension>"))
+            .finish()
+    }
+}
+
+impl NacelleConnectionMeta {
+    pub fn raw_tcp(peer_addr: Option<SocketAddr>, local_addr: Option<SocketAddr>) -> Self {
+        Self {
+            transport: NacelleTransport::RawTcp,
+            peer_ip: peer_addr.map(|addr| addr.ip()),
+            peer_addr,
+            local_addr,
+            tls: None,
+            extension: None,
+        }
+    }
+
+    pub fn http(peer_ip: Option<IpAddr>) -> Self {
+        Self {
+            transport: NacelleTransport::Http,
+            peer_addr: None,
+            peer_ip,
+            local_addr: None,
+            tls: None,
+            extension: None,
+        }
+    }
+
+    pub fn with_tls(mut self, tls: NacelleConnectionTlsMeta) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
+    pub fn with_extension<T>(self, extension: T) -> Self
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        self.with_extension_arc(Arc::new(extension))
+    }
+
+    pub fn with_extension_arc(mut self, extension: NacelleConnectionExtension) -> Self {
+        self.extension = Some(extension);
+        self
+    }
+
+    pub fn extension<T>(&self) -> Option<Arc<T>>
+    where
+        T: Any + Send + Sync + 'static,
+    {
+        self.extension.clone()?.downcast::<T>().ok()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawTcpRequestMeta {
@@ -48,6 +160,7 @@ pub trait RequestMetadata: Send + 'static {
 }
 
 pub struct NacelleRequest {
+    pub connection: NacelleConnectionMeta,
     pub meta: NacelleRequestMeta,
     pub body: NacelleBody,
 }

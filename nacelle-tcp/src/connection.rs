@@ -9,12 +9,44 @@ use nacelle_core::config::{NacelleConfig, RequestBodyMode};
 use nacelle_core::error::NacelleError;
 use nacelle_core::handler::Handler;
 use nacelle_core::limits::{MemoryReservation, NacelleRuntimeState};
-use nacelle_core::request::{NacelleBody, NacelleRequest, NacelleRequestMeta, RequestMetadata};
+use nacelle_core::request::{
+    NacelleBody, NacelleConnectionMeta, NacelleRequest, NacelleRequestMeta, RequestMetadata,
+};
 use nacelle_core::response::NacelleResponse;
 use nacelle_core::telemetry::{NacelleTelemetry, NacelleTransport};
 
 /// Drive one raw TCP framed connection and coalesce completed responses into writes.
 pub async fn serve_connection<Req, P, H, R, W>(
+    reader: R,
+    writer: W,
+    protocol: Arc<P>,
+    handler: H,
+    config: NacelleConfig,
+    telemetry: NacelleTelemetry,
+    runtime_state: NacelleRuntimeState,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    serve_connection_with_connection_meta(
+        reader,
+        writer,
+        protocol,
+        handler,
+        config,
+        telemetry,
+        runtime_state,
+        NacelleConnectionMeta::raw_tcp(None, None),
+    )
+    .await
+}
+
+/// Drive one raw TCP framed connection with caller-supplied connection metadata.
+pub async fn serve_connection_with_connection_meta<Req, P, H, R, W>(
     mut reader: R,
     mut writer: W,
     protocol: Arc<P>,
@@ -22,6 +54,7 @@ pub async fn serve_connection<Req, P, H, R, W>(
     config: NacelleConfig,
     telemetry: NacelleTelemetry,
     runtime_state: NacelleRuntimeState,
+    connection: NacelleConnectionMeta,
 ) -> Result<(), NacelleError>
 where
     Req: RequestMetadata + Send + 'static,
@@ -74,6 +107,7 @@ where
                     &config,
                     &telemetry,
                     &runtime_state,
+                    &connection,
                 )
                 .await?;
             }
@@ -98,12 +132,40 @@ where
 
 /// Drive one raw TCP framed connection using a single unsplit I/O object.
 pub async fn serve_stream<Req, P, H, IO>(
+    io: IO,
+    protocol: Arc<P>,
+    handler: H,
+    config: NacelleConfig,
+    telemetry: NacelleTelemetry,
+    runtime_state: NacelleRuntimeState,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    serve_stream_with_connection_meta(
+        io,
+        protocol,
+        handler,
+        config,
+        telemetry,
+        runtime_state,
+        NacelleConnectionMeta::raw_tcp(None, None),
+    )
+    .await
+}
+
+/// Drive one raw TCP framed connection using a single unsplit I/O object and caller-supplied metadata.
+pub async fn serve_stream_with_connection_meta<Req, P, H, IO>(
     mut io: IO,
     protocol: Arc<P>,
     handler: H,
     config: NacelleConfig,
     telemetry: NacelleTelemetry,
     runtime_state: NacelleRuntimeState,
+    connection: NacelleConnectionMeta,
 ) -> Result<(), NacelleError>
 where
     Req: RequestMetadata + Send + 'static,
@@ -155,6 +217,7 @@ where
                     &config,
                     &telemetry,
                     &runtime_state,
+                    &connection,
                 )
                 .await?;
             }
@@ -174,12 +237,40 @@ where
 
 /// Drive one raw TCP framed connection using a single unsplit I/O object.
 pub async fn serve_stream_without_connection_limit<Req, P, H, IO>(
+    io: IO,
+    protocol: Arc<P>,
+    handler: H,
+    config: NacelleConfig,
+    telemetry: NacelleTelemetry,
+    runtime_state: NacelleRuntimeState,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    serve_stream_without_connection_limit_with_connection_meta(
+        io,
+        protocol,
+        handler,
+        config,
+        telemetry,
+        runtime_state,
+        NacelleConnectionMeta::raw_tcp(None, None),
+    )
+    .await
+}
+
+/// Drive one raw TCP framed connection without taking a connection permit.
+pub async fn serve_stream_without_connection_limit_with_connection_meta<Req, P, H, IO>(
     mut io: IO,
     protocol: Arc<P>,
     handler: H,
     config: NacelleConfig,
     telemetry: NacelleTelemetry,
     runtime_state: NacelleRuntimeState,
+    connection: NacelleConnectionMeta,
 ) -> Result<(), NacelleError>
 where
     Req: RequestMetadata + Send + 'static,
@@ -230,6 +321,7 @@ where
                     &config,
                     &telemetry,
                     &runtime_state,
+                    &connection,
                 )
                 .await?;
             }
@@ -259,6 +351,7 @@ async fn run_request<Req, P, H, R>(
     config: &NacelleConfig,
     telemetry: &NacelleTelemetry,
     runtime_state: &NacelleRuntimeState,
+    connection: &NacelleConnectionMeta,
 ) -> Result<(), NacelleError>
 where
     Req: RequestMetadata + Send + 'static,
@@ -292,11 +385,27 @@ where
     let outcome = if decoded.body_len <= read_buf.len() {
         let body =
             buffered_request_body(read_buf, decoded.body_len, config.request_body_chunk_size);
-        execute_handler(handler, request, decoded.body_len, body, runtime_state).await
+        execute_handler(
+            handler,
+            request,
+            decoded.body_len,
+            body,
+            runtime_state,
+            connection,
+        )
+        .await
     } else if config.request_body_mode == RequestBodyMode::Buffered {
         let body =
             read_buffered_request_body(reader, read_buf, decoded.body_len, runtime_state).await?;
-        execute_handler(handler, request, decoded.body_len, body, runtime_state).await
+        execute_handler(
+            handler,
+            request,
+            decoded.body_len,
+            body,
+            runtime_state,
+            connection,
+        )
+        .await
     } else {
         let _streaming_permit = runtime_state.acquire_streaming_task_tracked()?;
         let _streaming_body_reservation = runtime_state.reserve_memory(decoded.body_len)?;
@@ -304,8 +413,9 @@ where
         let body = NacelleBody::new(body_rx, decoded.body_len);
         let h = handler.clone();
         let state = runtime_state.clone();
+        let connection = connection.clone();
         let handler_task = nacelle_core::runtime::spawn(async move {
-            execute_handler(&h, request, decoded.body_len, body, &state).await
+            execute_handler(&h, request, decoded.body_len, body, &state, &connection).await
         });
 
         let pump_result = pump_request_body(
@@ -410,12 +520,14 @@ async fn execute_handler<Req, H>(
     body_len: usize,
     body: NacelleBody,
     runtime_state: &NacelleRuntimeState,
+    connection: &NacelleConnectionMeta,
 ) -> Result<NacelleResponse, NacelleError>
 where
     Req: RequestMetadata + Send + 'static,
     H: Handler,
 {
     let request = NacelleRequest {
+        connection: connection.clone(),
         meta: NacelleRequestMeta::RawTcp(request.raw_tcp_meta(body_len)),
         body,
     };

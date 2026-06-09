@@ -7,8 +7,11 @@ The current transports are:
 - `raw_tcp` (default) — custom protocol transport over TCP
 - `reference_protocol` — optional length-delimited example protocol
 - `http` — Hyper HTTP/1 server transport
-- `tls` — Rustls-backed TLS termination for HTTP and raw TCP
-- `tls-self-signed` — optional self-signed TLS generation for local load tests and auto-deploy flows
+- `tls` — provider-neutral TLS capability shared by TLS backends
+- `rustls` — Rustls-backed TLS termination for HTTP and raw TCP
+- `openssl` — OpenSSL-backed TLS termination for raw TCP
+- `openssl-vendored` — build OpenSSL from source when native OpenSSL is unavailable
+- `tls-self-signed` — optional Rustls self-signed TLS generation for local load tests and auto-deploy flows
 - `otel` — OpenTelemetry metrics API integration
 - `tower` — adapter for `tower::Service<NacelleRequest>`
 
@@ -29,9 +32,10 @@ The workspace is split by responsibility:
 - `nacelle-http` owns the Hyper HTTP/1 transport and HTTP edge policy.
 - `nacelle` is the convenience crate that re-exports the transport crates and owns the reference length-delimited protocol.
 
-TLS is shared core infrastructure. Rustls is the implemented provider today;
-`NacelleTlsProvider` keeps the provider boundary visible so a future OpenSSL
-backend can plug in without changing the HTTP or raw TCP listener APIs.
+TLS is shared core infrastructure. `tls` is provider-neutral. `rustls` enables
+the Rustls provider for HTTP and raw TCP. `openssl` enables the raw TCP OpenSSL
+provider through `NacelleOpenSslConfig` and `serve_tcp_openssl` without enabling
+or consuming Rustls.
 
 ## Raw TCP Example
 
@@ -87,6 +91,30 @@ let handler = handler_fn({
         }
     }
 });
+```
+
+## Connection Metadata
+
+Every handler receives `request.connection`, which includes transport, peer
+address, local address, effective peer IP, and TLS metadata when available. Raw
+TCP servers can attach a typed per-connection extension at accept time:
+
+```rust
+#[derive(Clone)]
+struct ConnectionContext {
+    peer: Option<std::net::SocketAddr>,
+}
+
+let server = RawTcpServer::<FrameRequest, ()>::builder()
+    .protocol(LengthDelimitedProtocol)
+    .connection_extension_factory(|connection| ConnectionContext {
+        peer: connection.peer_addr,
+    })
+    .handler(handler_fn(|request: NacelleRequest| async move {
+        let _context = request.connection.extension::<ConnectionContext>();
+        Ok(NacelleResponse::empty_raw_tcp())
+    }))
+    .build()?;
 ```
 
 ## Multi-Port Host

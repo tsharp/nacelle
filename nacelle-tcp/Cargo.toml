@@ -12,13 +12,18 @@ categories = ["asynchronous", "network-programming"]
 
 [features]
 default = []
-tls = ["dep:rustls", "dep:tokio-rustls", "nacelle-core/tls"]
-tls-self-signed = ["tls", "nacelle-core/tls-self-signed"]
+tls = []
+rustls = ["tls", "dep:rustls", "dep:tokio-rustls", "nacelle-core/rustls"]
+openssl = ["tls", "dep:openssl", "dep:tokio-openssl", "nacelle-core/openssl"]
+openssl-vendored = ["openssl", "openssl/vendored", "nacelle-core/openssl-vendored"]
+tls-self-signed = ["rustls", "nacelle-core/tls-self-signed"]
 
 [dependencies]
 bytes = "1.10.1"
 nacelle-core = { path = "../nacelle-core" }
+openssl = { version = "0.10.79", optional = true }
 rustls = { version = "0.23.40", optional = true }
 tokio = { version = "1.47.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-openssl = { version = "0.6.5", optional = true }
 tokio-rustls = { version = "0.26.4", optional = true }
 tracing = "0.1.44"

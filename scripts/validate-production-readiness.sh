@@ -21,6 +21,8 @@ cargo test -p nacelle --no-default-features --features http,tls-self-signed --al
 cargo test -p nacelle --features reference_protocol,tls-self-signed --all-targets
 cargo clippy -p nacelle --features reference_protocol,http,tower,otel,tls-self-signed --all-targets -- -D warnings
 cargo test -p nacelle --no-default-features --all-targets
+cargo test -p nacelle-stress-test --all-targets
+cargo test -p nacelle-stress-test --no-default-features --all-targets
 cargo test -p nacelle-stress-server --all-targets
 cargo test -p nacelle-stress-server --no-default-features --all-targets
 cargo tree -i serde_yaml && {
@@ -31,6 +33,14 @@ cargo tree -i unsafe-libyaml && {
   echo "unsafe-libyaml is still present" >&2
   exit 1
 } || true
+if cargo tree -p nacelle --no-default-features --features raw_tcp,openssl -i rustls >/dev/null 2>&1; then
+  echo "rustls is selected by the raw_tcp,openssl feature set" >&2
+  exit 1
+fi
+if cargo tree --workspace --no-default-features -i rustls >/dev/null 2>&1; then
+  echo "rustls is selected by the workspace no-default feature set" >&2
+  exit 1
+fi
 if command -v cargo-audit >/dev/null 2>&1; then
   cargo audit
 else

@@ -35,13 +35,19 @@ pub mod runtime {
         serve_tcp, serve_tcp_listener_with_shutdown_deadline, serve_tcp_with_shutdown,
         serve_tcp_with_shutdown_deadline, serve_tcp_with_shutdown_timeout,
     };
-    #[cfg(all(feature = "raw_tcp", feature = "tls"))]
+    #[cfg(all(feature = "raw_tcp", feature = "openssl"))]
+    pub use nacelle_tcp::runtime::{
+        serve_tcp_openssl, serve_tcp_openssl_listener_with_shutdown_deadline,
+        serve_tcp_openssl_with_shutdown, serve_tcp_openssl_with_shutdown_deadline,
+        serve_tcp_openssl_with_shutdown_timeout,
+    };
+    #[cfg(all(feature = "raw_tcp", feature = "rustls"))]
     pub use nacelle_tcp::runtime::{
         serve_tcp_tls, serve_tcp_tls_listener_with_shutdown_deadline, serve_tcp_tls_with_shutdown,
         serve_tcp_tls_with_shutdown_deadline, serve_tcp_tls_with_shutdown_timeout,
     };
 }
-#[cfg(feature = "tls")]
+#[cfg(any(feature = "tls", feature = "openssl"))]
 pub use nacelle_core::tls;
 #[cfg(feature = "tower")]
 pub use nacelle_core::tower;
@@ -51,20 +57,25 @@ pub mod util;
 pub use host::NacelleHost;
 #[cfg(feature = "tls-self-signed")]
 pub use nacelle_core::NacelleGeneratedTlsConfig;
+#[cfg(feature = "openssl")]
+pub use nacelle_core::NacelleOpenSslConfig;
+#[cfg(feature = "rustls")]
+pub use nacelle_core::NacelleTlsConfig;
+#[cfg(any(feature = "tls", feature = "openssl"))]
+pub use nacelle_core::NacelleTlsProvider;
 #[cfg(feature = "tower")]
 pub use nacelle_core::handler_from_tower_service;
 pub use nacelle_core::{
-    BoxError, Handler, HandlerFn, MemoryReservation, NacelleBody, NacelleConfig, NacelleError,
-    NacelleInMemoryTelemetrySink, NacelleLimits, NacelleRequest, NacelleRequestMeta,
-    NacelleResponse, NacelleResponseMeta, NacelleRuntimeState, NacelleShutdown,
-    NacelleShutdownToken, NacelleTelemetry, NacelleTelemetryEvent, NacelleTelemetryEventKind,
-    NacelleTelemetrySink, NacelleTransport, RawTcpRequestMeta, RawTcpResponseMeta, RequestBodyMode,
-    RequestMetadata, TrackedPermit, handler_fn,
+    BoxError, Handler, HandlerFn, MemoryReservation, NacelleBody, NacelleConfig,
+    NacelleConnectionExtension, NacelleConnectionExtensionFactory, NacelleConnectionMeta,
+    NacelleConnectionTlsMeta, NacelleError, NacelleInMemoryTelemetrySink, NacelleLimits,
+    NacelleRequest, NacelleRequestMeta, NacelleResponse, NacelleResponseMeta, NacelleRuntimeState,
+    NacelleShutdown, NacelleShutdownToken, NacelleTelemetry, NacelleTelemetryEvent,
+    NacelleTelemetryEventKind, NacelleTelemetrySink, NacelleTransport, RawTcpRequestMeta,
+    RawTcpResponseMeta, RequestBodyMode, RequestMetadata, TrackedPermit, handler_fn,
 };
 #[cfg(feature = "http")]
 pub use nacelle_core::{HttpRequestMeta, HttpResponseMeta};
-#[cfg(feature = "tls")]
-pub use nacelle_core::{NacelleTlsConfig, NacelleTlsProvider};
 #[cfg(feature = "http")]
 pub use nacelle_http::{HyperServer, NacelleHttpPolicy};
 #[cfg(feature = "raw_tcp")]

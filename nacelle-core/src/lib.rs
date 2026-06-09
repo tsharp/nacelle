@@ -9,7 +9,7 @@ pub mod request;
 pub mod response;
 pub mod runtime;
 pub mod telemetry;
-#[cfg(feature = "tls")]
+#[cfg(any(feature = "tls", feature = "openssl"))]
 pub mod tls;
 #[cfg(feature = "tower")]
 pub mod tower;
@@ -22,7 +22,9 @@ pub use limits::{MemoryReservation, NacelleLimits, NacelleRuntimeState, TrackedP
 #[cfg(feature = "http-types")]
 pub use request::HttpRequestMeta;
 pub use request::{
-    NacelleBody, NacelleRequest, NacelleRequestMeta, RawTcpRequestMeta, RequestMetadata,
+    NacelleBody, NacelleConnectionExtension, NacelleConnectionExtensionFactory,
+    NacelleConnectionMeta, NacelleConnectionTlsMeta, NacelleRequest, NacelleRequestMeta,
+    RawTcpRequestMeta, RequestMetadata,
 };
 #[cfg(feature = "http-types")]
 pub use response::HttpResponseMeta;
@@ -33,7 +35,11 @@ pub use telemetry::{
 };
 #[cfg(feature = "tls-self-signed")]
 pub use tls::NacelleGeneratedTlsConfig;
-#[cfg(feature = "tls")]
-pub use tls::{NacelleTlsConfig, NacelleTlsProvider};
+#[cfg(feature = "openssl")]
+pub use tls::NacelleOpenSslConfig;
+#[cfg(feature = "rustls")]
+pub use tls::NacelleTlsConfig;
+#[cfg(any(feature = "tls", feature = "openssl"))]
+pub use tls::NacelleTlsProvider;
 #[cfg(feature = "tower")]
 pub use tower::handler_from_tower_service;

@@ -13,11 +13,11 @@ The reference protocol intentionally stays out of `nacelle-core` and
 `nacelle-tcp`; it is a batteries-included implementation exported by the
 umbrella `nacelle` crate.
 
-TLS lives in `nacelle-core` because it is shared by raw TCP and HTTP. The
-transport crates consume `NacelleTlsConfig` and create per-connection acceptors
-from the current config, which lets certificate reloads affect new handshakes.
-Rustls is the current provider; `NacelleTlsProvider` preserves the provider seam
-for future OpenSSL support.
+TLS lives in `nacelle-core` because the configuration and provider metadata are
+shared. `tls` is provider-neutral. `rustls` enables the Rustls provider used by
+HTTP and raw TCP. `openssl` enables the OpenSSL provider for raw TCP without
+selecting Rustls. Both providers feed `NacelleTlsProvider` and per-connection
+TLS metadata.
 
 ## Request Flow
 
@@ -31,9 +31,15 @@ listener
   -> response body encode/stream
 ```
 
-Raw TCP uses the `nacelle-tcp` `Protocol<Req>` trait to decode request heads and encode response
-frames. HTTP uses `nacelle-http` with Hyper HTTP/1 and maps requests into the same
-`NacelleRequest` / `NacelleResponse` shape.
+Raw TCP uses the `nacelle-tcp` `Protocol<Req>` trait to decode request heads and
+encode response frames. HTTP uses `nacelle-http` with Hyper HTTP/1 and maps
+requests into the same `NacelleRequest` / `NacelleResponse` shape.
+
+`NacelleRequest::connection` carries transport, peer address, local address,
+effective peer IP, TLS metadata, and an optional typed extension. Raw TCP
+servers can populate that extension with
+`connection_extension_factory(...)` for auth/session state derived at accept or
+handshake time.
 
 HTTP-specific edge policy remains in `nacelle-http`: Host, method, URI/header
 shape checks, per-peer request rate limits, access logging, and security header
@@ -80,5 +86,3 @@ Telemetry is deliberately low-cardinality. Reasons are static strings such as
 
 With `otel`, active gauges are observable instruments backed by runtime-state
 atomics, so collection reads current values without per-request metric writes.
-
-

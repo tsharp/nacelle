@@ -33,6 +33,8 @@ Invoke-Step "nacelle https self-signed tests" { cargo test -p nacelle --no-defau
 Invoke-Step "nacelle raw tcp self-signed tests" { cargo test -p nacelle --features reference_protocol,tls-self-signed --all-targets }
 Invoke-Step "nacelle all-feature clippy" { cargo clippy -p nacelle --features reference_protocol,http,tower,otel,tls-self-signed --all-targets -- -D warnings }
 Invoke-Step "nacelle no-default tests" { cargo test -p nacelle --no-default-features --all-targets }
+Invoke-Step "stress client tests" { cargo test -p nacelle-stress-test --all-targets }
+Invoke-Step "stress client no-default tests" { cargo test -p nacelle-stress-test --no-default-features --all-targets }
 Invoke-Step "stress server tests" { cargo test -p nacelle-stress-server --all-targets }
 Invoke-Step "stress server no-default tests" { cargo test -p nacelle-stress-server --no-default-features --all-targets }
 
@@ -44,6 +46,16 @@ if ($LASTEXITCODE -eq 0) {
 cargo tree -i unsafe-libyaml
 if ($LASTEXITCODE -eq 0) {
     throw "unsafe-libyaml is still present"
+}
+
+cargo tree -p nacelle --no-default-features --features raw_tcp,openssl -i rustls
+if ($LASTEXITCODE -eq 0) {
+    throw "rustls is selected by the raw_tcp,openssl feature set"
+}
+
+cargo tree --workspace --no-default-features -i rustls
+if ($LASTEXITCODE -eq 0) {
+    throw "rustls is selected by the workspace no-default feature set"
 }
 
 if (Get-Command cargo-audit -ErrorAction SilentlyContinue) {

@@ -42,6 +42,12 @@ for routing, reject it, or ignore it. If the handler rejects an opcode after
 draining the body and returns an error, the server encodes that error as a
 response frame.
 
+Handlers also receive connection metadata through `NacelleRequest::connection`.
+Raw TCP listeners populate peer/local socket addresses and TLS metadata when a
+TLS backend is active. Servers can attach typed per-connection state with
+`connection_extension_factory(...)`; handlers retrieve it with
+`request.connection.extension::<T>()`.
+
 ## Responses
 
 Handlers return a `NacelleResponse` with a streaming `NacelleBody`. The raw TCP
@@ -78,5 +84,4 @@ concurrently for one raw TCP connection. Streaming request bodies use
 `request_body_channel_capacity` for backpressure between socket reads and the
 handler, and declared streaming body bytes are reserved against the memory
 budget until the streaming request finishes.
-
 

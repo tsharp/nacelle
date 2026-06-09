@@ -24,10 +24,12 @@ use nacelle_core::error::{BoxError, NacelleError};
 use nacelle_core::handler::Handler;
 use nacelle_core::lifecycle::{NacelleDrainDeadline, NacelleShutdownToken};
 use nacelle_core::limits::NacelleRuntimeState;
-use nacelle_core::request::{HttpRequestMeta, NacelleBody, NacelleRequest, NacelleRequestMeta};
+use nacelle_core::request::{
+    HttpRequestMeta, NacelleBody, NacelleConnectionMeta, NacelleRequest, NacelleRequestMeta,
+};
 use nacelle_core::response::{NacelleResponse, NacelleResponseMeta};
 use nacelle_core::telemetry::{NacelleTelemetry, NacelleTelemetryEventKind, NacelleTransport};
-#[cfg(feature = "tls")]
+#[cfg(feature = "rustls")]
 use nacelle_core::tls::NacelleTlsConfig;
 
 type HttpBody = BoxBody<Bytes, BoxError>;
@@ -312,7 +314,7 @@ where
         Ok(())
     }
 
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "rustls")]
     pub async fn serve_tls(
         self,
         addr: SocketAddr,
@@ -322,7 +324,7 @@ where
         self.serve_tls_listener(listener, tls_config).await
     }
 
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "rustls")]
     pub async fn serve_tls_with_shutdown(
         self,
         addr: SocketAddr,
@@ -333,7 +335,7 @@ where
             .await
     }
 
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "rustls")]
     pub async fn serve_tls_with_shutdown_timeout(
         self,
         addr: SocketAddr,
@@ -351,7 +353,7 @@ where
         .await
     }
 
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "rustls")]
     pub async fn serve_tls_listener(
         self,
         listener: tokio::net::TcpListener,
@@ -362,7 +364,7 @@ where
             .await
     }
 
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "rustls")]
     pub async fn serve_tls_listener_with_shutdown(
         self,
         listener: tokio::net::TcpListener,
@@ -378,7 +380,7 @@ where
         .await
     }
 
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "rustls")]
     #[doc(hidden)]
     pub async fn serve_tls_listener_with_shutdown_deadline(
         self,
@@ -533,6 +535,7 @@ where
             .upper()
             .and_then(|bytes| usize::try_from(bytes).ok());
         let request = NacelleRequest {
+            connection: NacelleConnectionMeta::http(effective_peer_ip),
             meta: NacelleRequestMeta::Http(HttpRequestMeta {
                 method: parts.method,
                 uri: parts.uri,

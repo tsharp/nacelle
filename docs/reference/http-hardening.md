@@ -26,7 +26,7 @@ Defaults:
 
 Rejected requests receive deterministic HTTP responses where the request parser has already accepted the request: `405`, `414`, `421`, `429`, or `431`. Rejections emit low-cardinality telemetry reasons such as `host`, `method_not_allowed`, `uri_too_long`, `header_count`, `header_bytes`, and `peer_rate`.
 
-Enable the `tls` feature to terminate HTTP over Rustls. `NacelleTlsConfig` loads PEM certificate/key pairs, accepts explicit Rustls `ServerConfig` values, supports reloads for future handshakes, and enforces a TLS handshake timeout. Enable `tls-self-signed` only when local load tests or auto-deploying applications need to generate a self-signed certificate immediately.
+Enable the `rustls` feature to terminate HTTP over TLS. `NacelleTlsConfig` loads PEM certificate/key pairs, accepts explicit Rustls `ServerConfig` values, supports reloads for future handshakes, and enforces a TLS handshake timeout. Enable `tls-self-signed` only when local load tests or auto-deploying applications need to generate a self-signed certificate immediately; it implies `rustls`.
 
 For direct edge HTTPS, build TLS config with
 `NacelleTlsConfig::from_pem_with_allowed_server_names(...)` or
@@ -37,7 +37,9 @@ so configure the SNI allowlist and `NacelleHttpPolicy::with_allowed_hosts(...)`
 with the same service names unless you intentionally need a narrower Host
 policy.
 
-`NacelleTlsConfig` is shared with raw TCP TLS and intentionally stays transport-neutral. Rustls is the only provider today; `NacelleTlsProvider` keeps the API ready for a future OpenSSL provider without changing listener signatures.
+`NacelleTlsConfig` is the Rustls config shared with raw TCP TLS.
+`NacelleTlsProvider` reports `Rustls` for that config and `OpenSsl` for the raw
+TCP OpenSSL backend. HTTP TLS currently uses Rustls.
 
 Enable `HyperServer::with_access_log(true)` when direct edge deployments need structured request logs. Access events are emitted with target `nacelle::access` and include transport, method, URI, status, request bytes, elapsed microseconds, and rejection reason.
 
@@ -49,5 +51,3 @@ request metadata, and access logs use the socket peer address.
 For internet-facing deployments, a reverse proxy or load balancer can still own coarse traffic filtering and certificate automation. Nacelle now also enforces application-level body, request, connection, per-peer connection/request/connection-open-rate, timeout, TLS handshake, security header, and optional Host/header/method/URI limits in-process.
 
 Slowloris-style clients are closed by `http_header_read_timeout`. Trickle request bodies are closed by `http_request_body_read_timeout`. Slow response readers are closed by `http_response_write_timeout` when socket writes stop making progress.
-
-
