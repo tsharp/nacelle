@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NacelleTransport {
-    RawTcp,
+    Tcp,
     UnixSocket,
     Http,
 }
@@ -14,7 +14,7 @@ pub enum NacelleTransport {
 impl NacelleTransport {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::RawTcp => "raw_tcp",
+            Self::Tcp => "tcp",
             Self::UnixSocket => "unix_socket",
             Self::Http => "http",
         }
@@ -514,13 +514,13 @@ mod tests {
         let sink = Arc::new(NacelleInMemoryTelemetrySink::new());
         let telemetry = NacelleTelemetry::new().with_sink(sink.clone());
 
-        telemetry.connection_rejected(NacelleTransport::RawTcp, "connections");
+        telemetry.connection_rejected(NacelleTransport::Tcp, "connections");
         telemetry.request_rejected(NacelleTransport::Http, "host");
-        telemetry.timeout(NacelleTransport::RawTcp, "request_body_read");
+        telemetry.timeout(NacelleTransport::Tcp, "request_body_read");
         telemetry.shutdown_requested();
         telemetry.shutdown_event(
             NacelleTelemetryEventKind::DrainCompleted,
-            NacelleTransport::RawTcp,
+            NacelleTransport::Tcp,
         );
 
         let events = sink.events();

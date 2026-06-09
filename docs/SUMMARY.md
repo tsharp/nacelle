@@ -6,7 +6,7 @@
 
 - [Getting started](tutorials/getting-started.md)
 - [Run the stress harness](tutorials/stress-harness.md)
-- [Serve raw TCP with self-signed TLS](tutorials/raw-tcp-tls.md)
+- [Serve TCP with self-signed TLS](tutorials/tcp-tls.md)
 
 # Topic guides
 

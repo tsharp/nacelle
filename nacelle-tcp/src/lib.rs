@@ -1,4 +1,4 @@
-//! Raw TCP transport for Nacelle.
+//! TCP transport for Nacelle.
 
 pub mod connection;
 pub mod options;
@@ -11,4 +11,4 @@ pub use connection::{serve_connection, serve_stream};
 pub use options::NacelleUnixSocketOptions;
 pub use options::{NacelleTcpKeepalive, NacelleTcpOptions, NacelleTlsDetectionOptions};
 pub use protocol::{DecodedRequest, Protocol};
-pub use server::{NacelleServer, NacelleServerBuilder, RawTcpServer};
+pub use server::{NacelleServer, NacelleServerBuilder, TcpServer};

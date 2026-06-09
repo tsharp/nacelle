@@ -798,7 +798,7 @@ fn response_to_http(
 ) -> Result<Response<HttpBody>, NacelleError> {
     let (status, headers) = match response.meta {
         NacelleResponseMeta::Http(meta) => (meta.status, meta.headers),
-        NacelleResponseMeta::RawTcp(_) => (StatusCode::OK, http::HeaderMap::new()),
+        NacelleResponseMeta::Tcp(_) => (StatusCode::OK, http::HeaderMap::new()),
     };
 
     let mut builder = Response::builder().status(status);

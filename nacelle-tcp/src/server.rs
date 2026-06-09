@@ -39,7 +39,7 @@ pub struct NacelleServer<Req, P, H = ()> {
     _request: PhantomData<fn() -> Req>,
 }
 
-pub type RawTcpServer<Req, P, H = ()> = NacelleServer<Req, P, H>;
+pub type TcpServer<Req, P, H = ()> = NacelleServer<Req, P, H>;
 
 impl<Req, P, H> Clone for NacelleServer<Req, P, H>
 where
@@ -128,7 +128,7 @@ where
             self.config.clone(),
             self.telemetry.clone(),
             self.runtime_state.clone(),
-            self.attach_connection_extension(NacelleConnectionMeta::raw_tcp(None, None)),
+            self.attach_connection_extension(NacelleConnectionMeta::tcp(None, None)),
         )
         .await
     }
@@ -169,7 +169,7 @@ where
             self.config.clone(),
             self.telemetry.clone(),
             self.runtime_state.clone(),
-            self.attach_connection_extension(NacelleConnectionMeta::raw_tcp(None, None)),
+            self.attach_connection_extension(NacelleConnectionMeta::tcp(None, None)),
         )
         .await
     }

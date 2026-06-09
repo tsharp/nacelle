@@ -1,6 +1,6 @@
-#[cfg(any(feature = "raw_tcp", feature = "http"))]
+#[cfg(any(feature = "tcp", feature = "http"))]
 use std::net::SocketAddr;
-#[cfg(all(feature = "raw_tcp", unix))]
+#[cfg(all(feature = "tcp", unix))]
 use std::path::Path;
 
 use tokio::task::JoinSet;
@@ -9,17 +9,17 @@ use nacelle_core::error::NacelleError;
 use nacelle_core::lifecycle::{NacelleDrainDeadline, NacelleShutdown, NacelleShutdownToken};
 use nacelle_core::limits::{NacelleLimits, NacelleRuntimeState};
 use nacelle_core::telemetry::NacelleTelemetry;
-#[cfg(any(feature = "raw_tcp", feature = "http"))]
+#[cfg(any(feature = "tcp", feature = "http"))]
 use nacelle_core::telemetry::NacelleTransport;
-#[cfg(all(feature = "raw_tcp", feature = "openssl"))]
+#[cfg(all(feature = "tcp", feature = "openssl"))]
 use nacelle_core::tls::NacelleOpenSslConfig;
-#[cfg(all(any(feature = "raw_tcp", feature = "http"), feature = "rustls"))]
+#[cfg(all(any(feature = "tcp", feature = "http"), feature = "rustls"))]
 use nacelle_core::tls::NacelleTlsConfig;
-#[cfg(feature = "raw_tcp")]
+#[cfg(feature = "tcp")]
 use nacelle_tcp::NacelleTcpOptions;
-#[cfg(all(feature = "raw_tcp", feature = "openssl"))]
+#[cfg(all(feature = "tcp", feature = "openssl"))]
 use nacelle_tcp::NacelleTlsDetectionOptions;
-#[cfg(all(feature = "raw_tcp", unix))]
+#[cfg(all(feature = "tcp", unix))]
 use nacelle_tcp::NacelleUnixSocketOptions;
 
 pub struct NacelleHost {
@@ -81,12 +81,12 @@ impl NacelleHost {
         self
     }
 
-    #[cfg(feature = "raw_tcp")]
-    pub fn enable_raw_tcp<Req, P, H>(
+    #[cfg(feature = "tcp")]
+    pub fn enable_tcp<Req, P, H>(
         &mut self,
         name: impl Into<String>,
         addr: SocketAddr,
-        server: nacelle_tcp::RawTcpServer<Req, P, H>,
+        server: nacelle_tcp::TcpServer<Req, P, H>,
     ) -> &mut Self
     where
         Req: nacelle_core::request::RequestMetadata + Send + 'static,
@@ -98,7 +98,7 @@ impl NacelleHost {
         let shutdown = self.shutdown.token();
         let drain_deadline = self.drain_deadline.clone();
         let server = server.with_runtime_state(self.runtime_state.clone());
-        telemetry.listener_configured(NacelleTransport::RawTcp, &name, &addr.to_string());
+        telemetry.listener_configured(NacelleTransport::Tcp, &name, &addr.to_string());
         self.tasks.spawn(async move {
             let result = nacelle_tcp::runtime::serve_tcp_with_shutdown_deadline(
                 std::sync::Arc::new(server),
@@ -108,25 +108,20 @@ impl NacelleHost {
             )
             .await;
             if let Err(error) = &result {
-                telemetry.listener_failed(
-                    NacelleTransport::RawTcp,
-                    &name,
-                    &addr.to_string(),
-                    error,
-                );
+                telemetry.listener_failed(NacelleTransport::Tcp, &name, &addr.to_string(), error);
             }
             result
         });
         self
     }
 
-    #[cfg(feature = "raw_tcp")]
-    pub fn enable_raw_tcp_with_options<Req, P, H>(
+    #[cfg(feature = "tcp")]
+    pub fn enable_tcp_with_options<Req, P, H>(
         &mut self,
         name: impl Into<String>,
         addr: SocketAddr,
         tcp_options: NacelleTcpOptions,
-        server: nacelle_tcp::RawTcpServer<Req, P, H>,
+        server: nacelle_tcp::TcpServer<Req, P, H>,
     ) -> &mut Self
     where
         Req: nacelle_core::request::RequestMetadata + Send + 'static,
@@ -138,7 +133,7 @@ impl NacelleHost {
         let shutdown = self.shutdown.token();
         let drain_deadline = self.drain_deadline.clone();
         let server = server.with_runtime_state(self.runtime_state.clone());
-        telemetry.listener_configured(NacelleTransport::RawTcp, &name, &addr.to_string());
+        telemetry.listener_configured(NacelleTransport::Tcp, &name, &addr.to_string());
         self.tasks.spawn(async move {
             let result = nacelle_tcp::runtime::serve_tcp_with_options_and_shutdown_deadline(
                 std::sync::Arc::new(server),
@@ -149,24 +144,19 @@ impl NacelleHost {
             )
             .await;
             if let Err(error) = &result {
-                telemetry.listener_failed(
-                    NacelleTransport::RawTcp,
-                    &name,
-                    &addr.to_string(),
-                    error,
-                );
+                telemetry.listener_failed(NacelleTransport::Tcp, &name, &addr.to_string(), error);
             }
             result
         });
         self
     }
 
-    #[cfg(all(feature = "raw_tcp", unix))]
+    #[cfg(all(feature = "tcp", unix))]
     pub fn enable_unix_socket<Req, P, H>(
         &mut self,
         name: impl Into<String>,
         path: impl AsRef<Path>,
-        server: nacelle_tcp::RawTcpServer<Req, P, H>,
+        server: nacelle_tcp::TcpServer<Req, P, H>,
     ) -> &mut Self
     where
         Req: nacelle_core::request::RequestMetadata + Send + 'static,
@@ -197,13 +187,13 @@ impl NacelleHost {
         self
     }
 
-    #[cfg(all(feature = "raw_tcp", unix))]
+    #[cfg(all(feature = "tcp", unix))]
     pub fn enable_unix_socket_with_options<Req, P, H>(
         &mut self,
         name: impl Into<String>,
         path: impl AsRef<Path>,
         unix_options: NacelleUnixSocketOptions,
-        server: nacelle_tcp::RawTcpServer<Req, P, H>,
+        server: nacelle_tcp::TcpServer<Req, P, H>,
     ) -> &mut Self
     where
         Req: nacelle_core::request::RequestMetadata + Send + 'static,
@@ -235,12 +225,12 @@ impl NacelleHost {
         self
     }
 
-    #[cfg(all(feature = "raw_tcp", feature = "rustls"))]
-    pub fn enable_raw_tcp_tls<Req, P, H>(
+    #[cfg(all(feature = "tcp", feature = "rustls"))]
+    pub fn enable_tcp_tls<Req, P, H>(
         &mut self,
         name: impl Into<String>,
         addr: SocketAddr,
-        server: nacelle_tcp::RawTcpServer<Req, P, H>,
+        server: nacelle_tcp::TcpServer<Req, P, H>,
         tls_config: NacelleTlsConfig,
     ) -> &mut Self
     where
@@ -253,7 +243,7 @@ impl NacelleHost {
         let shutdown = self.shutdown.token();
         let drain_deadline = self.drain_deadline.clone();
         let server = server.with_runtime_state(self.runtime_state.clone());
-        telemetry.listener_configured(NacelleTransport::RawTcp, &name, &addr.to_string());
+        telemetry.listener_configured(NacelleTransport::Tcp, &name, &addr.to_string());
         self.tasks.spawn(async move {
             let result = nacelle_tcp::runtime::serve_tcp_tls_with_shutdown_deadline(
                 std::sync::Arc::new(server),
@@ -264,24 +254,19 @@ impl NacelleHost {
             )
             .await;
             if let Err(error) = &result {
-                telemetry.listener_failed(
-                    NacelleTransport::RawTcp,
-                    &name,
-                    &addr.to_string(),
-                    error,
-                );
+                telemetry.listener_failed(NacelleTransport::Tcp, &name, &addr.to_string(), error);
             }
             result
         });
         self
     }
 
-    #[cfg(all(feature = "raw_tcp", feature = "openssl"))]
-    pub fn enable_raw_tcp_openssl<Req, P, H>(
+    #[cfg(all(feature = "tcp", feature = "openssl"))]
+    pub fn enable_tcp_openssl<Req, P, H>(
         &mut self,
         name: impl Into<String>,
         addr: SocketAddr,
-        server: nacelle_tcp::RawTcpServer<Req, P, H>,
+        server: nacelle_tcp::TcpServer<Req, P, H>,
         tls_config: NacelleOpenSslConfig,
     ) -> &mut Self
     where
@@ -294,7 +279,7 @@ impl NacelleHost {
         let shutdown = self.shutdown.token();
         let drain_deadline = self.drain_deadline.clone();
         let server = server.with_runtime_state(self.runtime_state.clone());
-        telemetry.listener_configured(NacelleTransport::RawTcp, &name, &addr.to_string());
+        telemetry.listener_configured(NacelleTransport::Tcp, &name, &addr.to_string());
         self.tasks.spawn(async move {
             let result = nacelle_tcp::runtime::serve_tcp_openssl_with_shutdown_deadline(
                 std::sync::Arc::new(server),
@@ -305,24 +290,19 @@ impl NacelleHost {
             )
             .await;
             if let Err(error) = &result {
-                telemetry.listener_failed(
-                    NacelleTransport::RawTcp,
-                    &name,
-                    &addr.to_string(),
-                    error,
-                );
+                telemetry.listener_failed(NacelleTransport::Tcp, &name, &addr.to_string(), error);
             }
             result
         });
         self
     }
 
-    #[cfg(all(feature = "raw_tcp", feature = "openssl"))]
-    pub fn enable_raw_tcp_optional_openssl<Req, P, H>(
+    #[cfg(all(feature = "tcp", feature = "openssl"))]
+    pub fn enable_tcp_optional_openssl<Req, P, H>(
         &mut self,
         name: impl Into<String>,
         addr: SocketAddr,
-        server: nacelle_tcp::RawTcpServer<Req, P, H>,
+        server: nacelle_tcp::TcpServer<Req, P, H>,
         tls_config: NacelleOpenSslConfig,
     ) -> &mut Self
     where
@@ -330,7 +310,7 @@ impl NacelleHost {
         P: nacelle_tcp::Protocol<Req> + Send + Sync + 'static,
         H: nacelle_core::handler::Handler,
     {
-        self.enable_raw_tcp_optional_openssl_with_options(
+        self.enable_tcp_optional_openssl_with_options(
             name,
             addr,
             server,
@@ -340,12 +320,12 @@ impl NacelleHost {
         )
     }
 
-    #[cfg(all(feature = "raw_tcp", feature = "openssl"))]
-    pub fn enable_raw_tcp_optional_openssl_with_options<Req, P, H>(
+    #[cfg(all(feature = "tcp", feature = "openssl"))]
+    pub fn enable_tcp_optional_openssl_with_options<Req, P, H>(
         &mut self,
         name: impl Into<String>,
         addr: SocketAddr,
-        server: nacelle_tcp::RawTcpServer<Req, P, H>,
+        server: nacelle_tcp::TcpServer<Req, P, H>,
         tls_config: NacelleOpenSslConfig,
         tcp_options: NacelleTcpOptions,
         detection_options: NacelleTlsDetectionOptions,
@@ -360,7 +340,7 @@ impl NacelleHost {
         let shutdown = self.shutdown.token();
         let drain_deadline = self.drain_deadline.clone();
         let server = server.with_runtime_state(self.runtime_state.clone());
-        telemetry.listener_configured(NacelleTransport::RawTcp, &name, &addr.to_string());
+        telemetry.listener_configured(NacelleTransport::Tcp, &name, &addr.to_string());
         self.tasks.spawn(async move {
             let result =
                 nacelle_tcp::runtime::serve_tcp_optional_openssl_with_options_and_shutdown_deadline(
@@ -374,12 +354,7 @@ impl NacelleHost {
                 )
                 .await;
             if let Err(error) = &result {
-                telemetry.listener_failed(
-                    NacelleTransport::RawTcp,
-                    &name,
-                    &addr.to_string(),
-                    error,
-                );
+                telemetry.listener_failed(NacelleTransport::Tcp, &name, &addr.to_string(), error);
             }
             result
         });

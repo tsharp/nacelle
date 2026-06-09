@@ -2,7 +2,7 @@
 name = "nacelle-tcp"
 version = "0.1.0"
 edition = "2024"
-description = "Raw TCP transport and protocol runtime for Nacelle streaming handlers."
+description = "TCP transport and protocol runtime for Nacelle streaming handlers."
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

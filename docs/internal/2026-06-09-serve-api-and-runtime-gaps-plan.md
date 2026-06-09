@@ -35,7 +35,7 @@ run them with `nacelle::serve(...).await`.
 - `NacelleServer` owns protocol, handler, limits, telemetry, and connection
   extension factories.
 - `NacelleHost` owns multiple listeners and shared shutdown/drain state.
-- Raw TCP, OpenSSL raw TCP TLS, Rustls raw TCP TLS, HTTP, and Unix sockets exist.
+- TCP, OpenSSL TCP TLS, Rustls TCP TLS, HTTP, and Unix sockets exist.
 - TCP listeners set `TCP_NODELAY` but not keepalive.
 - OpenSSL TLS currently requires a dedicated TLS listener.
 - Unix socket paths are bound directly without cleanup or chmod.
@@ -75,7 +75,7 @@ Validation:
 ### 3. Optional OpenSSL TLS Detection
 
 Add a shared TCP listener mode that peeks at initial bytes and routes each
-connection to plain raw protocol handling or OpenSSL TLS handling.
+connection to plain TCP protocol handling or OpenSSL TLS handling.
 
 Acceptance:
 - TLS-required OpenSSL listeners keep existing behavior.
@@ -86,7 +86,7 @@ Acceptance:
 Validation:
 - Focused unit/integration checks for TLS detection helpers.
 - Existing OpenSSL check where local OpenSSL can build.
-- Existing raw TCP and TLS feature checks.
+- Existing TCP and TLS feature checks.
 
 ### 4. Unix Socket Lifecycle Helpers
 
@@ -121,7 +121,7 @@ Validation:
 
 Add a high-level app and protocol listener builder:
 - The app holds handler, telemetry, limits, runtime state, and drain behavior.
-- Protocol entries describe concrete raw protocol listeners.
+- Protocol entries describe concrete TCP protocol listeners.
 - `nacelle::serve(app).await` runs the configured listeners.
 
 Acceptance:
@@ -131,8 +131,8 @@ Acceptance:
   sockets when features/platform permit.
 
 Validation:
-- Example or unit coverage for a simple raw protocol app.
-- Feature checks across raw TCP, OpenSSL-gated APIs, HTTP/TLS combinations.
+- Example or unit coverage for a simple TCP protocol app.
+- Feature checks across TCP, OpenSSL-gated APIs, HTTP/TLS combinations.
 
 ## Risks And Mitigations
 

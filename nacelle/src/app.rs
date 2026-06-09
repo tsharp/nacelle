@@ -1,4 +1,4 @@
-#[cfg(feature = "raw_tcp")]
+#[cfg(feature = "tcp")]
 use std::net::SocketAddr;
 #[cfg(unix)]
 use std::path::Path;
@@ -12,14 +12,14 @@ use nacelle_core::telemetry::NacelleTelemetry;
 
 use crate::host::NacelleHost;
 
-#[cfg(all(feature = "raw_tcp", feature = "openssl"))]
+#[cfg(all(feature = "tcp", feature = "openssl"))]
 use nacelle_core::tls::NacelleOpenSslConfig;
-#[cfg(all(feature = "raw_tcp", feature = "openssl"))]
+#[cfg(all(feature = "tcp", feature = "openssl"))]
 use nacelle_tcp::NacelleTlsDetectionOptions;
-#[cfg(all(feature = "raw_tcp", unix))]
+#[cfg(all(feature = "tcp", unix))]
 use nacelle_tcp::NacelleUnixSocketOptions;
-#[cfg(feature = "raw_tcp")]
-use nacelle_tcp::{NacelleTcpOptions, Protocol, RawTcpServer};
+#[cfg(feature = "tcp")]
+use nacelle_tcp::{NacelleTcpOptions, Protocol, TcpServer};
 
 pub struct NacelleApp<H> {
     handler: H,
@@ -101,20 +101,20 @@ impl<H> NacelleProtocols<H> {
     }
 }
 
-#[cfg(feature = "raw_tcp")]
+#[cfg(feature = "tcp")]
 impl<H> NacelleProtocols<H>
 where
     H: Handler,
 {
-    pub fn raw_tcp<Req, P>(self, name: impl Into<String>, addr: SocketAddr, protocol: P) -> Self
+    pub fn tcp<Req, P>(self, name: impl Into<String>, addr: SocketAddr, protocol: P) -> Self
     where
         Req: nacelle_core::request::RequestMetadata + Send + 'static,
         P: Protocol<Req> + Send + Sync + 'static,
     {
-        self.raw_tcp_with_options(name, addr, protocol, NacelleTcpOptions::default())
+        self.tcp_with_options(name, addr, protocol, NacelleTcpOptions::default())
     }
 
-    pub fn raw_tcp_with_options<Req, P>(
+    pub fn tcp_with_options<Req, P>(
         mut self,
         name: impl Into<String>,
         addr: SocketAddr,
@@ -127,14 +127,14 @@ where
     {
         let name = name.into();
         self.installers.push(Box::new(move |host, app| {
-            let server = raw_tcp_server::<Req, P, H>(protocol, app)?;
-            host.enable_raw_tcp_with_options(name, addr, tcp_options, server);
+            let server = tcp_server::<Req, P, H>(protocol, app)?;
+            host.enable_tcp_with_options(name, addr, tcp_options, server);
             Ok(())
         }));
         self
     }
 
-    #[cfg(all(feature = "raw_tcp", unix))]
+    #[cfg(all(feature = "tcp", unix))]
     pub fn unix_socket<Req, P>(
         self,
         name: impl Into<String>,
@@ -148,7 +148,7 @@ where
         self.unix_socket_with_options(name, path, protocol, NacelleUnixSocketOptions::default())
     }
 
-    #[cfg(all(feature = "raw_tcp", unix))]
+    #[cfg(all(feature = "tcp", unix))]
     pub fn unix_socket_with_options<Req, P>(
         mut self,
         name: impl Into<String>,
@@ -163,15 +163,15 @@ where
         let name = name.into();
         let path = path.as_ref().to_path_buf();
         self.installers.push(Box::new(move |host, app| {
-            let server = raw_tcp_server::<Req, P, H>(protocol, app)?;
+            let server = tcp_server::<Req, P, H>(protocol, app)?;
             host.enable_unix_socket_with_options(name, path, unix_options, server);
             Ok(())
         }));
         self
     }
 
-    #[cfg(all(feature = "raw_tcp", feature = "openssl"))]
-    pub fn raw_tcp_optional_openssl<Req, P>(
+    #[cfg(all(feature = "tcp", feature = "openssl"))]
+    pub fn tcp_optional_openssl<Req, P>(
         self,
         name: impl Into<String>,
         addr: SocketAddr,
@@ -182,7 +182,7 @@ where
         Req: nacelle_core::request::RequestMetadata + Send + 'static,
         P: Protocol<Req> + Send + Sync + 'static,
     {
-        self.raw_tcp_optional_openssl_with_options(
+        self.tcp_optional_openssl_with_options(
             name,
             addr,
             protocol,
@@ -192,8 +192,8 @@ where
         )
     }
 
-    #[cfg(all(feature = "raw_tcp", feature = "openssl"))]
-    pub fn raw_tcp_optional_openssl_with_options<Req, P>(
+    #[cfg(all(feature = "tcp", feature = "openssl"))]
+    pub fn tcp_optional_openssl_with_options<Req, P>(
         mut self,
         name: impl Into<String>,
         addr: SocketAddr,
@@ -208,8 +208,8 @@ where
     {
         let name = name.into();
         self.installers.push(Box::new(move |host, app| {
-            let server = raw_tcp_server::<Req, P, H>(protocol, app)?;
-            host.enable_raw_tcp_optional_openssl_with_options(
+            let server = tcp_server::<Req, P, H>(protocol, app)?;
+            host.enable_tcp_optional_openssl_with_options(
                 name,
                 addr,
                 server,
@@ -241,17 +241,17 @@ where
     host.wait().await
 }
 
-#[cfg(feature = "raw_tcp")]
-fn raw_tcp_server<Req, P, H>(
+#[cfg(feature = "tcp")]
+fn tcp_server<Req, P, H>(
     protocol: P,
     app: &NacelleApp<H>,
-) -> Result<RawTcpServer<Req, P, H>, NacelleError>
+) -> Result<TcpServer<Req, P, H>, NacelleError>
 where
     Req: nacelle_core::request::RequestMetadata + Send + 'static,
     P: Protocol<Req> + Send + Sync + 'static,
     H: Handler,
 {
-    RawTcpServer::<Req, ()>::builder()
+    TcpServer::<Req, ()>::builder()
         .protocol(protocol)
         .config(app.config.clone())
         .telemetry(app.telemetry.clone())

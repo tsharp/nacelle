@@ -146,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config.duration.as_secs_f64(),
     );
     if config.tls_insecure {
-        println!("stress transport=raw-tcp-tls verify=insecure");
+        println!("stress transport=tcp-tls verify=insecure");
     }
 
     let barrier = Arc::new(Barrier::new(config.connections + 1));

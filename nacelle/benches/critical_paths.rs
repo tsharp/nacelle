@@ -181,13 +181,13 @@ fn telemetry_benches(c: &mut Criterion) {
     let mut group = c.benchmark_group("telemetry");
     group.bench_function("connection_opened_disabled", |b| {
         b.iter(|| {
-            black_box(&disabled).connection_opened(black_box(NacelleTransport::RawTcp));
+            black_box(&disabled).connection_opened(black_box(NacelleTransport::Tcp));
         })
     });
     group.bench_function("request_completed_disabled", |b| {
         b.iter(|| {
             black_box(&disabled).request_completed(
-                black_box(NacelleTransport::RawTcp),
+                black_box(NacelleTransport::Tcp),
                 black_box(Some(42)),
                 black_box(1024),
                 black_box(64),
@@ -198,14 +198,14 @@ fn telemetry_benches(c: &mut Criterion) {
     group.bench_function("timeout_disabled", |b| {
         b.iter(|| {
             black_box(&disabled).timeout(
-                black_box(NacelleTransport::RawTcp),
+                black_box(NacelleTransport::Tcp),
                 black_box("request_body_read"),
             );
         })
     });
     group.bench_function("connection_opened_in_memory_sink", |b| {
         b.iter(|| {
-            black_box(&enabled).connection_opened(black_box(NacelleTransport::RawTcp));
+            black_box(&enabled).connection_opened(black_box(NacelleTransport::Tcp));
         })
     });
     group.finish();

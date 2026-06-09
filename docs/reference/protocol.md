@@ -1,9 +1,8 @@
 # Reference protocol
 
 This document describes the optional `LengthDelimitedProtocol` reference
-implementation enabled by the `reference_protocol` feature. Custom raw
-protocols can implement `Protocol<Req>` directly and run over TCP or Unix
-domain sockets.
+implementation enabled by the `reference_protocol` feature. Custom protocols
+can implement `Protocol<Req>` directly and run over TCP or Unix domain sockets.
 
 ## Frame Layout
 
@@ -52,10 +51,10 @@ per-connection state with `connection_extension_factory(...)`; handlers retrieve
 
 ## Responses
 
-Handlers return a `NacelleResponse` with a streaming `NacelleBody`. The raw TCP
+Handlers return a `NacelleResponse` with a streaming `NacelleBody`. The TCP
 transport encodes that response body into one or more response frames.
-By default, raw TCP responses inherit `request_id` and `opcode` from the request
-context. Applications can override either field with `RawTcpResponseMeta`.
+By default, TCP responses inherit `request_id` and `opcode` from the request
+context. Applications can override either field with `TcpResponseMeta`.
 
 The protocol guarantees:
 
@@ -80,9 +79,9 @@ Buffer sizes and request-body chunking are configured through `NacelleConfig`.
 Runtime budgets, timeouts, and active counters are configured through
 `NacelleLimits` / `NacelleRuntimeState`.
 
-Raw TCP request handling is sequential per connection. Pipelined frames can sit
+TCP request handling is sequential per connection. Pipelined frames can sit
 in the socket/read buffer, but Nacelle does not run multiple handlers
-concurrently for one raw TCP connection. Streaming request bodies use
+concurrently for one TCP connection. Streaming request bodies use
 `request_body_channel_capacity` for backpressure between socket reads and the
 handler, and declared streaming body bytes are reserved against the memory
 budget until the streaming request finishes.

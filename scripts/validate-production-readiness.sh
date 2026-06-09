@@ -33,8 +33,8 @@ cargo tree -i unsafe-libyaml && {
   echo "unsafe-libyaml is still present" >&2
   exit 1
 } || true
-if cargo tree -p nacelle --no-default-features --features raw_tcp,openssl -i rustls >/dev/null 2>&1; then
-  echo "rustls is selected by the raw_tcp,openssl feature set" >&2
+if cargo tree -p nacelle --no-default-features --features tcp,openssl -i rustls >/dev/null 2>&1; then
+  echo "rustls is selected by the tcp,openssl feature set" >&2
   exit 1
 fi
 if cargo tree --workspace --no-default-features -i rustls >/dev/null 2>&1; then

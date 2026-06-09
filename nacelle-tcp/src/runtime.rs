@@ -1,4 +1,4 @@
-//! Tokio raw TCP listener helpers.
+//! Tokio TCP listener helpers.
 
 use std::net::SocketAddr;
 #[cfg(unix)]
@@ -722,19 +722,19 @@ where
             biased;
             _ = shutdown.changed() => break,
             joined = connections.join_next(), if !connections.is_empty() => {
-                log_connection_result(joined, NacelleTransport::RawTcp);
+                log_connection_result(joined, NacelleTransport::Tcp);
                 continue;
             }
             accepted = listener.accept() => {
                 let (stream, peer_addr) = accepted?;
                 tcp_options.apply_to_stream(&stream)?;
-                let connection = NacelleConnectionMeta::raw_tcp(Some(peer_addr), local_addr);
+                let connection = NacelleConnectionMeta::tcp(Some(peer_addr), local_addr);
                 let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
                     Ok(permit) => permit,
                     Err(error) => {
                         server
                             .telemetry()
-                            .connection_rejected(NacelleTransport::RawTcp, connection_rejection_reason(&error));
+                            .connection_rejected(NacelleTransport::Tcp, connection_rejection_reason(&error));
                         continue;
                     }
                 };
@@ -749,7 +749,7 @@ where
                             if matches!(error, NacelleError::Timeout(_)) {
                                 server
                                     .telemetry()
-                                    .timeout(NacelleTransport::RawTcp, "tls_detect");
+                                    .timeout(NacelleTransport::Tcp, "tls_detect");
                             }
                             return Err(error);
                         }
@@ -773,7 +773,7 @@ where
                         Err(_) => {
                             server
                                 .telemetry()
-                                .timeout(NacelleTransport::RawTcp, "tls_handshake");
+                                .timeout(NacelleTransport::Tcp, "tls_handshake");
                             return Err(NacelleError::Timeout("tls_handshake"));
                         }
                     }
@@ -785,12 +785,12 @@ where
     }
     server.telemetry().shutdown_event(
         NacelleTelemetryEventKind::ListenerStoppedAccepting,
-        NacelleTransport::RawTcp,
+        NacelleTransport::Tcp,
     );
     drain_connection_tasks(
         connections,
         drain_deadline.get(),
-        NacelleTransport::RawTcp,
+        NacelleTransport::Tcp,
         server.telemetry().clone(),
     )
     .await;
@@ -839,19 +839,19 @@ where
             biased;
             _ = shutdown.changed() => break,
             joined = connections.join_next(), if !connections.is_empty() => {
-                log_connection_result(joined, NacelleTransport::RawTcp);
+                log_connection_result(joined, NacelleTransport::Tcp);
                 continue;
             }
             accepted = listener.accept() => {
                 let (stream, peer_addr) = accepted?;
                 tcp_options.apply_to_stream(&stream)?;
-                let connection = NacelleConnectionMeta::raw_tcp(Some(peer_addr), local_addr);
+                let connection = NacelleConnectionMeta::tcp(Some(peer_addr), local_addr);
                 let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
                     Ok(permit) => permit,
                     Err(error) => {
                         server
                             .telemetry()
-                            .connection_rejected(NacelleTransport::RawTcp, connection_rejection_reason(&error));
+                            .connection_rejected(NacelleTransport::Tcp, connection_rejection_reason(&error));
                         continue;
                     }
                 };
@@ -865,12 +865,12 @@ where
     }
     server.telemetry().shutdown_event(
         NacelleTelemetryEventKind::ListenerStoppedAccepting,
-        NacelleTransport::RawTcp,
+        NacelleTransport::Tcp,
     );
     drain_connection_tasks(
         connections,
         drain_deadline.get(),
-        NacelleTransport::RawTcp,
+        NacelleTransport::Tcp,
         server.telemetry().clone(),
     )
     .await;
@@ -956,19 +956,19 @@ where
             biased;
             _ = shutdown.changed() => break,
             joined = connections.join_next(), if !connections.is_empty() => {
-                log_connection_result(joined, NacelleTransport::RawTcp);
+                log_connection_result(joined, NacelleTransport::Tcp);
                 continue;
             }
             accepted = listener.accept() => {
                 let (stream, peer_addr) = accepted?;
                 let _ = stream.set_nodelay(true);
-                let connection = NacelleConnectionMeta::raw_tcp(Some(peer_addr), local_addr);
+                let connection = NacelleConnectionMeta::tcp(Some(peer_addr), local_addr);
                 let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
                     Ok(permit) => permit,
                     Err(error) => {
                         server
                             .telemetry()
-                            .connection_rejected(NacelleTransport::RawTcp, connection_rejection_reason(&error));
+                            .connection_rejected(NacelleTransport::Tcp, connection_rejection_reason(&error));
                         continue;
                     }
                 };
@@ -982,7 +982,7 @@ where
                         Err(_) => {
                             server
                                 .telemetry()
-                                .timeout(NacelleTransport::RawTcp, "tls_handshake");
+                                .timeout(NacelleTransport::Tcp, "tls_handshake");
                             return Err(NacelleError::Timeout("tls_handshake"));
                         }
                     };
@@ -994,12 +994,12 @@ where
     }
     server.telemetry().shutdown_event(
         NacelleTelemetryEventKind::ListenerStoppedAccepting,
-        NacelleTransport::RawTcp,
+        NacelleTransport::Tcp,
     );
     drain_connection_tasks(
         connections,
         drain_deadline.get(),
-        NacelleTransport::RawTcp,
+        NacelleTransport::Tcp,
         server.telemetry().clone(),
     )
     .await;
@@ -1028,19 +1028,19 @@ where
             biased;
             _ = shutdown.changed() => break,
             joined = connections.join_next(), if !connections.is_empty() => {
-                log_connection_result(joined, NacelleTransport::RawTcp);
+                log_connection_result(joined, NacelleTransport::Tcp);
                 continue;
             }
             accepted = listener.accept() => {
                 let (stream, peer_addr) = accepted?;
                 let _ = stream.set_nodelay(true);
-                let connection = NacelleConnectionMeta::raw_tcp(Some(peer_addr), local_addr);
+                let connection = NacelleConnectionMeta::tcp(Some(peer_addr), local_addr);
                 let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
                     Ok(permit) => permit,
                     Err(error) => {
                         server
                             .telemetry()
-                            .connection_rejected(NacelleTransport::RawTcp, connection_rejection_reason(&error));
+                            .connection_rejected(NacelleTransport::Tcp, connection_rejection_reason(&error));
                         continue;
                     }
                 };
@@ -1062,7 +1062,7 @@ where
                         Err(_) => {
                             server
                                 .telemetry()
-                                .timeout(NacelleTransport::RawTcp, "tls_handshake");
+                                .timeout(NacelleTransport::Tcp, "tls_handshake");
                             return Err(NacelleError::Timeout("tls_handshake"));
                         }
                     }
@@ -1074,12 +1074,12 @@ where
     }
     server.telemetry().shutdown_event(
         NacelleTelemetryEventKind::ListenerStoppedAccepting,
-        NacelleTransport::RawTcp,
+        NacelleTransport::Tcp,
     );
     drain_connection_tasks(
         connections,
         drain_deadline.get(),
-        NacelleTransport::RawTcp,
+        NacelleTransport::Tcp,
         server.telemetry().clone(),
     )
     .await;
@@ -1193,12 +1193,12 @@ mod tests {
 
     use bytes::{Bytes, BytesMut};
     use nacelle_core::handler::handler_fn;
-    use nacelle_core::request::{NacelleRequest, RawTcpRequestMeta, RequestMetadata};
+    use nacelle_core::request::{NacelleRequest, RequestMetadata, TcpRequestMeta};
     use nacelle_core::response::NacelleResponse;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::protocol::{DecodedRequest, Protocol};
-    use crate::server::RawTcpServer;
+    use crate::server::TcpServer;
 
     #[derive(Debug)]
     struct TestRequest;
@@ -1208,8 +1208,8 @@ mod tests {
             1
         }
 
-        fn raw_tcp_meta(&self, body_len: usize) -> RawTcpRequestMeta {
-            RawTcpRequestMeta {
+        fn tcp_meta(&self, body_len: usize) -> TcpRequestMeta {
+            TcpRequestMeta {
                 request_id: None,
                 opcode: 1,
                 flags: 0,
@@ -1271,7 +1271,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn raw_tcp_tls_self_signed_server_accepts_request() {
+    async fn tcp_tls_self_signed_server_accepts_request() {
         let generated = nacelle_core::tls::NacelleTlsConfig::self_signed(["localhost"])
             .expect("self-signed tls");
         let certificate =
@@ -1290,10 +1290,10 @@ mod tests {
             .expect("listener should bind");
         let addr = listener.local_addr().expect("listener should have addr");
         let (shutdown, token) = nacelle_core::lifecycle::NacelleShutdown::pair();
-        let server = RawTcpServer::<TestRequest, ()>::builder()
+        let server = TcpServer::<TestRequest, ()>::builder()
             .protocol(TestProtocol)
             .handler(handler_fn(|_request: NacelleRequest| async move {
-                Ok(NacelleResponse::raw_tcp_bytes("ok"))
+                Ok(NacelleResponse::tcp_bytes("ok"))
             }))
             .build()
             .expect("server should build");

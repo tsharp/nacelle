@@ -15,7 +15,7 @@ use nacelle_core::request::{
 use nacelle_core::response::NacelleResponse;
 use nacelle_core::telemetry::NacelleTelemetry;
 
-/// Drive one raw TCP framed connection and coalesce completed responses into writes.
+/// Drive one TCP framed connection and coalesce completed responses into writes.
 pub async fn serve_connection<Req, P, H, R, W>(
     reader: R,
     writer: W,
@@ -40,12 +40,12 @@ where
         config,
         telemetry,
         runtime_state,
-        NacelleConnectionMeta::raw_tcp(None, None),
+        NacelleConnectionMeta::tcp(None, None),
     )
     .await
 }
 
-/// Drive one raw TCP framed connection with caller-supplied connection metadata.
+/// Drive one TCP framed connection with caller-supplied connection metadata.
 pub async fn serve_connection_with_connection_meta<Req, P, H, R, W>(
     mut reader: R,
     mut writer: W,
@@ -73,7 +73,7 @@ where
     let result: Result<(), NacelleError> = async {
         'conn: loop {
             if !write_buf.is_empty() {
-                write_all_with_timeout(&mut writer, &write_buf, &runtime_state, "raw_tcp_write")
+                write_all_with_timeout(&mut writer, &write_buf, &runtime_state, "tcp_write")
                     .await?;
                 write_buf.clear();
                 if write_buf.capacity() > config.response_buffer_capacity {
@@ -86,7 +86,7 @@ where
             }
 
             let bytes_read =
-                read_buf_with_timeout(&mut reader, &mut read_buf, &runtime_state, "raw_tcp_read")
+                read_buf_with_timeout(&mut reader, &mut read_buf, &runtime_state, "tcp_read")
                     .await?;
             if bytes_read == 0 {
                 if read_buf.is_empty() {
@@ -119,19 +119,14 @@ where
     .await;
 
     if !write_buf.is_empty() {
-        let _ = write_all_with_timeout(
-            &mut writer,
-            &write_buf,
-            &runtime_state,
-            "raw_tcp_final_write",
-        )
-        .await;
+        let _ = write_all_with_timeout(&mut writer, &write_buf, &runtime_state, "tcp_final_write")
+            .await;
     }
 
     result
 }
 
-/// Drive one raw TCP framed connection using a single unsplit I/O object.
+/// Drive one TCP framed connection using a single unsplit I/O object.
 pub async fn serve_stream<Req, P, H, IO>(
     io: IO,
     protocol: Arc<P>,
@@ -153,12 +148,12 @@ where
         config,
         telemetry,
         runtime_state,
-        NacelleConnectionMeta::raw_tcp(None, None),
+        NacelleConnectionMeta::tcp(None, None),
     )
     .await
 }
 
-/// Drive one raw TCP framed connection using a single unsplit I/O object and caller-supplied metadata.
+/// Drive one TCP framed connection using a single unsplit I/O object and caller-supplied metadata.
 pub async fn serve_stream_with_connection_meta<Req, P, H, IO>(
     mut io: IO,
     protocol: Arc<P>,
@@ -184,8 +179,7 @@ where
     let result: Result<(), NacelleError> = async {
         'conn: loop {
             if !write_buf.is_empty() {
-                write_all_with_timeout(&mut io, &write_buf, &runtime_state, "raw_tcp_write")
-                    .await?;
+                write_all_with_timeout(&mut io, &write_buf, &runtime_state, "tcp_write").await?;
                 write_buf.clear();
                 if write_buf.capacity() > config.response_buffer_capacity {
                     write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
@@ -197,8 +191,7 @@ where
             }
 
             let bytes_read =
-                read_buf_with_timeout(&mut io, &mut read_buf, &runtime_state, "raw_tcp_read")
-                    .await?;
+                read_buf_with_timeout(&mut io, &mut read_buf, &runtime_state, "tcp_read").await?;
             if bytes_read == 0 {
                 if read_buf.is_empty() {
                     break 'conn;
@@ -230,14 +223,14 @@ where
     .await;
 
     if !write_buf.is_empty() {
-        let _ = write_all_with_timeout(&mut io, &write_buf, &runtime_state, "raw_tcp_final_write")
-            .await;
+        let _ =
+            write_all_with_timeout(&mut io, &write_buf, &runtime_state, "tcp_final_write").await;
     }
 
     result
 }
 
-/// Drive one raw TCP framed connection using a single unsplit I/O object.
+/// Drive one TCP framed connection using a single unsplit I/O object.
 pub async fn serve_stream_without_connection_limit<Req, P, H, IO>(
     io: IO,
     protocol: Arc<P>,
@@ -259,12 +252,12 @@ where
         config,
         telemetry,
         runtime_state,
-        NacelleConnectionMeta::raw_tcp(None, None),
+        NacelleConnectionMeta::tcp(None, None),
     )
     .await
 }
 
-/// Drive one raw TCP framed connection without taking a connection permit.
+/// Drive one TCP framed connection without taking a connection permit.
 pub async fn serve_stream_without_connection_limit_with_connection_meta<Req, P, H, IO>(
     mut io: IO,
     protocol: Arc<P>,
@@ -289,8 +282,7 @@ where
     let result: Result<(), NacelleError> = async {
         'conn: loop {
             if !write_buf.is_empty() {
-                write_all_with_timeout(&mut io, &write_buf, &runtime_state, "raw_tcp_write")
-                    .await?;
+                write_all_with_timeout(&mut io, &write_buf, &runtime_state, "tcp_write").await?;
                 write_buf.clear();
                 if write_buf.capacity() > config.response_buffer_capacity {
                     write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
@@ -302,8 +294,7 @@ where
             }
 
             let bytes_read =
-                read_buf_with_timeout(&mut io, &mut read_buf, &runtime_state, "raw_tcp_read")
-                    .await?;
+                read_buf_with_timeout(&mut io, &mut read_buf, &runtime_state, "tcp_read").await?;
             if bytes_read == 0 {
                 if read_buf.is_empty() {
                     break 'conn;
@@ -335,8 +326,8 @@ where
     .await;
 
     if !write_buf.is_empty() {
-        let _ = write_all_with_timeout(&mut io, &write_buf, &runtime_state, "raw_tcp_final_write")
-            .await;
+        let _ =
+            write_all_with_timeout(&mut io, &write_buf, &runtime_state, "tcp_final_write").await;
     }
 
     result
@@ -531,7 +522,7 @@ where
 {
     let request = NacelleRequest {
         connection: connection.clone(),
-        meta: NacelleRequestMeta::RawTcp(request.raw_tcp_meta(body_len)),
+        meta: NacelleRequestMeta::Tcp(request.tcp_meta(body_len)),
         body,
     };
     let future = handler.call(request);
@@ -626,10 +617,10 @@ where
     Req: RequestMetadata,
     P: Protocol<Req> + Send + Sync + 'static,
 {
-    let Some(meta) = response.meta.raw_tcp() else {
-        return Err(NacelleError::InvalidFrame("non_raw_tcp_response"));
+    let Some(meta) = response.meta.tcp() else {
+        return Err(NacelleError::InvalidFrame("non_tcp_response"));
     };
-    protocol.apply_raw_tcp_response_meta(&mut context, meta);
+    protocol.apply_tcp_response_meta(&mut context, meta);
 
     let body = response.body;
     let mut response_body_bytes = 0_usize;

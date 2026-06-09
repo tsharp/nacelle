@@ -1,6 +1,6 @@
 # Getting started
 
-This tutorial gets a minimal raw TCP service running with the reference
+This tutorial gets a minimal TCP service running with the reference
 length-delimited protocol.
 
 ## Add nacelle
@@ -11,7 +11,7 @@ crates and owns the reference protocol:
 ```rust
 use nacelle::{
     FrameRequest, LengthDelimitedProtocol, NacelleError, NacelleRequest,
-    NacelleResponse, RawTcpServer, handler_fn,
+    NacelleResponse, TcpServer, handler_fn,
 };
 ```
 
@@ -25,14 +25,14 @@ let handler = handler_fn(|mut request: NacelleRequest| async move {
         let _ = chunk?;
     }
 
-    Ok(NacelleResponse::raw_tcp_bytes("ok"))
+    Ok(NacelleResponse::tcp_bytes("ok"))
 });
 ```
 
-## Start a raw TCP server
+## Start a TCP server
 
 ```rust
-let server = RawTcpServer::<FrameRequest, ()>::builder()
+let server = TcpServer::<FrameRequest, ()>::builder()
     .protocol(LengthDelimitedProtocol)
     .handler(handler)
     .build()?;

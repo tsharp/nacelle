@@ -4,7 +4,7 @@ use bytes::BytesMut;
 use http::StatusCode;
 use nacelle::{
     FrameRequest, HyperServer, LengthDelimitedProtocol, NacelleError, NacelleHost, NacelleRequest,
-    NacelleResponse, NacelleTelemetry, RawTcpServer, handler_fn,
+    NacelleResponse, NacelleTelemetry, TcpServer, handler_fn,
 };
 
 #[derive(Debug)]
@@ -14,7 +14,7 @@ struct AppState {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), NacelleError> {
-    let raw_tcp_addr = std::env::args()
+    let tcp_addr = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:8080".to_string())
         .parse()
@@ -34,7 +34,7 @@ async fn main() -> Result<(), NacelleError> {
         move |mut request: NacelleRequest| {
             let app = app.clone();
             async move {
-                if let Some(opcode) = request.raw_tcp_opcode()
+                if let Some(opcode) = request.tcp_opcode()
                     && opcode != 1
                 {
                     while let Some(chunk) = request.body.next_chunk().await {
@@ -55,24 +55,24 @@ async fn main() -> Result<(), NacelleError> {
                 if is_http {
                     Ok(NacelleResponse::http_bytes(StatusCode::OK, echoed.freeze()))
                 } else {
-                    Ok(NacelleResponse::raw_tcp_bytes(echoed.freeze()))
+                    Ok(NacelleResponse::tcp_bytes(echoed.freeze()))
                 }
             }
         }
     });
 
-    let raw_tcp_server = RawTcpServer::<FrameRequest, ()>::builder()
+    let tcp_server = TcpServer::<FrameRequest, ()>::builder()
         .protocol(LengthDelimitedProtocol)
         .telemetry(telemetry.clone())
         .handler(handler.clone())
         .build()?;
     let http_server = HyperServer::new(handler).with_telemetry(telemetry.clone());
 
-    println!("nacelle raw TCP echo listening on {raw_tcp_addr}");
+    println!("nacelle TCP echo listening on {tcp_addr}");
     println!("nacelle HTTP echo listening on {http_addr}");
 
     let mut host = NacelleHost::new().with_telemetry(telemetry);
-    host.enable_raw_tcp("raw-echo", raw_tcp_addr, raw_tcp_server)
+    host.enable_tcp("tcp-echo", tcp_addr, tcp_server)
         .enable_http("http-echo", http_addr, http_server);
     host.wait().await
 }

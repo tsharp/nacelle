@@ -15,7 +15,7 @@ use std::time::Duration;
 
 #[cfg(feature = "tls-self-signed")]
 use nacelle::NacelleTlsConfig;
-use nacelle::{FrameRequest, Handler, LengthDelimitedProtocol, NacelleError, RawTcpServer};
+use nacelle::{FrameRequest, Handler, LengthDelimitedProtocol, NacelleError, TcpServer};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
@@ -116,7 +116,7 @@ fn make_server_socket(
 
 async fn run_server<H>(
     listener: TcpListener,
-    server: RawTcpServer<FrameRequest, LengthDelimitedProtocol, H>,
+    server: TcpServer<FrameRequest, LengthDelimitedProtocol, H>,
     tls_config: Option<StressTlsConfig>,
     mut shutdown: watch::Receiver<bool>,
     stats: Arc<StressServerStats>,
@@ -150,7 +150,7 @@ where
 }
 
 async fn serve_accepted_stream<H>(
-    server: RawTcpServer<FrameRequest, LengthDelimitedProtocol, H>,
+    server: TcpServer<FrameRequest, LengthDelimitedProtocol, H>,
     stream: TcpStream,
     tls_config: Option<StressTlsConfig>,
 ) -> Result<(), NacelleError>
@@ -179,7 +179,7 @@ where
 
 fn spawn_server_thread<H>(
     listener: TcpListener,
-    server: RawTcpServer<FrameRequest, LengthDelimitedProtocol, H>,
+    server: TcpServer<FrameRequest, LengthDelimitedProtocol, H>,
     tls_config: Option<StressTlsConfig>,
     shutdown: watch::Receiver<bool>,
     stats: Arc<StressServerStats>,
@@ -445,9 +445,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         listen_addr,
         n_server_threads,
         if config.tls_self_signed {
-            "raw-tcp-tls"
+            "tcp-tls"
         } else {
-            "raw-tcp"
+            "tcp"
         },
     );
 

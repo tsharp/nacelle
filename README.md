@@ -4,12 +4,12 @@
 
 The current transports are:
 
-- `raw_tcp` (default) — custom protocol transport over TCP and Unix sockets
+- `tcp` (default) — custom protocol transport over TCP and Unix sockets
 - `reference_protocol` — optional length-delimited example protocol
 - `http` — Hyper HTTP/1 server transport
 - `tls` — provider-neutral TLS capability shared by TLS backends
-- `rustls` — Rustls-backed TLS termination for HTTP and raw TCP
-- `openssl` — OpenSSL-backed TLS termination for raw TCP
+- `rustls` — Rustls-backed TLS termination for HTTP and TCP
+- `openssl` — OpenSSL-backed TLS termination for TCP
 - `openssl-vendored` — build OpenSSL from source when native OpenSSL is unavailable
 - `tls-self-signed` — optional Rustls self-signed TLS generation for local load tests and auto-deploy flows
 - `otel` — OpenTelemetry metrics API integration
@@ -29,27 +29,27 @@ async fn handle(request: NacelleRequest) -> Result<NacelleResponse, NacelleError
 The workspace is split by responsibility:
 
 - `nacelle-core` owns shared handler, body, limits, telemetry, lifecycle, and TLS primitives.
-- `nacelle-tcp` owns the raw TCP transport and protocol trait.
+- `nacelle-tcp` owns the TCP transport and protocol trait.
 - `nacelle-http` owns the Hyper HTTP/1 transport and HTTP edge policy.
 - `nacelle` is the convenience crate that re-exports the transport crates and owns the reference length-delimited protocol.
 
 TLS is shared core infrastructure. `tls` is provider-neutral. `rustls` enables
-the Rustls provider for HTTP and raw TCP. `openssl` enables the raw TCP OpenSSL
+the Rustls provider for HTTP and TCP. `openssl` enables the TCP OpenSSL
 provider through `NacelleOpenSslConfig` and `serve_tcp_openssl` without enabling
 or consuming Rustls.
 
-## Raw TCP Example
+## TCP Example
 
 ```rust
 use nacelle::{
     FrameRequest, LengthDelimitedProtocol, NacelleError, NacelleRequest, NacelleResponse,
-    RawTcpServer, handler_fn,
+    TcpServer, handler_fn,
 };
 
-let server = RawTcpServer::<FrameRequest, ()>::builder()
+let server = TcpServer::<FrameRequest, ()>::builder()
     .protocol(LengthDelimitedProtocol)
     .handler(handler_fn(|mut request: NacelleRequest| async move {
-        let opcode = request.raw_tcp_opcode().unwrap_or_default();
+        let opcode = request.tcp_opcode().unwrap_or_default();
         if opcode != 1 {
             while let Some(chunk) = request.body.next_chunk().await {
                 let _ = chunk?;
@@ -58,7 +58,7 @@ let server = RawTcpServer::<FrameRequest, ()>::builder()
                 format!("unknown opcode {opcode}"),
             )));
         }
-        Ok(NacelleResponse::raw_tcp(request.body))
+        Ok(NacelleResponse::tcp(request.body))
     }))
     .build()?;
 
@@ -75,11 +75,11 @@ use nacelle::{
 };
 
 let app = NacelleApp::new(handler_fn(|request: NacelleRequest| async move {
-    Ok(NacelleResponse::raw_tcp(request.body))
+    Ok(NacelleResponse::tcp(request.body))
 }));
 
-let protocols = NacelleProtocols::new().raw_tcp::<FrameRequest, _>(
-    "raw",
+let protocols = NacelleProtocols::new().tcp::<FrameRequest, _>(
+    "tcp",
     "127.0.0.1:8080".parse()?,
     LengthDelimitedProtocol,
 );
@@ -87,7 +87,7 @@ let protocols = NacelleProtocols::new().raw_tcp::<FrameRequest, _>(
 serve(protocols, app).await?;
 ```
 
-On Unix, the same raw protocol can listen on a Unix domain socket:
+On Unix, the same protocol can listen on a Unix domain socket:
 
 ```rust
 server.serve_unix("/tmp/nacelle.sock").await?;
@@ -99,7 +99,7 @@ stale file or set socket-file permissions.
 
 TCP listeners accept `NacelleTcpOptions` for `TCP_NODELAY` and keepalive. With
 the `openssl` feature, `serve_tcp_optional_openssl(...)` and
-`NacelleProtocols::raw_tcp_optional_openssl(...)` can accept plain and OpenSSL
+`NacelleProtocols::tcp_optional_openssl(...)` can accept plain and OpenSSL
 TLS clients on the same TCP listener after a bounded TLS-prefix peek.
 
 ## Shared Application State
@@ -125,7 +125,7 @@ let handler = handler_fn({
         let app = app.clone();
         async move {
             // app.data_client uses one shared pool internally.
-            Ok(NacelleResponse::empty_raw_tcp())
+            Ok(NacelleResponse::empty_tcp())
         }
     }
 });
@@ -143,14 +143,14 @@ struct ConnectionContext {
     peer: Option<std::net::SocketAddr>,
 }
 
-let server = RawTcpServer::<FrameRequest, ()>::builder()
+let server = TcpServer::<FrameRequest, ()>::builder()
     .protocol(LengthDelimitedProtocol)
     .connection_extension_factory(|connection| ConnectionContext {
         peer: connection.peer_addr,
     })
     .handler(handler_fn(|request: NacelleRequest| async move {
         let _context = request.connection.extension::<ConnectionContext>();
-        Ok(NacelleResponse::empty_raw_tcp())
+        Ok(NacelleResponse::empty_tcp())
     }))
     .build()?;
 ```
@@ -161,7 +161,7 @@ let server = RawTcpServer::<FrameRequest, ()>::builder()
 
 ```rust
 let telemetry = NacelleTelemetry::default();
-let raw_docs = RawTcpServer::<FrameRequest, ()>::builder()
+let raw_docs = TcpServer::<FrameRequest, ()>::builder()
     .protocol(LengthDelimitedProtocol)
     .telemetry(telemetry.clone())
     .handler(handler.clone())
@@ -169,12 +169,12 @@ let raw_docs = RawTcpServer::<FrameRequest, ()>::builder()
 let http_api = HyperServer::new(handler).with_telemetry(telemetry.clone());
 
 let mut host = NacelleHost::new().with_telemetry(telemetry);
-host.enable_raw_tcp("docs-reference", "127.0.0.1:8080".parse()?, raw_docs)
+host.enable_tcp("docs-reference", "127.0.0.1:8080".parse()?, raw_docs)
     .enable_http("http-api", "127.0.0.1:8081".parse()?, http_api);
 host.wait().await?;
 ```
 
-Custom protocols use the same `RawTcpServer::<YourRequest, ()>::builder().protocol(your_protocol)` path, so multiple raw TCP protocols can listen on different ports.
+Custom protocols use the same `TcpServer::<YourRequest, ()>::builder().protocol(your_protocol)` path, so multiple TCP protocols can listen on different ports.
 
 ## Production Limits
 
@@ -200,7 +200,7 @@ let mut host = NacelleHost::new()
     .with_limits(limits);
 ```
 
-For very high connection counts, size buffers deliberately. The default raw TCP read and response buffers are `64 KiB` each, which is appropriate for throughput tests but too large for `128k` idle connections. Tune `NacelleConfig::with_read_buffer_capacity(...)` and `with_response_buffer_capacity(...)` per SKU so:
+For very high connection counts, size buffers deliberately. The default TCP read and response buffers are `64 KiB` each, which is appropriate for throughput tests but too large for `128k` idle connections. Tune `NacelleConfig::with_read_buffer_capacity(...)` and `with_response_buffer_capacity(...)` per SKU so:
 
 ```text
 max_connections * (read_buffer_capacity + response_buffer_capacity)
@@ -280,7 +280,7 @@ with `NacelleTelemetry::with_sink(...)`.
 ```bash
 cargo build --release
 
-# Raw TCP echo
+# TCP echo
 cargo run --features reference_protocol --example echo -- 127.0.0.1:8080
 
 # HTTP echo
@@ -289,10 +289,10 @@ cargo run --no-default-features --features http --example http_echo -- 127.0.0.1
 # HTTPS echo with an ephemeral self-signed certificate
 cargo run --no-default-features --features http,tls-self-signed --example tls_http_echo -- 127.0.0.1:8443
 
-# Raw TCP echo with an ephemeral self-signed certificate
+# TCP echo with an ephemeral self-signed certificate
 cargo run --features reference_protocol,tls-self-signed --example tls_echo -- 127.0.0.1:8443
 
-# Raw TCP and HTTP with one shared handler and one host
+# TCP and HTTP with one shared handler and one host
 cargo run --features reference_protocol,http --example dual_echo -- 127.0.0.1:8080 127.0.0.1:8081
 ```
 
@@ -302,13 +302,13 @@ cargo run --features reference_protocol,http --example dual_echo -- 127.0.0.1:80
 cargo run --release --package nacelle-stress-server --bin tokio-server
 
 # If ./config.toml exists, the stress server loads it automatically. The
-# checked-in root config enables self-signed raw TCP TLS for local runs.
+# checked-in root config enables self-signed TCP TLS for local runs.
 
 # Or load server limits and buffer sizing from TOML:
 cargo run --release --package nacelle-stress-server --bin tokio-server -- \
   --config nacelle-stress-server/config.example.toml
 
-# The stress server default build includes raw TCP TLS support. Plain TCP
+# The stress server default build includes TCP TLS support. Plain TCP
 # remains the runtime default; add --tls-self-signed to serve with an ephemeral
 # self-signed certificate.
 cargo run --release --package nacelle-stress-server --bin tokio-server -- \

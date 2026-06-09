@@ -24,11 +24,11 @@ pub use request::HttpRequestMeta;
 pub use request::{
     NacelleBody, NacelleConnectionExtension, NacelleConnectionExtensionFactory,
     NacelleConnectionMeta, NacelleConnectionTlsMeta, NacelleRequest, NacelleRequestMeta,
-    RawTcpRequestMeta, RequestMetadata,
+    RequestMetadata, TcpRequestMeta,
 };
 #[cfg(feature = "http-types")]
 pub use response::HttpResponseMeta;
-pub use response::{NacelleResponse, NacelleResponseMeta, RawTcpResponseMeta};
+pub use response::{NacelleResponse, NacelleResponseMeta, TcpResponseMeta};
 pub use telemetry::{
     NacelleInMemoryTelemetrySink, NacelleTelemetry, NacelleTelemetryEvent,
     NacelleTelemetryEventKind, NacelleTelemetrySink, NacelleTransport,

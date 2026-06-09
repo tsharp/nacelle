@@ -2,7 +2,7 @@
 name = "nacelle-stress-test"
 version = "0.1.0"
 edition = "2024"
-description = "Stress client binary for measuring Nacelle raw TCP throughput and latency."
+description = "Stress client binary for measuring Nacelle TCP throughput and latency."
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
