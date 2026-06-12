@@ -17,21 +17,11 @@ impl Default for NacelleTcpOptions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NacelleTcpBindOptions {
     pub stream: NacelleTcpOptions,
     pub ipv6_only: Option<bool>,
 }
-
-impl Default for NacelleTcpBindOptions {
-    fn default() -> Self {
-        Self {
-            stream: NacelleTcpOptions::default(),
-            ipv6_only: None,
-        }
-    }
-}
-
 impl NacelleTcpBindOptions {
     pub fn new() -> Self {
         Self::default()

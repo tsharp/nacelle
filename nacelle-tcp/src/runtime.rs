@@ -848,10 +848,10 @@ fn bind_tcp_listener(
         socket2::Domain::IPV6
     };
     let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
-    if addr.is_ipv6() {
-        if let Some(ipv6_only) = bind_options.ipv6_only {
-            socket.set_only_v6(ipv6_only)?;
-        }
+    if addr.is_ipv6()
+        && let Some(ipv6_only) = bind_options.ipv6_only
+    {
+        socket.set_only_v6(ipv6_only)?;
     }
     socket.set_nonblocking(true)?;
     socket.bind(&socket2::SockAddr::from(addr))?;
