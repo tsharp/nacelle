@@ -27,7 +27,8 @@ Recommended presets:
 - Internet-facing behind proxy: cap connections and requests to the container budget, keep 30 second header/body/write timeouts, and let the proxy own coarse traffic filtering or certificate automation when desired.
 - Proxy-aware HTTP: configure `NacelleHttpPolicy::with_trusted_proxy_ips(...)` only with known proxy addresses before allowing `Forwarded` or `X-Forwarded-For` to affect per-peer request limits or request metadata.
 - Direct HTTPS listener: enable `http,tls`, load certificate/key material through `NacelleTlsConfig`, configure an SNI allowlist with `from_pem_with_allowed_server_names` or `from_der_with_allowed_server_names`, set a short TLS handshake timeout, configure `max_connections_per_peer` and `max_connection_opens_per_peer_per_second`, enable HTTP access logs, and attach `NacelleHttpPolicy` with Host, method, URI, header, security-header, and per-peer request-rate limits.
-- Direct TCP TLS listener: enable `tcp,tls` with `NacelleTlsConfig` or `tcp,openssl` with `NacelleOpenSslConfig`, and keep protocol-level authentication/authorization in the application protocol.
+- Direct TCP Rustls listener: enable `tcp,tls`, load certificate/key material through `NacelleTlsConfig`, use `serve_tcp_tls` or `enable_tcp_tls`, and keep protocol-level authentication/authorization in the application protocol.
+- Direct TCP OpenSSL listener: enable `tcp,openssl`, load certificate/key material through `NacelleOpenSslConfig`, use `serve_tcp_openssl`, `enable_tcp_openssl`, or `NacelleProtocols::tcp_openssl`, and configure the `SslAcceptor` yourself when you need OpenSSL-specific policy.
 - Local load-test/autodeploy HTTPS: enable `tls-self-signed` and call `NacelleTlsConfig::self_signed(...)`; do not treat generated certificates as a public trust or rotation strategy.
 - High concurrency: reduce TCP buffer capacities before raising `max_connections`.
 
@@ -43,6 +44,13 @@ total_budget =
 ```
 
 TCP processes requests sequentially per connection. `request_body_channel_capacity` controls the queued streaming chunks between the socket reader and handler. HTTP uses Hyper's internal buffers plus Nacelle's body queue, so leave extra headroom when enabling large request bodies.
+
+For TCP protocols, `NacelleLimits::max_request_body_bytes` is the default body
+limit. Custom request metadata can override
+`RequestMetadata::max_body_bytes(connection, default_limit)` to choose a
+per-request limit after head decoding and before body buffering or streaming.
+This is useful for phase-aware protocols that keep connection auth state in a
+typed connection extension and need a smaller unauthenticated body cap.
 
 Dangerous configurations:
 

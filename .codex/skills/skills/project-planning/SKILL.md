@@ -65,3 +65,5 @@ Do not say "production ready" without scope. Prefer concrete claims such as:
 ## Checkpoint Commits
 
 When checkpoint commits are requested, plan coherent slices such as docs/plan, tests, architecture boundary, behavior change, migration, security control, performance profile, validation/CI, or release prep. Each checkpoint should build or test at the level required by its risk.
+
+Use https://www.conventionalcommits.org commit style.
