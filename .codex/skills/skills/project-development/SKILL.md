@@ -57,4 +57,4 @@ Prefer repo-provided commands from scripts, CI, task runners, or docs. If the pr
 
 ## Checkpoint Commits
 
-Use the repository's commit style. If no style is evident, use short conventional messages such as `docs: ...`, `feat: ...`, `fix: ...`, `perf: ...`, `test: ...`, or `build: ...`.
+Use https://www.conventionalcommits.org commit style. If no style is evident, use short conventional messages such as `docs: ...`, `feat: ...`, `fix: ...`, `perf: ...`, `test: ...`, or `build: ...`.
