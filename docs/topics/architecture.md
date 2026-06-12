@@ -36,11 +36,12 @@ decode request heads and encode response frames. HTTP uses `nacelle-http` with
 Hyper HTTP/1 and maps requests into the same `NacelleRequest` /
 `NacelleResponse` shape.
 
-`NacelleRequest::connection` carries transport, peer address, local address,
-local Unix socket path, effective peer IP, TLS metadata, and an optional typed
-extension. Raw protocol servers can populate that extension with
-`connection_extension_factory(...)` for auth/session state derived at accept or
-handshake time.
+`NacelleRequest::connection` carries transport, a stable connection id, peer
+address, local address, local Unix socket path, effective peer IP, TLS metadata,
+and an optional typed extension. Raw protocol servers can populate that
+extension with `connection_extension_factory(...)` for auth/session state
+derived at accept or handshake time. Apps using `serve(protocols, app)` can set
+the same extension factory on `NacelleApp`.
 
 HTTP-specific edge policy remains in `nacelle-http`: Host, method, URI/header
 shape checks, per-peer request rate limits, access logging, and security header

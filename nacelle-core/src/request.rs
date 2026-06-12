@@ -4,6 +4,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -18,11 +19,15 @@ pub type NacelleConnectionExtension = Arc<dyn Any + Send + Sync>;
 pub type NacelleConnectionExtensionFactory =
     Arc<dyn Fn(&NacelleConnectionMeta) -> Option<NacelleConnectionExtension> + Send + Sync>;
 
+static NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NacelleConnectionTlsMeta {
     pub provider: &'static str,
     pub protocol: Option<String>,
     pub cipher_suite: Option<String>,
+    pub cipher_bits: Option<u16>,
+    pub cipher_algorithm_bits: Option<u16>,
     pub server_name: Option<String>,
 }
 
@@ -32,6 +37,8 @@ impl NacelleConnectionTlsMeta {
             provider,
             protocol: None,
             cipher_suite: None,
+            cipher_bits: None,
+            cipher_algorithm_bits: None,
             server_name: None,
         }
     }
@@ -46,6 +53,16 @@ impl NacelleConnectionTlsMeta {
         self
     }
 
+    pub fn with_cipher_bits(mut self, cipher_bits: u16) -> Self {
+        self.cipher_bits = Some(cipher_bits);
+        self
+    }
+
+    pub fn with_cipher_algorithm_bits(mut self, cipher_algorithm_bits: u16) -> Self {
+        self.cipher_algorithm_bits = Some(cipher_algorithm_bits);
+        self
+    }
+
     pub fn with_server_name(mut self, server_name: impl Into<String>) -> Self {
         self.server_name = Some(server_name.into());
         self
@@ -54,6 +71,7 @@ impl NacelleConnectionTlsMeta {
 
 #[derive(Clone)]
 pub struct NacelleConnectionMeta {
+    pub connection_id: u64,
     pub transport: NacelleTransport,
     pub peer_addr: Option<SocketAddr>,
     pub peer_ip: Option<IpAddr>,
@@ -66,6 +84,7 @@ pub struct NacelleConnectionMeta {
 impl fmt::Debug for NacelleConnectionMeta {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NacelleConnectionMeta")
+            .field("connection_id", &self.connection_id)
             .field("transport", &self.transport)
             .field("peer_addr", &self.peer_addr)
             .field("peer_ip", &self.peer_ip)
@@ -80,6 +99,7 @@ impl fmt::Debug for NacelleConnectionMeta {
 impl NacelleConnectionMeta {
     pub fn tcp(peer_addr: Option<SocketAddr>, local_addr: Option<SocketAddr>) -> Self {
         Self {
+            connection_id: next_connection_id(),
             transport: NacelleTransport::Tcp,
             peer_ip: peer_addr.map(|addr| addr.ip()),
             peer_addr,
@@ -92,6 +112,7 @@ impl NacelleConnectionMeta {
 
     pub fn unix_socket(local_path: Option<PathBuf>) -> Self {
         Self {
+            connection_id: next_connection_id(),
             transport: NacelleTransport::UnixSocket,
             peer_addr: None,
             peer_ip: None,
@@ -104,6 +125,7 @@ impl NacelleConnectionMeta {
 
     pub fn http(peer_ip: Option<IpAddr>) -> Self {
         Self {
+            connection_id: next_connection_id(),
             transport: NacelleTransport::Http,
             peer_addr: None,
             peer_ip,
@@ -116,6 +138,11 @@ impl NacelleConnectionMeta {
 
     pub fn with_tls(mut self, tls: NacelleConnectionTlsMeta) -> Self {
         self.tls = Some(tls);
+        self
+    }
+
+    pub fn with_connection_id(mut self, connection_id: u64) -> Self {
+        self.connection_id = connection_id;
         self
     }
 
@@ -137,6 +164,10 @@ impl NacelleConnectionMeta {
     {
         self.extension.clone()?.downcast::<T>().ok()
     }
+}
+
+fn next_connection_id() -> u64 {
+    NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -385,10 +416,37 @@ mod tests {
         let path = PathBuf::from("/tmp/nacelle.sock");
         let meta = NacelleConnectionMeta::unix_socket(Some(path.clone()));
 
+        assert_ne!(meta.connection_id, 0);
         assert_eq!(meta.transport, NacelleTransport::UnixSocket);
         assert_eq!(meta.local_path, Some(path));
         assert_eq!(meta.peer_addr, None);
         assert_eq!(meta.peer_ip, None);
         assert_eq!(meta.local_addr, None);
+    }
+
+    #[test]
+    fn connection_meta_assigns_stable_unique_ids() {
+        let first = NacelleConnectionMeta::tcp(None, None);
+        let second = NacelleConnectionMeta::tcp(None, None);
+        let first_clone = first.clone();
+
+        assert_ne!(first.connection_id, 0);
+        assert_ne!(first.connection_id, second.connection_id);
+        assert_eq!(first.connection_id, first_clone.connection_id);
+    }
+
+    #[test]
+    fn tls_meta_records_cipher_strength() {
+        let meta = NacelleConnectionTlsMeta::new("openssl")
+            .with_protocol("TLSv1.3")
+            .with_cipher_suite("TLS_AES_256_GCM_SHA384")
+            .with_cipher_bits(256)
+            .with_cipher_algorithm_bits(256);
+
+        assert_eq!(meta.provider, "openssl");
+        assert_eq!(meta.protocol.as_deref(), Some("TLSv1.3"));
+        assert_eq!(meta.cipher_suite.as_deref(), Some("TLS_AES_256_GCM_SHA384"));
+        assert_eq!(meta.cipher_bits, Some(256));
+        assert_eq!(meta.cipher_algorithm_bits, Some(256));
     }
 }

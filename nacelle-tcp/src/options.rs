@@ -17,6 +17,46 @@ impl Default for NacelleTcpOptions {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NacelleTcpBindOptions {
+    pub stream: NacelleTcpOptions,
+    pub ipv6_only: Option<bool>,
+}
+
+impl Default for NacelleTcpBindOptions {
+    fn default() -> Self {
+        Self {
+            stream: NacelleTcpOptions::default(),
+            ipv6_only: None,
+        }
+    }
+}
+
+impl NacelleTcpBindOptions {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_stream_options(mut self, stream: NacelleTcpOptions) -> Self {
+        self.stream = stream;
+        self
+    }
+
+    pub fn with_ipv6_only(mut self, ipv6_only: bool) -> Self {
+        self.ipv6_only = Some(ipv6_only);
+        self
+    }
+}
+
+impl From<NacelleTcpOptions> for NacelleTcpBindOptions {
+    fn from(stream: NacelleTcpOptions) -> Self {
+        Self {
+            stream,
+            ipv6_only: None,
+        }
+    }
+}
+
 impl NacelleTcpOptions {
     pub fn new() -> Self {
         Self::default()
@@ -187,5 +227,16 @@ mod tests {
         let options = NacelleTlsDetectionOptions::default();
 
         assert_eq!(options.timeout, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn tcp_bind_options_can_force_ipv6_only() {
+        let stream = NacelleTcpOptions::new().with_nodelay(false);
+        let options = NacelleTcpBindOptions::new()
+            .with_stream_options(stream.clone())
+            .with_ipv6_only(true);
+
+        assert_eq!(options.stream, stream);
+        assert_eq!(options.ipv6_only, Some(true));
     }
 }

@@ -3,16 +3,14 @@
 use std::net::SocketAddr;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
-#[cfg(feature = "openssl")]
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::options::NacelleTcpOptions;
 #[cfg(feature = "openssl")]
 use crate::options::NacelleTlsDetectionOptions;
 #[cfg(unix)]
 use crate::options::NacelleUnixSocketOptions;
+use crate::options::{NacelleTcpBindOptions, NacelleTcpOptions};
 use crate::protocol::Protocol;
 use crate::server::NacelleServer;
 use nacelle_core::error::NacelleError;
@@ -138,6 +136,30 @@ where
         tcp_options,
         shutdown,
         NacelleDrainDeadline::new(drain_timeout),
+    )
+    .await
+}
+
+#[doc(hidden)]
+pub async fn serve_tcp_with_bind_options_and_shutdown_deadline<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    bind_options: NacelleTcpBindOptions,
+    shutdown: NacelleShutdownToken,
+    drain_deadline: NacelleDrainDeadline,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let listener = bind_tcp_listener(addr, &bind_options)?;
+    serve_tcp_listener_with_options_and_shutdown_deadline(
+        server,
+        listener,
+        bind_options.stream,
+        shutdown,
+        drain_deadline,
     )
     .await
 }
@@ -378,6 +400,71 @@ where
 }
 
 #[cfg(feature = "openssl")]
+pub async fn serve_tcp_openssl_with_options<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tls_config: NacelleOpenSslConfig,
+    tcp_options: NacelleTcpOptions,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let (_shutdown, token) = nacelle_core::lifecycle::NacelleShutdown::pair();
+    serve_tcp_openssl_with_options_and_shutdown(server, addr, tls_config, tcp_options, token).await
+}
+
+#[cfg(feature = "openssl")]
+pub async fn serve_tcp_openssl_with_options_and_shutdown<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tls_config: NacelleOpenSslConfig,
+    tcp_options: NacelleTcpOptions,
+    shutdown: NacelleShutdownToken,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    serve_tcp_openssl_with_options_and_shutdown_timeout(
+        server,
+        addr,
+        tls_config,
+        tcp_options,
+        shutdown,
+        Duration::from_secs(30),
+    )
+    .await
+}
+
+#[cfg(feature = "openssl")]
+pub async fn serve_tcp_openssl_with_options_and_shutdown_timeout<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tls_config: NacelleOpenSslConfig,
+    tcp_options: NacelleTcpOptions,
+    shutdown: NacelleShutdownToken,
+    drain_timeout: Duration,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    serve_tcp_openssl_with_options_and_shutdown_deadline(
+        server,
+        addr,
+        tls_config,
+        tcp_options,
+        shutdown,
+        NacelleDrainDeadline::new(drain_timeout),
+    )
+    .await
+}
+
+#[cfg(feature = "openssl")]
 pub async fn serve_tcp_optional_openssl<Req, P, H>(
     server: Arc<NacelleServer<Req, P, H>>,
     addr: SocketAddr,
@@ -581,11 +668,64 @@ where
     P: Protocol<Req> + Send + Sync + 'static,
     H: Handler,
 {
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    serve_tcp_openssl_listener_with_shutdown_deadline(
+    serve_tcp_openssl_with_bind_options_and_shutdown_deadline(
+        server,
+        addr,
+        tls_config,
+        NacelleTcpBindOptions::default(),
+        shutdown,
+        drain_deadline,
+    )
+    .await
+}
+
+#[cfg(feature = "openssl")]
+#[doc(hidden)]
+pub async fn serve_tcp_openssl_with_options_and_shutdown_deadline<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tls_config: NacelleOpenSslConfig,
+    tcp_options: NacelleTcpOptions,
+    shutdown: NacelleShutdownToken,
+    drain_deadline: NacelleDrainDeadline,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    serve_tcp_openssl_with_bind_options_and_shutdown_deadline(
+        server,
+        addr,
+        tls_config,
+        NacelleTcpBindOptions::from(tcp_options),
+        shutdown,
+        drain_deadline,
+    )
+    .await
+}
+
+#[cfg(feature = "openssl")]
+#[doc(hidden)]
+pub async fn serve_tcp_openssl_with_bind_options_and_shutdown_deadline<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tls_config: NacelleOpenSslConfig,
+    bind_options: NacelleTcpBindOptions,
+    shutdown: NacelleShutdownToken,
+    drain_deadline: NacelleDrainDeadline,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let listener = bind_tcp_listener(addr, &bind_options)?;
+    serve_tcp_openssl_listener_with_options_and_shutdown_deadline(
         server,
         listener,
         tls_config,
+        bind_options.stream,
         shutdown,
         drain_deadline,
     )
@@ -609,12 +749,41 @@ where
     P: Protocol<Req> + Send + Sync + 'static,
     H: Handler,
 {
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    serve_tcp_optional_openssl_with_bind_options_and_shutdown_deadline(
+        server,
+        addr,
+        tls_config,
+        NacelleTcpBindOptions::from(tcp_options),
+        detection_options,
+        shutdown,
+        drain_deadline,
+    )
+    .await
+}
+
+#[cfg(feature = "openssl")]
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_tcp_optional_openssl_with_bind_options_and_shutdown_deadline<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    addr: SocketAddr,
+    tls_config: NacelleOpenSslConfig,
+    bind_options: NacelleTcpBindOptions,
+    detection_options: NacelleTlsDetectionOptions,
+    shutdown: NacelleShutdownToken,
+    drain_deadline: NacelleDrainDeadline,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let listener = bind_tcp_listener(addr, &bind_options)?;
     serve_tcp_optional_openssl_listener_with_options_and_shutdown_deadline(
         server,
         listener,
         tls_config,
-        tcp_options,
+        bind_options.stream,
         detection_options,
         shutdown,
         drain_deadline,
@@ -667,6 +836,28 @@ where
         drain_deadline,
     )
     .await
+}
+
+fn bind_tcp_listener(
+    addr: SocketAddr,
+    bind_options: &NacelleTcpBindOptions,
+) -> std::io::Result<tokio::net::TcpListener> {
+    let domain = if addr.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+    if addr.is_ipv6() {
+        if let Some(ipv6_only) = bind_options.ipv6_only {
+            socket.set_only_v6(ipv6_only)?;
+        }
+    }
+    socket.set_nonblocking(true)?;
+    socket.bind(&socket2::SockAddr::from(addr))?;
+    socket.listen(1024)?;
+    let listener: std::net::TcpListener = socket.into();
+    tokio::net::TcpListener::from_std(listener)
 }
 
 #[cfg(unix)]
@@ -764,7 +955,7 @@ where
                         .map_err(NacelleError::protocol)?;
                     match tokio::time::timeout(
                         handshake_timeout,
-                        Pin::new(&mut stream).accept(),
+                        std::pin::Pin::new(&mut stream).accept(),
                     )
                     .await
                     {
@@ -1012,6 +1203,32 @@ pub async fn serve_tcp_openssl_listener_with_shutdown_deadline<Req, P, H>(
     server: Arc<NacelleServer<Req, P, H>>,
     listener: tokio::net::TcpListener,
     tls_config: NacelleOpenSslConfig,
+    shutdown: NacelleShutdownToken,
+    drain_deadline: NacelleDrainDeadline,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    serve_tcp_openssl_listener_with_options_and_shutdown_deadline(
+        server,
+        listener,
+        tls_config,
+        NacelleTcpOptions::default(),
+        shutdown,
+        drain_deadline,
+    )
+    .await
+}
+
+#[cfg(feature = "openssl")]
+#[doc(hidden)]
+pub async fn serve_tcp_openssl_listener_with_options_and_shutdown_deadline<Req, P, H>(
+    server: Arc<NacelleServer<Req, P, H>>,
+    listener: tokio::net::TcpListener,
+    tls_config: NacelleOpenSslConfig,
+    tcp_options: NacelleTcpOptions,
     mut shutdown: NacelleShutdownToken,
     drain_deadline: NacelleDrainDeadline,
 ) -> Result<(), NacelleError>
@@ -1033,7 +1250,7 @@ where
             }
             accepted = listener.accept() => {
                 let (stream, peer_addr) = accepted?;
-                let _ = stream.set_nodelay(true);
+                tcp_options.apply_to_stream(&stream)?;
                 let connection = NacelleConnectionMeta::tcp(Some(peer_addr), local_addr);
                 let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
                     Ok(permit) => permit,
@@ -1053,7 +1270,7 @@ where
                         .map_err(NacelleError::protocol)?;
                     match tokio::time::timeout(
                         handshake_timeout,
-                        Pin::new(&mut stream).accept(),
+                        std::pin::Pin::new(&mut stream).accept(),
                     )
                     .await
                     {
@@ -1091,6 +1308,13 @@ fn openssl_tls_meta(ssl: &SslRef) -> NacelleConnectionTlsMeta {
     let mut meta = NacelleConnectionTlsMeta::new("openssl").with_protocol(ssl.version_str());
     if let Some(cipher) = ssl.current_cipher() {
         meta = meta.with_cipher_suite(cipher.name());
+        let bits = cipher.bits();
+        if let Ok(secret_bits) = u16::try_from(bits.secret) {
+            meta = meta.with_cipher_bits(secret_bits);
+        }
+        if let Ok(algorithm_bits) = u16::try_from(bits.algorithm) {
+            meta = meta.with_cipher_algorithm_bits(algorithm_bits);
+        }
     }
     if let Some(server_name) = ssl.servername(NameType::HOST_NAME) {
         meta = meta.with_server_name(server_name);
@@ -1338,6 +1562,79 @@ mod tests {
 mod openssl_tests {
     use super::*;
 
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use bytes::{Bytes, BytesMut};
+    use nacelle_core::handler::handler_fn;
+    use nacelle_core::request::{NacelleRequest, RequestMetadata};
+    use nacelle_core::response::NacelleResponse;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use crate::protocol::{DecodedRequest, Protocol};
+    use crate::server::TcpServer;
+
+    #[derive(Debug)]
+    struct PlainRequest;
+
+    impl RequestMetadata for PlainRequest {
+        fn opcode(&self) -> u64 {
+            1
+        }
+    }
+
+    struct PlainProtocol;
+
+    impl Protocol<PlainRequest> for PlainProtocol {
+        type ResponseContext = ();
+        type ErrorContext = ();
+
+        fn decode_head(
+            &self,
+            src: &mut BytesMut,
+            _max_frame_len: usize,
+        ) -> Result<Option<DecodedRequest<PlainRequest>>, NacelleError> {
+            if src.is_empty() {
+                return Ok(None);
+            }
+            src.clear();
+            Ok(Some(DecodedRequest {
+                request: PlainRequest,
+                body_len: 0,
+            }))
+        }
+
+        fn response_context(&self, _req: &PlainRequest) -> Self::ResponseContext {}
+
+        fn error_context(&self, _req: &PlainRequest) -> Self::ErrorContext {}
+
+        fn encode_response_chunk(
+            &self,
+            _context: &mut Self::ResponseContext,
+            chunk: Bytes,
+            dst: &mut BytesMut,
+        ) -> Result<(), NacelleError> {
+            dst.extend_from_slice(&chunk);
+            Ok(())
+        }
+
+        fn encode_response_end(
+            &self,
+            _context: &mut Self::ResponseContext,
+            _dst: &mut BytesMut,
+        ) -> Result<(), NacelleError> {
+            Ok(())
+        }
+
+        fn encode_error(
+            &self,
+            _context: Option<&Self::ErrorContext>,
+            _error: &NacelleError,
+            _dst: &mut BytesMut,
+        ) -> Result<(), NacelleError> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn tls_detection_accepts_tls_handshake_prefix() {
         assert!(peeked_bytes_can_be_tls(&[0x16]));
@@ -1350,5 +1647,110 @@ mod openssl_tests {
         assert!(!peeked_bytes_can_be_tls(&[0x01]));
         assert!(!peeked_bytes_can_be_tls(&[0x16, 0x02]));
         assert!(!peeked_bytes_can_be_tls(&[0x16, 0x03, 0x05]));
+    }
+
+    #[tokio::test]
+    async fn required_openssl_rejects_plaintext_before_handler() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let (shutdown, token) = nacelle_core::lifecycle::NacelleShutdown::pair();
+        let handler_called = Arc::new(AtomicBool::new(false));
+        let server = TcpServer::<PlainRequest, ()>::builder()
+            .protocol(PlainProtocol)
+            .handler(handler_fn({
+                let handler_called = handler_called.clone();
+                move |_request: NacelleRequest| {
+                    handler_called.store(true, Ordering::SeqCst);
+                    async move { Ok(NacelleResponse::empty_tcp()) }
+                }
+            }))
+            .build()
+            .expect("server should build");
+        let server_task = tokio::spawn(serve_tcp_openssl_listener_with_shutdown_deadline(
+            Arc::new(server),
+            listener,
+            test_open_ssl_config(),
+            token,
+            NacelleDrainDeadline::new(Duration::from_millis(25)),
+        ));
+
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        client
+            .write_all(&[0x01, 0x02, 0x03])
+            .await
+            .expect("plaintext should write");
+        let mut response = [0_u8; 1];
+        let _ = tokio::time::timeout(Duration::from_millis(500), client.read(&mut response)).await;
+
+        assert!(!handler_called.load(Ordering::SeqCst));
+
+        shutdown.shutdown();
+        tokio::time::timeout(Duration::from_secs(1), server_task)
+            .await
+            .expect("server should stop")
+            .expect("server task should join")
+            .expect("server should exit");
+    }
+
+    fn test_open_ssl_config() -> NacelleOpenSslConfig {
+        use openssl::asn1::Asn1Time;
+        use openssl::bn::BigNum;
+        use openssl::hash::MessageDigest;
+        use openssl::pkey::PKey;
+        use openssl::rsa::Rsa;
+        use openssl::ssl::{SslAcceptor, SslMethod};
+        use openssl::x509::{X509, X509NameBuilder};
+
+        let rsa = Rsa::generate(2048).expect("rsa key should generate");
+        let private_key = PKey::from_rsa(rsa).expect("pkey should build");
+        let mut name = X509NameBuilder::new().expect("name should build");
+        name.append_entry_by_text("CN", "localhost")
+            .expect("common name should set");
+        let name = name.build();
+        let serial = BigNum::from_u32(1)
+            .expect("serial should build")
+            .to_asn1_integer()
+            .expect("serial should convert");
+        let mut certificate = X509::builder().expect("certificate should build");
+        certificate.set_version(2).expect("version should set");
+        certificate
+            .set_serial_number(&serial)
+            .expect("serial should set");
+        certificate
+            .set_subject_name(&name)
+            .expect("subject should set");
+        certificate
+            .set_issuer_name(&name)
+            .expect("issuer should set");
+        certificate
+            .set_pubkey(&private_key)
+            .expect("public key should set");
+        certificate
+            .set_not_before(Asn1Time::days_from_now(0).expect("not before").as_ref())
+            .expect("not before should set");
+        certificate
+            .set_not_after(Asn1Time::days_from_now(1).expect("not after").as_ref())
+            .expect("not after should set");
+        certificate
+            .sign(&private_key, MessageDigest::sha256())
+            .expect("certificate should sign");
+        let certificate = certificate.build();
+
+        let mut acceptor = SslAcceptor::mozilla_intermediate(SslMethod::tls_server())
+            .expect("acceptor should build");
+        acceptor
+            .set_private_key(&private_key)
+            .expect("private key should set");
+        acceptor
+            .set_certificate(&certificate)
+            .expect("certificate should set");
+        acceptor
+            .check_private_key()
+            .expect("private key should match");
+        NacelleOpenSslConfig::from_acceptor(acceptor.build())
     }
 }

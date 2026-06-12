@@ -9,8 +9,9 @@ Recommended presets:
 - Proxy-aware HTTP: configure `NacelleHttpPolicy::with_trusted_proxy_ips(...)` only with known proxy addresses before allowing `Forwarded` or `X-Forwarded-For` to affect per-peer request limits or request metadata.
 - Direct HTTPS listener: enable `http,tls`, load certificate/key material through `NacelleTlsConfig`, configure an SNI allowlist with `from_pem_with_allowed_server_names` or `from_der_with_allowed_server_names`, set a short TLS handshake timeout, configure `max_connections_per_peer` and `max_connection_opens_per_peer_per_second`, enable HTTP access logs, and attach `NacelleHttpPolicy` with Host, method, URI, header, security-header, and per-peer request-rate limits.
 - Direct TCP Rustls listener: enable `tcp,tls`, load certificate/key material through `NacelleTlsConfig`, use `serve_tcp_tls` or `enable_tcp_tls`, and keep protocol-level authentication/authorization in the application protocol.
-- Direct TCP OpenSSL listener: enable `tcp,openssl`, load certificate/key material through `NacelleOpenSslConfig`, use `serve_tcp_openssl` or `enable_tcp_openssl`, and configure the `SslAcceptor` yourself when you need OpenSSL-specific policy.
+- Direct TCP OpenSSL listener: enable `tcp,openssl`, load certificate/key material through `NacelleOpenSslConfig`, use `serve_tcp_openssl`, `enable_tcp_openssl`, or `NacelleProtocols::tcp_openssl`, and configure the `SslAcceptor` yourself when you need OpenSSL-specific policy.
 - Optional TCP OpenSSL listener: enable `tcp,openssl`, use `serve_tcp_optional_openssl` or the matching host/app builder method, and keep `NacelleTlsDetectionOptions::timeout` short enough for your accepted-connection budget.
+- IPv4 plus IPv6 TCP bind: use the `NacelleProtocols::*_dual_stack(...)` helpers when a serve-based app should bind both wildcard families for one protocol. The helpers register separate IPv4 and IPv6 listeners and force the IPv6 listener to v6-only mode.
 - Unix socket listener: enable `tcp` on Unix and use `NacelleUnixSocketOptions` only when this process owns stale-path cleanup or socket-file permissions.
 - Local load-test/autodeploy HTTPS: enable `tls-self-signed` and call `NacelleTlsConfig::self_signed(...)`; do not treat generated certificates as a public trust or rotation strategy.
 - High concurrency: reduce TCP buffer capacities before raising `max_connections`.
@@ -28,8 +29,10 @@ total_budget =
 
 TCP processes requests sequentially per connection. `request_body_channel_capacity` controls the queued streaming chunks between the socket reader and handler. HTTP uses Hyper's internal buffers plus Nacelle's body queue, so leave extra headroom when enabling large request bodies.
 
-`NacelleTcpOptions` controls TCP listener socket behavior. Defaults preserve the
+`NacelleTcpOptions` controls accepted TCP stream behavior. Defaults preserve the
 existing behavior: `TCP_NODELAY` enabled and TCP keepalive disabled.
+`NacelleTcpBindOptions` adds listener bind controls such as IPv6-only mode for
+APIs that need explicit family behavior.
 
 Dangerous configurations:
 
