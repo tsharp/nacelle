@@ -83,6 +83,13 @@ Buffer sizes and request-body chunking are configured through `NacelleConfig`.
 Runtime budgets, timeouts, and active counters are configured through
 `NacelleLimits` / `NacelleRuntimeState`.
 
+TCP protocols can apply phase-aware request body limits by overriding
+`RequestMetadata::max_body_bytes(connection, default_limit)`. The TCP runtime
+calls this after decoding the request head and before buffering or streaming the
+body. Implementations can inspect `NacelleRequest::connection` extensions, such
+as authentication/session state, and return a tighter pre-authentication body
+cap while keeping `default_limit` for authenticated requests.
+
 TCP request handling is sequential per connection. Pipelined frames can sit
 in the socket/read buffer, but Nacelle does not run multiple handlers
 concurrently for one TCP connection. Streaming request bodies use

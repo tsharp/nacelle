@@ -67,6 +67,9 @@ bounded defaults.
 
 TCP large request bodies reserve their declared length while streaming. HTTP
 request bodies reserve `Content-Length` when Hyper exposes a bounded size hint.
+TCP protocols can override `RequestMetadata::max_body_bytes(...)` to choose a
+phase-aware body limit immediately after head decoding and before body buffering
+or streaming begins.
 
 ## Shutdown
 
