@@ -34,17 +34,24 @@ pub mod runtime {
     #[cfg(feature = "tcp")]
     pub use nacelle_tcp::runtime::{
         serve_tcp, serve_tcp_listener_with_options_and_shutdown_deadline,
-        serve_tcp_listener_with_shutdown_deadline, serve_tcp_with_options,
+        serve_tcp_listener_with_shutdown_deadline,
+        serve_tcp_with_bind_options_and_shutdown_deadline, serve_tcp_with_options,
         serve_tcp_with_options_and_shutdown, serve_tcp_with_options_and_shutdown_deadline,
         serve_tcp_with_options_and_shutdown_timeout, serve_tcp_with_shutdown,
         serve_tcp_with_shutdown_deadline, serve_tcp_with_shutdown_timeout,
     };
     #[cfg(all(feature = "tcp", feature = "openssl"))]
     pub use nacelle_tcp::runtime::{
-        serve_tcp_openssl, serve_tcp_openssl_listener_with_shutdown_deadline,
-        serve_tcp_openssl_with_shutdown, serve_tcp_openssl_with_shutdown_deadline,
-        serve_tcp_openssl_with_shutdown_timeout, serve_tcp_optional_openssl,
+        serve_tcp_openssl, serve_tcp_openssl_listener_with_options_and_shutdown_deadline,
+        serve_tcp_openssl_listener_with_shutdown_deadline,
+        serve_tcp_openssl_with_bind_options_and_shutdown_deadline, serve_tcp_openssl_with_options,
+        serve_tcp_openssl_with_options_and_shutdown,
+        serve_tcp_openssl_with_options_and_shutdown_deadline,
+        serve_tcp_openssl_with_options_and_shutdown_timeout, serve_tcp_openssl_with_shutdown,
+        serve_tcp_openssl_with_shutdown_deadline, serve_tcp_openssl_with_shutdown_timeout,
+        serve_tcp_optional_openssl,
         serve_tcp_optional_openssl_listener_with_options_and_shutdown_deadline,
+        serve_tcp_optional_openssl_with_bind_options_and_shutdown_deadline,
         serve_tcp_optional_openssl_with_options,
         serve_tcp_optional_openssl_with_options_and_shutdown,
         serve_tcp_optional_openssl_with_options_and_shutdown_deadline,
@@ -100,8 +107,9 @@ pub use nacelle_http::{HyperServer, NacelleHttpPolicy};
 pub use nacelle_tcp::NacelleUnixSocketOptions;
 #[cfg(feature = "tcp")]
 pub use nacelle_tcp::{
-    DecodedRequest, NacelleServer, NacelleServerBuilder, NacelleTcpKeepalive, NacelleTcpOptions,
-    NacelleTlsDetectionOptions, Protocol, TcpServer, serve_connection, serve_stream,
+    DecodedRequest, NacelleServer, NacelleServerBuilder, NacelleTcpBindOptions,
+    NacelleTcpKeepalive, NacelleTcpOptions, NacelleTlsDetectionOptions, Protocol, TcpServer,
+    serve_connection, serve_stream,
 };
 #[cfg(feature = "reference_protocol")]
 pub use reference_protocol::{

@@ -9,6 +9,8 @@ pub mod server;
 pub use connection::{serve_connection, serve_stream};
 #[cfg(unix)]
 pub use options::NacelleUnixSocketOptions;
-pub use options::{NacelleTcpKeepalive, NacelleTcpOptions, NacelleTlsDetectionOptions};
+pub use options::{
+    NacelleTcpBindOptions, NacelleTcpKeepalive, NacelleTcpOptions, NacelleTlsDetectionOptions,
+};
 pub use protocol::{DecodedRequest, Protocol};
 pub use server::{NacelleServer, NacelleServerBuilder, TcpServer};

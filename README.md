@@ -98,9 +98,14 @@ By default, Nacelle does not remove existing socket files before binding. Use
 stale file or set socket-file permissions.
 
 TCP listeners accept `NacelleTcpOptions` for `TCP_NODELAY` and keepalive. With
-the `openssl` feature, `serve_tcp_optional_openssl(...)` and
-`NacelleProtocols::tcp_optional_openssl(...)` can accept plain and OpenSSL
-TLS clients on the same TCP listener after a bounded TLS-prefix peek.
+the `openssl` feature, `serve_tcp_openssl(...)` and
+`NacelleProtocols::tcp_openssl(...)` require OpenSSL TLS before protocol
+handling. `serve_tcp_optional_openssl(...)` and
+`NacelleProtocols::tcp_optional_openssl(...)` can accept plain and OpenSSL TLS
+clients on the same TCP listener after a bounded TLS-prefix peek. App-level
+`tcp_dual_stack(...)`, `tcp_openssl_dual_stack(...)`, and
+`tcp_optional_openssl_dual_stack(...)` register IPv4 and IPv6 wildcard
+listeners for the same protocol and force the IPv6 listener to v6-only mode.
 
 ## Shared Application State
 
@@ -134,8 +139,11 @@ let handler = handler_fn({
 ## Connection Metadata
 
 Every handler receives `request.connection`, which includes transport, peer
-address, local address, local Unix socket path, effective peer IP, and TLS metadata when available. Raw
-TCP servers can attach a typed per-connection extension at accept time:
+address, local address, local Unix socket path, effective peer IP, a stable
+connection id, and TLS metadata when available. OpenSSL metadata includes the
+negotiated protocol, cipher name, and cipher bit counts when the provider
+reports them. Raw TCP servers can attach a typed per-connection extension at
+accept time:
 
 ```rust
 #[derive(Clone)]
@@ -154,6 +162,10 @@ let server = TcpServer::<FrameRequest, ()>::builder()
     }))
     .build()?;
 ```
+
+When using `NacelleApp` with `serve(protocols, app)`, attach the same state with
+`NacelleApp::with_connection_extension_factory(...)` so every registered TCP
+protocol receives it.
 
 ## Multi-Port Host
 

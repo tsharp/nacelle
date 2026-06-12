@@ -1,13 +1,17 @@
 #[cfg(feature = "tcp")]
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 #[cfg(all(feature = "tcp", unix))]
 use std::path::Path;
+use std::sync::Arc;
 
 use nacelle_core::config::NacelleConfig;
 use nacelle_core::error::NacelleError;
 use nacelle_core::handler::Handler;
 use nacelle_core::lifecycle::NacelleShutdown;
 use nacelle_core::limits::{NacelleLimits, NacelleRuntimeState};
+use nacelle_core::request::{
+    NacelleConnectionExtension, NacelleConnectionExtensionFactory, NacelleConnectionMeta,
+};
 use nacelle_core::telemetry::NacelleTelemetry;
 
 use crate::host::NacelleHost;
@@ -19,7 +23,7 @@ use nacelle_tcp::NacelleTlsDetectionOptions;
 #[cfg(all(feature = "tcp", unix))]
 use nacelle_tcp::NacelleUnixSocketOptions;
 #[cfg(feature = "tcp")]
-use nacelle_tcp::{NacelleTcpOptions, Protocol, TcpServer};
+use nacelle_tcp::{NacelleTcpBindOptions, NacelleTcpOptions, Protocol, TcpServer};
 
 pub struct NacelleApp<H> {
     handler: H,
@@ -28,6 +32,7 @@ pub struct NacelleApp<H> {
     runtime_state: NacelleRuntimeState,
     shutdown: NacelleShutdown,
     drain_timeout: std::time::Duration,
+    connection_extension_factory: Option<NacelleConnectionExtensionFactory>,
 }
 
 impl<H> NacelleApp<H>
@@ -42,6 +47,7 @@ where
             runtime_state: NacelleRuntimeState::default(),
             shutdown: NacelleShutdown::new(),
             drain_timeout: std::time::Duration::from_secs(30),
+            connection_extension_factory: None,
         }
     }
 
@@ -72,6 +78,28 @@ where
 
     pub fn with_shutdown_drain_timeout(mut self, drain_timeout: std::time::Duration) -> Self {
         self.drain_timeout = drain_timeout;
+        self
+    }
+
+    pub fn with_connection_extension_factory<F, E>(mut self, factory: F) -> Self
+    where
+        F: Fn(&NacelleConnectionMeta) -> E + Send + Sync + 'static,
+        E: Send + Sync + 'static,
+    {
+        self.connection_extension_factory = Some(Arc::new(move |meta| {
+            Some(Arc::new(factory(meta)) as NacelleConnectionExtension)
+        }));
+        self
+    }
+
+    pub fn with_optional_connection_extension_factory<F, E>(mut self, factory: F) -> Self
+    where
+        F: Fn(&NacelleConnectionMeta) -> Option<E> + Send + Sync + 'static,
+        E: Send + Sync + 'static,
+    {
+        self.connection_extension_factory = Some(Arc::new(move |meta| {
+            factory(meta).map(|extension| Arc::new(extension) as NacelleConnectionExtension)
+        }));
         self
     }
 
@@ -115,7 +143,7 @@ where
     }
 
     pub fn tcp_with_options<Req, P>(
-        mut self,
+        self,
         name: impl Into<String>,
         addr: SocketAddr,
         protocol: P,
@@ -125,13 +153,71 @@ where
         Req: nacelle_core::request::RequestMetadata + Send + 'static,
         P: Protocol<Req> + Send + Sync + 'static,
     {
+        self.tcp_with_bind_options(
+            name,
+            addr,
+            protocol,
+            NacelleTcpBindOptions::from(tcp_options),
+        )
+    }
+
+    pub fn tcp_with_bind_options<Req, P>(
+        mut self,
+        name: impl Into<String>,
+        addr: SocketAddr,
+        protocol: P,
+        bind_options: NacelleTcpBindOptions,
+    ) -> Self
+    where
+        Req: nacelle_core::request::RequestMetadata + Send + 'static,
+        P: Protocol<Req> + Send + Sync + 'static,
+    {
         let name = name.into();
         self.installers.push(Box::new(move |host, app| {
             let server = tcp_server::<Req, P, H>(protocol, app)?;
-            host.enable_tcp_with_options(name, addr, tcp_options, server);
+            host.enable_tcp_with_bind_options(name, addr, bind_options, server);
             Ok(())
         }));
         self
+    }
+
+    pub fn tcp_dual_stack<Req, P>(self, name: impl Into<String>, port: u16, protocol: P) -> Self
+    where
+        Req: nacelle_core::request::RequestMetadata + Send + 'static,
+        P: Protocol<Req> + Clone + Send + Sync + 'static,
+    {
+        self.tcp_dual_stack_with_options(name, port, protocol, NacelleTcpOptions::default())
+    }
+
+    pub fn tcp_dual_stack_with_options<Req, P>(
+        self,
+        name: impl Into<String>,
+        port: u16,
+        protocol: P,
+        tcp_options: NacelleTcpOptions,
+    ) -> Self
+    where
+        Req: nacelle_core::request::RequestMetadata + Send + 'static,
+        P: Protocol<Req> + Clone + Send + Sync + 'static,
+    {
+        let name = name.into();
+        let ipv4_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
+        let ipv6_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port);
+        let ipv6_bind_options =
+            NacelleTcpBindOptions::from(tcp_options.clone()).with_ipv6_only(true);
+
+        self.tcp_with_options(
+            format!("{name}-ipv4"),
+            ipv4_addr,
+            protocol.clone(),
+            tcp_options,
+        )
+        .tcp_with_bind_options(
+            format!("{name}-ipv6"),
+            ipv6_addr,
+            protocol,
+            ipv6_bind_options,
+        )
     }
 
     #[cfg(all(feature = "tcp", unix))]
@@ -171,6 +257,127 @@ where
     }
 
     #[cfg(all(feature = "tcp", feature = "openssl"))]
+    pub fn tcp_openssl<Req, P>(
+        self,
+        name: impl Into<String>,
+        addr: SocketAddr,
+        protocol: P,
+        tls_config: NacelleOpenSslConfig,
+    ) -> Self
+    where
+        Req: nacelle_core::request::RequestMetadata + Send + 'static,
+        P: Protocol<Req> + Send + Sync + 'static,
+    {
+        self.tcp_openssl_with_options(
+            name,
+            addr,
+            protocol,
+            tls_config,
+            NacelleTcpOptions::default(),
+        )
+    }
+
+    #[cfg(all(feature = "tcp", feature = "openssl"))]
+    pub fn tcp_openssl_with_options<Req, P>(
+        self,
+        name: impl Into<String>,
+        addr: SocketAddr,
+        protocol: P,
+        tls_config: NacelleOpenSslConfig,
+        tcp_options: NacelleTcpOptions,
+    ) -> Self
+    where
+        Req: nacelle_core::request::RequestMetadata + Send + 'static,
+        P: Protocol<Req> + Send + Sync + 'static,
+    {
+        self.tcp_openssl_with_bind_options(
+            name,
+            addr,
+            protocol,
+            tls_config,
+            NacelleTcpBindOptions::from(tcp_options),
+        )
+    }
+
+    #[cfg(all(feature = "tcp", feature = "openssl"))]
+    pub fn tcp_openssl_with_bind_options<Req, P>(
+        mut self,
+        name: impl Into<String>,
+        addr: SocketAddr,
+        protocol: P,
+        tls_config: NacelleOpenSslConfig,
+        bind_options: NacelleTcpBindOptions,
+    ) -> Self
+    where
+        Req: nacelle_core::request::RequestMetadata + Send + 'static,
+        P: Protocol<Req> + Send + Sync + 'static,
+    {
+        let name = name.into();
+        self.installers.push(Box::new(move |host, app| {
+            let server = tcp_server::<Req, P, H>(protocol, app)?;
+            host.enable_tcp_openssl_with_bind_options(name, addr, server, tls_config, bind_options);
+            Ok(())
+        }));
+        self
+    }
+
+    #[cfg(all(feature = "tcp", feature = "openssl"))]
+    pub fn tcp_openssl_dual_stack<Req, P>(
+        self,
+        name: impl Into<String>,
+        port: u16,
+        protocol: P,
+        tls_config: NacelleOpenSslConfig,
+    ) -> Self
+    where
+        Req: nacelle_core::request::RequestMetadata + Send + 'static,
+        P: Protocol<Req> + Clone + Send + Sync + 'static,
+    {
+        self.tcp_openssl_dual_stack_with_options(
+            name,
+            port,
+            protocol,
+            tls_config,
+            NacelleTcpOptions::default(),
+        )
+    }
+
+    #[cfg(all(feature = "tcp", feature = "openssl"))]
+    pub fn tcp_openssl_dual_stack_with_options<Req, P>(
+        self,
+        name: impl Into<String>,
+        port: u16,
+        protocol: P,
+        tls_config: NacelleOpenSslConfig,
+        tcp_options: NacelleTcpOptions,
+    ) -> Self
+    where
+        Req: nacelle_core::request::RequestMetadata + Send + 'static,
+        P: Protocol<Req> + Clone + Send + Sync + 'static,
+    {
+        let name = name.into();
+        let ipv4_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
+        let ipv6_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port);
+        let ipv6_bind_options =
+            NacelleTcpBindOptions::from(tcp_options.clone()).with_ipv6_only(true);
+
+        self.tcp_openssl_with_options(
+            format!("{name}-ipv4"),
+            ipv4_addr,
+            protocol.clone(),
+            tls_config.clone(),
+            tcp_options,
+        )
+        .tcp_openssl_with_bind_options(
+            format!("{name}-ipv6"),
+            ipv6_addr,
+            protocol,
+            tls_config,
+            ipv6_bind_options,
+        )
+    }
+
+    #[cfg(all(feature = "tcp", feature = "openssl"))]
     pub fn tcp_optional_openssl<Req, P>(
         self,
         name: impl Into<String>,
@@ -194,7 +401,7 @@ where
 
     #[cfg(all(feature = "tcp", feature = "openssl"))]
     pub fn tcp_optional_openssl_with_options<Req, P>(
-        mut self,
+        self,
         name: impl Into<String>,
         addr: SocketAddr,
         protocol: P,
@@ -206,20 +413,106 @@ where
         Req: nacelle_core::request::RequestMetadata + Send + 'static,
         P: Protocol<Req> + Send + Sync + 'static,
     {
+        self.tcp_optional_openssl_with_bind_options(
+            name,
+            addr,
+            protocol,
+            tls_config,
+            NacelleTcpBindOptions::from(tcp_options),
+            detection_options,
+        )
+    }
+
+    #[cfg(all(feature = "tcp", feature = "openssl"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn tcp_optional_openssl_with_bind_options<Req, P>(
+        mut self,
+        name: impl Into<String>,
+        addr: SocketAddr,
+        protocol: P,
+        tls_config: NacelleOpenSslConfig,
+        bind_options: NacelleTcpBindOptions,
+        detection_options: NacelleTlsDetectionOptions,
+    ) -> Self
+    where
+        Req: nacelle_core::request::RequestMetadata + Send + 'static,
+        P: Protocol<Req> + Send + Sync + 'static,
+    {
         let name = name.into();
         self.installers.push(Box::new(move |host, app| {
             let server = tcp_server::<Req, P, H>(protocol, app)?;
-            host.enable_tcp_optional_openssl_with_options(
+            host.enable_tcp_optional_openssl_with_bind_options(
                 name,
                 addr,
                 server,
                 tls_config,
-                tcp_options,
+                bind_options,
                 detection_options,
             );
             Ok(())
         }));
         self
+    }
+
+    #[cfg(all(feature = "tcp", feature = "openssl"))]
+    pub fn tcp_optional_openssl_dual_stack<Req, P>(
+        self,
+        name: impl Into<String>,
+        port: u16,
+        protocol: P,
+        tls_config: NacelleOpenSslConfig,
+    ) -> Self
+    where
+        Req: nacelle_core::request::RequestMetadata + Send + 'static,
+        P: Protocol<Req> + Clone + Send + Sync + 'static,
+    {
+        self.tcp_optional_openssl_dual_stack_with_options(
+            name,
+            port,
+            protocol,
+            tls_config,
+            NacelleTcpOptions::default(),
+            NacelleTlsDetectionOptions::default(),
+        )
+    }
+
+    #[cfg(all(feature = "tcp", feature = "openssl"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn tcp_optional_openssl_dual_stack_with_options<Req, P>(
+        self,
+        name: impl Into<String>,
+        port: u16,
+        protocol: P,
+        tls_config: NacelleOpenSslConfig,
+        tcp_options: NacelleTcpOptions,
+        detection_options: NacelleTlsDetectionOptions,
+    ) -> Self
+    where
+        Req: nacelle_core::request::RequestMetadata + Send + 'static,
+        P: Protocol<Req> + Clone + Send + Sync + 'static,
+    {
+        let name = name.into();
+        let ipv4_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
+        let ipv6_addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), port);
+        let ipv6_bind_options =
+            NacelleTcpBindOptions::from(tcp_options.clone()).with_ipv6_only(true);
+
+        self.tcp_optional_openssl_with_options(
+            format!("{name}-ipv4"),
+            ipv4_addr,
+            protocol.clone(),
+            tls_config.clone(),
+            tcp_options,
+            detection_options.clone(),
+        )
+        .tcp_optional_openssl_with_bind_options(
+            format!("{name}-ipv6"),
+            ipv6_addr,
+            protocol,
+            tls_config,
+            ipv6_bind_options,
+            detection_options,
+        )
     }
 }
 
@@ -251,13 +544,17 @@ where
     P: Protocol<Req> + Send + Sync + 'static,
     H: Handler,
 {
-    TcpServer::<Req, ()>::builder()
+    let builder = TcpServer::<Req, ()>::builder()
         .protocol(protocol)
         .config(app.config.clone())
         .telemetry(app.telemetry.clone())
-        .runtime_state(app.runtime_state.clone())
-        .handler(app.handler.clone())
-        .build()
+        .runtime_state(app.runtime_state.clone());
+    let builder = if let Some(factory) = app.connection_extension_factory.clone() {
+        builder.connection_extension_factory_arc(factory)
+    } else {
+        builder
+    };
+    builder.handler(app.handler.clone()).build()
 }
 
 #[cfg(test)]
@@ -269,5 +566,117 @@ mod tests {
         let protocols = NacelleProtocols::<()>::new();
 
         assert_eq!(protocols.installers.len(), 0);
+    }
+
+    #[cfg(feature = "tcp")]
+    mod tcp_tests {
+        use std::future::{Ready, ready};
+
+        use bytes::{Bytes, BytesMut};
+        use nacelle_core::request::{NacelleRequest, RequestMetadata};
+        use nacelle_core::response::NacelleResponse;
+        use nacelle_tcp::DecodedRequest;
+
+        use super::*;
+
+        #[derive(Clone)]
+        struct TestHandler;
+
+        impl Handler for TestHandler {
+            type Future = Ready<Result<NacelleResponse, NacelleError>>;
+
+            fn call(&self, _request: NacelleRequest) -> Self::Future {
+                ready(Ok(NacelleResponse::empty_tcp()))
+            }
+        }
+
+        #[derive(Debug)]
+        struct TestRequest;
+
+        impl RequestMetadata for TestRequest {
+            fn opcode(&self) -> u64 {
+                1
+            }
+        }
+
+        #[derive(Clone)]
+        struct TestProtocol;
+
+        impl Protocol<TestRequest> for TestProtocol {
+            type ResponseContext = ();
+            type ErrorContext = ();
+
+            fn decode_head(
+                &self,
+                _src: &mut BytesMut,
+                _max_frame_len: usize,
+            ) -> Result<Option<DecodedRequest<TestRequest>>, NacelleError> {
+                Ok(None)
+            }
+
+            fn response_context(&self, _req: &TestRequest) -> Self::ResponseContext {}
+
+            fn error_context(&self, _req: &TestRequest) -> Self::ErrorContext {}
+
+            fn encode_response_chunk(
+                &self,
+                _context: &mut Self::ResponseContext,
+                chunk: Bytes,
+                dst: &mut BytesMut,
+            ) -> Result<(), NacelleError> {
+                dst.extend_from_slice(&chunk);
+                Ok(())
+            }
+
+            fn encode_response_end(
+                &self,
+                _context: &mut Self::ResponseContext,
+                _dst: &mut BytesMut,
+            ) -> Result<(), NacelleError> {
+                Ok(())
+            }
+
+            fn encode_error(
+                &self,
+                _context: Option<&Self::ErrorContext>,
+                _error: &NacelleError,
+                _dst: &mut BytesMut,
+            ) -> Result<(), NacelleError> {
+                Ok(())
+            }
+        }
+
+        #[derive(Debug)]
+        struct TestConnectionContext {
+            connection_id: u64,
+        }
+
+        #[test]
+        fn tcp_dual_stack_registers_ipv4_and_ipv6_installers() {
+            let protocols = NacelleProtocols::<TestHandler>::new()
+                .tcp_dual_stack::<TestRequest, _>("gateway", 27017, TestProtocol);
+
+            assert_eq!(protocols.installers.len(), 2);
+        }
+
+        #[test]
+        fn app_connection_extension_factory_builds_typed_state() {
+            let app = NacelleApp::new(TestHandler).with_connection_extension_factory(|meta| {
+                TestConnectionContext {
+                    connection_id: meta.connection_id,
+                }
+            });
+            let meta = NacelleConnectionMeta::tcp(None, None);
+            let extension = app
+                .connection_extension_factory
+                .as_ref()
+                .and_then(|factory| factory(&meta))
+                .expect("extension should be created");
+            let context = extension
+                .downcast::<TestConnectionContext>()
+                .expect("extension should have expected type");
+
+            assert_eq!(context.connection_id, meta.connection_id);
+        }
     }
 }
