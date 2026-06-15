@@ -1,5 +1,5 @@
 ---
-name: project-development
+name: development
 description: Implement repository changes in any software project. Use when Codex changes code, tests, docs, configs, CI, build scripts, performance-sensitive paths, security hardening, migrations, release preparation, or checkpoint commits while preserving the project's existing architecture and validation style.
 ---
 
