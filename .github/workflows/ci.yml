@@ -1,5 +1,9 @@
 name: CI
 
+permissions:
+  contents: read
+  pull-requests: write
+
 on:
   push:
   pull_request:
@@ -18,7 +22,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Clippy Raw TCP
-        run: cargo clippy -p nacelle --no-default-features --features raw_tcp --all-targets -- -D warnings
+        run: cargo clippy -p nacelle --no-default-features --features tcp --all-targets -- -D warnings
       - name: Clippy Raw TCP TLS
         run: cargo clippy -p nacelle-tcp --features tls-self-signed --all-targets -- -D warnings
       - name: Clippy Reference Protocol
@@ -36,7 +40,7 @@ jobs:
       - name: Test Raw TCP
         run: cargo test --workspace --all-targets
       - name: Test Raw TCP Without Reference Protocol
-        run: cargo test -p nacelle --no-default-features --features raw_tcp --all-targets
+        run: cargo test -p nacelle --no-default-features --features tcp --all-targets
       - name: Test Raw TCP TLS
         run: cargo test -p nacelle-tcp --features tls-self-signed --all-targets
       - name: Test Reference Protocol TLS
