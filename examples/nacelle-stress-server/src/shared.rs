@@ -680,7 +680,8 @@ pub fn print_help(runtime: &str) {
                                                      Equivalent env vars (no recompile required):\n\
                                                        MIMALLOC_PURGE_DELAY=0\n\
                                                        MIMALLOC_ARENA_EAGER_COMMIT=0\n\
-           --stats                                   Enable server-side per-request atomic counters.\n\
+           --stats                                   Enable server-side per-request atomic counters\n\
+                                                     and print full stats snapshots every 5 seconds.\n\
                                                      Leave disabled for peak throughput benchmarks.\n\
            --tls-self-signed                         Serve TCP over TLS with an ephemeral\n\
                                                      self-signed certificate. The stress server\n\

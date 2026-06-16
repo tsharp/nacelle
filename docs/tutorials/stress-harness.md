@@ -63,7 +63,8 @@ PowerShell example:
 ```
 
 Server-side stats are disabled by default for peak throughput. Add `--stats`
-when you want periodic server counters during a diagnostic run.
+when you want full server counter snapshots every 5 seconds during a diagnostic
+run.
 
 OpenTelemetry metrics are enabled in the default stress server build. Use
 `--no-default-features` with the plain TCP config when you intentionally want a

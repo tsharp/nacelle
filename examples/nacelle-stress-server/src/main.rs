@@ -164,6 +164,8 @@ fn build_tls_config(
 // Stats
 // ---------------------------------------------------------------------------
 
+const STATS_INTERVAL: Duration = Duration::from_secs(5);
+
 struct ActiveConnection {
     stats: Arc<StressServerStats>,
 }
@@ -185,7 +187,7 @@ impl Drop for ActiveConnection {
 }
 
 async fn print_periodic_stats(stats: Arc<StressServerStats>, mut shutdown: watch::Receiver<bool>) {
-    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    let mut interval = tokio::time::interval(STATS_INTERVAL);
     interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
     interval.tick().await;
     let mut previous = stats.snapshot();
@@ -194,6 +196,8 @@ async fn print_periodic_stats(stats: Arc<StressServerStats>, mut shutdown: watch
         tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
+                    let snapshot = stats.snapshot();
+                    print_server_stats("final", snapshot, Some(previous));
                     break;
                 }
             }
@@ -211,70 +215,11 @@ fn print_server_stats(
     snapshot: StressServerStatsSnapshot,
     previous: Option<StressServerStatsSnapshot>,
 ) {
-    let completed_connections_per_sec = previous
-        .map(|previous| {
-            let elapsed = snapshot
-                .uptime
-                .saturating_sub(previous.uptime)
-                .as_secs_f64()
-                .max(f64::EPSILON);
-            (snapshot
-                .completed_connections
-                .saturating_sub(previous.completed_connections)) as f64
-                / elapsed
-        })
-        .unwrap_or_else(|| {
-            snapshot.completed_connections as f64 / snapshot.uptime.as_secs_f64().max(f64::EPSILON)
-        });
-    let completed_requests_per_sec = previous
-        .map(|previous| {
-            let elapsed = snapshot
-                .uptime
-                .saturating_sub(previous.uptime)
-                .as_secs_f64()
-                .max(f64::EPSILON);
-            (snapshot
-                .completed_requests
-                .saturating_sub(previous.completed_requests)) as f64
-                / elapsed
-        })
-        .unwrap_or_else(|| {
-            snapshot.completed_requests as f64 / snapshot.uptime.as_secs_f64().max(f64::EPSILON)
-        });
-    let request_mib_per_sec = previous
-        .map(|previous| {
-            let elapsed = snapshot
-                .uptime
-                .saturating_sub(previous.uptime)
-                .as_secs_f64()
-                .max(f64::EPSILON);
-            bytes_to_mib(
-                snapshot
-                    .request_body_bytes
-                    .saturating_sub(previous.request_body_bytes),
-            ) / elapsed
-        })
-        .unwrap_or_else(|| {
-            bytes_to_mib(snapshot.request_body_bytes)
-                / snapshot.uptime.as_secs_f64().max(f64::EPSILON)
-        });
-    let response_mib_per_sec = previous
-        .map(|previous| {
-            let elapsed = snapshot
-                .uptime
-                .saturating_sub(previous.uptime)
-                .as_secs_f64()
-                .max(f64::EPSILON);
-            bytes_to_mib(
-                snapshot
-                    .response_body_bytes
-                    .saturating_sub(previous.response_body_bytes),
-            ) / elapsed
-        })
-        .unwrap_or_else(|| {
-            bytes_to_mib(snapshot.response_body_bytes)
-                / snapshot.uptime.as_secs_f64().max(f64::EPSILON)
-        });
+    let elapsed = previous
+        .map(|previous| snapshot.uptime.saturating_sub(previous.uptime))
+        .unwrap_or(snapshot.uptime)
+        .as_secs_f64()
+        .max(f64::EPSILON);
     let accepted_delta = previous
         .map(|previous| {
             snapshot
@@ -310,32 +255,86 @@ fn print_server_stats(
                 .saturating_sub(previous.failed_requests)
         })
         .unwrap_or(snapshot.failed_requests);
+    let request_body_bytes_delta = previous
+        .map(|previous| {
+            snapshot
+                .request_body_bytes
+                .saturating_sub(previous.request_body_bytes)
+        })
+        .unwrap_or(snapshot.request_body_bytes);
+    let response_body_bytes_delta = previous
+        .map(|previous| {
+            snapshot
+                .response_body_bytes
+                .saturating_sub(previous.response_body_bytes)
+        })
+        .unwrap_or(snapshot.response_body_bytes);
+
+    let accepted_connections_per_sec = accepted_delta as f64 / elapsed;
+    let completed_connections_per_sec = completed_delta as f64 / elapsed;
+    let failed_connections_per_sec = failed_delta as f64 / elapsed;
+    let completed_requests_per_sec = completed_request_delta as f64 / elapsed;
+    let failed_requests_per_sec = failed_request_delta as f64 / elapsed;
+    let request_mib_per_sec = bytes_to_mib(request_body_bytes_delta) / elapsed;
+    let response_mib_per_sec = bytes_to_mib(response_body_bytes_delta) / elapsed;
 
     println!(
-        "nacelle-stress-server stats kind={} uptime={:.1}s active_connections={} accepted_connections_total={} accepted_connections_delta={} completed_connections_total={} completed_connections_delta={} failed_connections_total={} failed_connections_delta={} completed_connections_per_sec={:.2} active_requests={} completed_requests_total={} completed_requests_delta={} failed_requests_total={} failed_requests_delta={} completed_requests_per_sec={:.2} request_body_mib_per_sec={:.2} response_body_mib_per_sec={:.2}",
-        kind,
+        "nacelle-stress-server stats [{kind}] uptime={:.1}s window={elapsed:.1}s",
         snapshot.uptime.as_secs_f64(),
+    );
+    println!(
+        "  connections  active={} accepted={} (+{}, {:.2}/s) completed={} (+{}, {:.2}/s) failed={} (+{}, {:.2}/s)",
         snapshot.active_connections,
         snapshot.accepted_connections,
         accepted_delta,
+        accepted_connections_per_sec,
         snapshot.completed_connections,
         completed_delta,
+        completed_connections_per_sec,
         snapshot.failed_connections,
         failed_delta,
-        completed_connections_per_sec,
+        failed_connections_per_sec,
+    );
+    println!(
+        "  requests     active={} completed={} (+{}, {:.2}/s) failed={} (+{}, {:.2}/s)",
         snapshot.active_requests,
         snapshot.completed_requests,
         completed_request_delta,
+        completed_requests_per_sec,
         snapshot.failed_requests,
         failed_request_delta,
-        completed_requests_per_sec,
+        failed_requests_per_sec,
+    );
+    println!(
+        "  bodies       request={} (+{}, {:.2} MiB/s) response={} (+{}, {:.2} MiB/s)",
+        format_bytes(snapshot.request_body_bytes),
+        format_bytes(request_body_bytes_delta),
         request_mib_per_sec,
+        format_bytes(snapshot.response_body_bytes),
+        format_bytes(response_body_bytes_delta),
         response_mib_per_sec,
     );
 }
 
 fn bytes_to_mib(bytes: u64) -> f64 {
     bytes as f64 / 1024.0 / 1024.0
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+
+    let bytes_f = bytes as f64;
+    if bytes_f >= GIB {
+        format!("{:.2} GiB", bytes_f / GIB)
+    } else if bytes_f >= MIB {
+        format!("{:.2} MiB", bytes_f / MIB)
+    } else if bytes_f >= KIB {
+        format!("{:.2} KiB", bytes_f / KIB)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 async fn wait_for_shutdown_signal() -> Result<(), std::io::Error> {

@@ -65,6 +65,9 @@ impl NacelleTcpMetricsContext {
         opcode: Option<u64>,
         include_opcode: bool,
     ) -> Self {
+        #[cfg(not(feature = "otel"))]
+        let _ = include_opcode;
+
         #[cfg(feature = "otel")]
         let connection_attributes = tcp_connection_attributes(transport, &listener, tls);
         #[cfg(feature = "otel")]
