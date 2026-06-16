@@ -215,7 +215,13 @@ fn init_otel_console_exporter(config: &shared::ServerConfig) -> SdkMeterProvider
 }
 
 #[cfg(not(feature = "otel"))]
-fn init_otel_console_exporter(_config: &shared::ServerConfig) {}
+#[derive(Debug)]
+struct DisabledOtelConsoleExporter;
+
+#[cfg(not(feature = "otel"))]
+fn init_otel_console_exporter(_config: &shared::ServerConfig) -> DisabledOtelConsoleExporter {
+    DisabledOtelConsoleExporter
+}
 
 #[cfg(feature = "otel")]
 #[derive(Debug, Clone, Copy)]
@@ -455,7 +461,9 @@ fn shutdown_otel_console_exporter(provider: &SdkMeterProvider) -> OTelSdkResult 
 }
 
 #[cfg(not(feature = "otel"))]
-fn shutdown_otel_console_exporter(_provider: &()) -> Result<(), std::convert::Infallible> {
+fn shutdown_otel_console_exporter(
+    _provider: &DisabledOtelConsoleExporter,
+) -> Result<(), std::convert::Infallible> {
     Ok(())
 }
 

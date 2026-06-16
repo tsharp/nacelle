@@ -223,11 +223,8 @@ impl NacelleTcpTelemetry {
 
     pub fn connection_accepted(&self, context: &NacelleTcpMetricsContext) {
         let _ = context;
-        if !self.metrics_enabled() {
-            return;
-        }
         #[cfg(feature = "otel")]
-        {
+        if self.metrics_enabled() {
             let attributes = context.connection_attributes();
             self.metrics.connection_accepted.add(1, attributes);
             self.metrics.connection_active.add(1, attributes);
@@ -240,11 +237,8 @@ impl NacelleTcpTelemetry {
         close_reason: &'static str,
     ) {
         let _ = (context, close_reason);
-        if !self.metrics_enabled() {
-            return;
-        }
         #[cfg(feature = "otel")]
-        {
+        if self.metrics_enabled() {
             let mut attributes = context.connection_attributes().to_vec();
             attributes.push(opentelemetry::KeyValue::new("close_reason", close_reason));
             self.metrics.connection_closed.add(1, &attributes);
@@ -256,11 +250,8 @@ impl NacelleTcpTelemetry {
 
     pub fn request_started(&self, context: &NacelleTcpMetricsContext) {
         let _ = context;
-        if !self.metrics_enabled() {
-            return;
-        }
         #[cfg(feature = "otel")]
-        {
+        if self.metrics_enabled() {
             let request_metrics = self.config.request_metrics;
             let attributes = context.request_attributes();
             if request_metrics.request_started {
@@ -281,11 +272,8 @@ impl NacelleTcpTelemetry {
         elapsed: Duration,
     ) {
         let _ = (context, status, request_bytes, response_bytes, elapsed);
-        if !self.metrics_enabled() {
-            return;
-        }
         #[cfg(feature = "otel")]
-        {
+        if self.metrics_enabled() {
             let request_metrics = self.config.request_metrics;
             let attributes = context.request_status_attributes(status);
             if request_metrics.request_completed {
@@ -322,14 +310,13 @@ impl NacelleTcpTelemetry {
         elapsed: Duration,
     ) {
         let _ = (context, phase, elapsed);
-        if !self.phase_duration_metrics_enabled() {
-            return;
-        }
         #[cfg(feature = "otel")]
-        self.metrics.phase_duration_ms.record(
-            elapsed.as_secs_f64() * 1_000.0,
-            &tcp_phase_attributes(context, phase),
-        );
+        if self.phase_duration_metrics_enabled() {
+            self.metrics.phase_duration_ms.record(
+                elapsed.as_secs_f64() * 1_000.0,
+                &tcp_phase_attributes(context, phase),
+            );
+        }
     }
 
     pub fn error(
@@ -339,11 +326,8 @@ impl NacelleTcpTelemetry {
         error: &NacelleError,
     ) {
         let _ = (context, phase, error);
-        if !self.metrics_enabled() {
-            return;
-        }
         #[cfg(feature = "otel")]
-        {
+        if self.metrics_enabled() {
             self.metrics
                 .errors
                 .add(1, &tcp_error_attributes(context, phase, error));
