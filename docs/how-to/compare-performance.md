@@ -42,10 +42,9 @@ Suggested RPS comparison:
 ./examples/run-stress-test.sh --config examples/nacelle-stress-server/configs/tcp.toml --server-threads 48 --connections 256 --pipeline 8 --duration-secs 30 --payload-bytes 256
 ```
 
-The stress server defaults `stats_enabled = false` to avoid contended global
-per-request atomics in peak throughput runs. Add `--stats` or set
-`stats_enabled = true` when validating server-side counters rather than maximum
-RPS.
+The default stress server build also enables OpenTelemetry TCP byte counters and
+prints a compact OTel console snapshot every 5 seconds. Use
+`--no-default-features` with the plain TCP config for a metrics-free baseline.
 
 The checked-in root `config.toml` enables self-signed TCP TLS for local
 stress runs. For the plain TCP throughput baseline, use

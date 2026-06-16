@@ -3,23 +3,35 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[path = "shared.rs"]
 mod shared;
-use shared::{
-    StressServerStats, StressServerStatsSnapshot, build_server, configure_allocator, parse_args,
-    print_config,
-};
+use shared::{build_server, configure_allocator, parse_args, print_config};
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+#[cfg(feature = "otel")]
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+#[cfg(feature = "otel")]
 use std::time::Duration;
 
 #[cfg(feature = "tls-self-signed")]
 use nacelle::NacelleTlsConfig;
-use nacelle::{FrameRequest, Handler, LengthDelimitedProtocol, NacelleError, TcpServer};
+use nacelle::{
+    FrameRequest, Handler, LengthDelimitedProtocol, NacelleError, NacelleTcpTelemetry, TcpServer,
+};
 use nacelle_stress_common::make_tcp_socket;
+#[cfg(feature = "otel")]
+use opentelemetry::global;
+#[cfg(feature = "otel")]
+use opentelemetry_sdk::Resource;
+#[cfg(feature = "otel")]
+use opentelemetry_sdk::error::OTelSdkResult;
+#[cfg(feature = "otel")]
+use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData, ResourceMetrics, Sum};
+#[cfg(feature = "otel")]
+use opentelemetry_sdk::metrics::exporter::PushMetricExporter;
+#[cfg(feature = "otel")]
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider, Temporality};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::sync::watch;
-use tokio::time::MissedTickBehavior;
 
 #[cfg(feature = "tls-self-signed")]
 type StressTlsConfig = NacelleTlsConfig;
@@ -62,7 +74,6 @@ async fn run_server<H>(
     server: TcpServer<FrameRequest, LengthDelimitedProtocol, H>,
     tls_config: Option<StressTlsConfig>,
     mut shutdown: watch::Receiver<bool>,
-    stats: Arc<StressServerStats>,
 ) -> Result<(), NacelleError>
 where
     H: Handler,
@@ -79,12 +90,8 @@ where
                 stream.set_nodelay(true)?;
                 let server = server.clone();
                 let tls_config = clone_tls_config(&tls_config);
-                let stats = stats.clone();
-                stats.record_accepted_connection();
                 tokio::spawn(async move {
-                    let active_connection = ActiveConnection::new(stats);
-                    let result = serve_accepted_stream(server, stream, tls_config).await;
-                    active_connection.record_finished(result.is_err());
+                    let _ = serve_accepted_stream(server, stream, tls_config).await;
                 });
             }
         }
@@ -125,7 +132,6 @@ fn spawn_server_thread<H>(
     server: TcpServer<FrameRequest, LengthDelimitedProtocol, H>,
     tls_config: Option<StressTlsConfig>,
     shutdown: watch::Receiver<bool>,
-    stats: Arc<StressServerStats>,
 ) -> thread::JoinHandle<Result<(), NacelleError>>
 where
     H: Handler,
@@ -135,7 +141,7 @@ where
             .enable_all()
             .build()
             .map_err(NacelleError::from)?;
-        runtime.block_on(run_server(listener, server, tls_config, shutdown, stats))
+        runtime.block_on(run_server(listener, server, tls_config, shutdown))
     })
 }
 
@@ -160,166 +166,15 @@ fn build_tls_config(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Stats
-// ---------------------------------------------------------------------------
+#[cfg(feature = "otel")]
+const OTEL_EXPORT_INTERVAL: Duration = Duration::from_secs(5);
 
-const STATS_INTERVAL: Duration = Duration::from_secs(5);
-
-struct ActiveConnection {
-    stats: Arc<StressServerStats>,
-}
-
-impl ActiveConnection {
-    fn new(stats: Arc<StressServerStats>) -> Self {
-        Self { stats }
-    }
-
-    fn record_finished(&self, failed: bool) {
-        self.stats.record_finished_connection(failed);
-    }
-}
-
-impl Drop for ActiveConnection {
-    fn drop(&mut self) {
-        self.stats.record_inactive_connection();
-    }
-}
-
-async fn print_periodic_stats(stats: Arc<StressServerStats>, mut shutdown: watch::Receiver<bool>) {
-    let mut interval = tokio::time::interval(STATS_INTERVAL);
-    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    interval.tick().await;
-    let mut previous = stats.snapshot();
-
-    loop {
-        tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    let snapshot = stats.snapshot();
-                    print_server_stats("final", snapshot, Some(previous));
-                    break;
-                }
-            }
-            _ = interval.tick() => {
-                let snapshot = stats.snapshot();
-                print_server_stats("periodic", snapshot, Some(previous));
-                previous = snapshot;
-            }
-        }
-    }
-}
-
-fn print_server_stats(
-    kind: &str,
-    snapshot: StressServerStatsSnapshot,
-    previous: Option<StressServerStatsSnapshot>,
-) {
-    let elapsed = previous
-        .map(|previous| snapshot.uptime.saturating_sub(previous.uptime))
-        .unwrap_or(snapshot.uptime)
-        .as_secs_f64()
-        .max(f64::EPSILON);
-    let accepted_delta = previous
-        .map(|previous| {
-            snapshot
-                .accepted_connections
-                .saturating_sub(previous.accepted_connections)
-        })
-        .unwrap_or(snapshot.accepted_connections);
-    let completed_delta = previous
-        .map(|previous| {
-            snapshot
-                .completed_connections
-                .saturating_sub(previous.completed_connections)
-        })
-        .unwrap_or(snapshot.completed_connections);
-    let failed_delta = previous
-        .map(|previous| {
-            snapshot
-                .failed_connections
-                .saturating_sub(previous.failed_connections)
-        })
-        .unwrap_or(snapshot.failed_connections);
-    let completed_request_delta = previous
-        .map(|previous| {
-            snapshot
-                .completed_requests
-                .saturating_sub(previous.completed_requests)
-        })
-        .unwrap_or(snapshot.completed_requests);
-    let failed_request_delta = previous
-        .map(|previous| {
-            snapshot
-                .failed_requests
-                .saturating_sub(previous.failed_requests)
-        })
-        .unwrap_or(snapshot.failed_requests);
-    let request_body_bytes_delta = previous
-        .map(|previous| {
-            snapshot
-                .request_body_bytes
-                .saturating_sub(previous.request_body_bytes)
-        })
-        .unwrap_or(snapshot.request_body_bytes);
-    let response_body_bytes_delta = previous
-        .map(|previous| {
-            snapshot
-                .response_body_bytes
-                .saturating_sub(previous.response_body_bytes)
-        })
-        .unwrap_or(snapshot.response_body_bytes);
-
-    let accepted_connections_per_sec = accepted_delta as f64 / elapsed;
-    let completed_connections_per_sec = completed_delta as f64 / elapsed;
-    let failed_connections_per_sec = failed_delta as f64 / elapsed;
-    let completed_requests_per_sec = completed_request_delta as f64 / elapsed;
-    let failed_requests_per_sec = failed_request_delta as f64 / elapsed;
-    let request_mib_per_sec = bytes_to_mib(request_body_bytes_delta) / elapsed;
-    let response_mib_per_sec = bytes_to_mib(response_body_bytes_delta) / elapsed;
-
-    println!(
-        "nacelle-stress-server stats [{kind}] uptime={:.1}s window={elapsed:.1}s",
-        snapshot.uptime.as_secs_f64(),
-    );
-    println!(
-        "  connections  active={} accepted={} (+{}, {:.2}/s) completed={} (+{}, {:.2}/s) failed={} (+{}, {:.2}/s)",
-        snapshot.active_connections,
-        snapshot.accepted_connections,
-        accepted_delta,
-        accepted_connections_per_sec,
-        snapshot.completed_connections,
-        completed_delta,
-        completed_connections_per_sec,
-        snapshot.failed_connections,
-        failed_delta,
-        failed_connections_per_sec,
-    );
-    println!(
-        "  requests     active={} completed={} (+{}, {:.2}/s) failed={} (+{}, {:.2}/s)",
-        snapshot.active_requests,
-        snapshot.completed_requests,
-        completed_request_delta,
-        completed_requests_per_sec,
-        snapshot.failed_requests,
-        failed_request_delta,
-        failed_requests_per_sec,
-    );
-    println!(
-        "  bodies       request={} (+{}, {:.2} MiB/s) response={} (+{}, {:.2} MiB/s)",
-        format_bytes(snapshot.request_body_bytes),
-        format_bytes(request_body_bytes_delta),
-        request_mib_per_sec,
-        format_bytes(snapshot.response_body_bytes),
-        format_bytes(response_body_bytes_delta),
-        response_mib_per_sec,
-    );
-}
-
+#[cfg(feature = "otel")]
 fn bytes_to_mib(bytes: u64) -> f64 {
     bytes as f64 / 1024.0 / 1024.0
 }
 
+#[cfg(feature = "otel")]
 fn format_bytes(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = KIB * 1024.0;
@@ -335,6 +190,240 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{bytes} B")
     }
+}
+
+// ---------------------------------------------------------------------------
+// OpenTelemetry console export
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "otel")]
+fn init_otel_console_exporter() -> SdkMeterProvider {
+    let exporter = StressConsoleMetricExporter::default();
+    let reader = PeriodicReader::builder(exporter)
+        .with_interval(OTEL_EXPORT_INTERVAL)
+        .build();
+    let provider = SdkMeterProvider::builder()
+        .with_reader(reader)
+        .with_resource(
+            Resource::builder()
+                .with_service_name("nacelle-stress-server")
+                .build(),
+        )
+        .build();
+    global::set_meter_provider(provider.clone());
+    provider
+}
+
+#[cfg(not(feature = "otel"))]
+fn init_otel_console_exporter() {}
+
+#[cfg(feature = "otel")]
+#[derive(Debug, Default)]
+struct StressConsoleMetricExporter {
+    shutdown: AtomicBool,
+}
+
+#[cfg(feature = "otel")]
+impl PushMetricExporter for StressConsoleMetricExporter {
+    async fn export(&self, metrics: &ResourceMetrics) -> OTelSdkResult {
+        if self.shutdown.load(Ordering::SeqCst) {
+            return Err(opentelemetry_sdk::error::OTelSdkError::AlreadyShutdown);
+        }
+
+        print_otel_snapshot(StressOtelSnapshot::from_resource_metrics(metrics));
+        Ok(())
+    }
+
+    fn force_flush(&self) -> OTelSdkResult {
+        Ok(())
+    }
+
+    fn shutdown_with_timeout(&self, _timeout: Duration) -> OTelSdkResult {
+        self.shutdown.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn temporality(&self) -> Temporality {
+        Temporality::Delta
+    }
+}
+
+#[cfg(feature = "otel")]
+#[derive(Debug, Default)]
+struct StressOtelSnapshot {
+    active_connections: u64,
+    active_connection_delta: i64,
+    active_requests: u64,
+    active_streaming_tasks: u64,
+    memory_used_bytes: u64,
+    accepted_connections: u64,
+    closed_connections: u64,
+    completed_requests: u64,
+    ok_requests: u64,
+    failed_requests: u64,
+    tcp_errors: u64,
+    resource_limit_rejections: u64,
+    request_wire_bytes: u64,
+    request_body_bytes: u64,
+    response_wire_bytes: u64,
+}
+
+#[cfg(feature = "otel")]
+impl StressOtelSnapshot {
+    fn from_resource_metrics(metrics: &ResourceMetrics) -> Self {
+        let mut snapshot = Self::default();
+        for scope in metrics.scope_metrics() {
+            for metric in scope.metrics() {
+                match metric.name() {
+                    "nacelle.connections.active" => {
+                        snapshot.active_connections += gauge_u64(metric.data());
+                    }
+                    "nacelle.requests.active" => {
+                        snapshot.active_requests += gauge_u64(metric.data());
+                    }
+                    "nacelle.streaming_tasks.active" => {
+                        snapshot.active_streaming_tasks += gauge_u64(metric.data());
+                    }
+                    "nacelle.memory.used_bytes" => {
+                        snapshot.memory_used_bytes += gauge_u64(metric.data());
+                    }
+                    "nacelle.tcp.connections.active" => {
+                        snapshot.active_connection_delta += sum_i64(metric.data());
+                    }
+                    "nacelle.tcp.connections.accepted" => {
+                        snapshot.accepted_connections += sum_u64(metric.data());
+                    }
+                    "nacelle.tcp.connections.closed" => {
+                        snapshot.closed_connections += sum_u64(metric.data());
+                    }
+                    "nacelle.tcp.requests.completed" => {
+                        snapshot.completed_requests += sum_u64(metric.data());
+                        snapshot.ok_requests +=
+                            sum_u64_with_attribute(metric.data(), "status", "ok");
+                        snapshot.failed_requests +=
+                            sum_u64_with_attribute(metric.data(), "status", "error");
+                    }
+                    "nacelle.tcp.errors" => {
+                        snapshot.tcp_errors += sum_u64(metric.data());
+                    }
+                    "nacelle.tcp.resource_limit.rejections" => {
+                        snapshot.resource_limit_rejections += sum_u64(metric.data());
+                    }
+                    "nacelle.tcp.request.bytes" => {
+                        snapshot.request_wire_bytes += sum_u64(metric.data());
+                    }
+                    "nacelle.tcp.request.body_bytes" => {
+                        snapshot.request_body_bytes += sum_u64(metric.data());
+                    }
+                    "nacelle.tcp.response.bytes" => {
+                        snapshot.response_wire_bytes += sum_u64(metric.data());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        snapshot
+    }
+}
+
+#[cfg(feature = "otel")]
+fn print_otel_snapshot(snapshot: StressOtelSnapshot) {
+    let interval_secs = OTEL_EXPORT_INTERVAL.as_secs_f64();
+    println!("nacelle-stress-server otel window={interval_secs:.1}s");
+    println!(
+        "  connections  active={} delta={} accepted={} ({:.2}/s) closed={} ({:.2}/s)",
+        snapshot.active_connections,
+        snapshot.active_connection_delta,
+        snapshot.accepted_connections,
+        snapshot.accepted_connections as f64 / interval_secs,
+        snapshot.closed_connections,
+        snapshot.closed_connections as f64 / interval_secs,
+    );
+    println!(
+        "  requests     active={} completed={} ({:.2}/s) ok={} failed={} ({:.2}/s) tcp_errors={} resource_limit_rejections={}",
+        snapshot.active_requests,
+        snapshot.completed_requests,
+        snapshot.completed_requests as f64 / interval_secs,
+        snapshot.ok_requests,
+        snapshot.failed_requests,
+        snapshot.failed_requests as f64 / interval_secs,
+        snapshot.tcp_errors,
+        snapshot.resource_limit_rejections,
+    );
+    println!(
+        "  bytes        request_wire={} ({:.2} MiB/s) request_body={} ({:.2} MiB/s) response_wire={} ({:.2} MiB/s)",
+        format_bytes(snapshot.request_wire_bytes),
+        bytes_to_mib(snapshot.request_wire_bytes) / interval_secs,
+        format_bytes(snapshot.request_body_bytes),
+        bytes_to_mib(snapshot.request_body_bytes) / interval_secs,
+        format_bytes(snapshot.response_wire_bytes),
+        bytes_to_mib(snapshot.response_wire_bytes) / interval_secs,
+    );
+    println!(
+        "  runtime      streaming_tasks_active={} memory_used={}",
+        snapshot.active_streaming_tasks,
+        format_bytes(snapshot.memory_used_bytes),
+    );
+}
+
+#[cfg(feature = "otel")]
+fn gauge_u64(metrics: &AggregatedMetrics) -> u64 {
+    match metrics {
+        AggregatedMetrics::U64(MetricData::Gauge(gauge)) => {
+            gauge.data_points().map(|point| point.value()).sum()
+        }
+        _ => 0,
+    }
+}
+
+#[cfg(feature = "otel")]
+fn sum_u64(metrics: &AggregatedMetrics) -> u64 {
+    match metrics {
+        AggregatedMetrics::U64(MetricData::Sum(sum)) => {
+            sum.data_points().map(|point| point.value()).sum()
+        }
+        _ => 0,
+    }
+}
+
+#[cfg(feature = "otel")]
+fn sum_i64(metrics: &AggregatedMetrics) -> i64 {
+    match metrics {
+        AggregatedMetrics::I64(MetricData::Sum(sum)) => {
+            sum.data_points().map(|point| point.value()).sum()
+        }
+        _ => 0,
+    }
+}
+
+#[cfg(feature = "otel")]
+fn sum_u64_with_attribute(metrics: &AggregatedMetrics, key: &str, value: &str) -> u64 {
+    match metrics {
+        AggregatedMetrics::U64(MetricData::Sum(sum)) => sum_points_with_attribute(sum, key, value),
+        _ => 0,
+    }
+}
+
+#[cfg(feature = "otel")]
+fn sum_points_with_attribute(sum: &Sum<u64>, key: &str, value: &str) -> u64 {
+    sum.data_points()
+        .filter(|point| {
+            point
+                .attributes()
+                .any(|attribute| attribute.key.as_str() == key && attribute.value.as_str() == value)
+        })
+        .map(|point| point.value())
+        .sum()
+}
+
+#[cfg(feature = "otel")]
+fn shutdown_otel_console_exporter(provider: &SdkMeterProvider) -> OTelSdkResult {
+    provider.shutdown()
+}
+
+#[cfg(not(feature = "otel"))]
+fn shutdown_otel_console_exporter(_provider: &()) -> Result<(), std::convert::Infallible> {
+    Ok(())
 }
 
 async fn wait_for_shutdown_signal() -> Result<(), std::io::Error> {
@@ -356,10 +445,15 @@ async fn wait_for_shutdown_signal() -> Result<(), std::io::Error> {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(feature = "otel")]
+    let meter_provider = init_otel_console_exporter();
+    #[cfg(not(feature = "otel"))]
+    let meter_provider = init_otel_console_exporter();
+
     let config = parse_args(std::env::args().skip(1), "tokio")?;
     configure_allocator(config.low_memory);
-    let stats = Arc::new(StressServerStats::new(config.stats_enabled));
-    let server = build_server(&config, stats.clone())?;
+    let server = build_server(&config)?
+        .with_tcp_telemetry(NacelleTcpTelemetry::default().with_request_byte_metrics(true));
     let tls_config = build_tls_config(&config)?;
 
     #[cfg(not(target_os = "linux"))]
@@ -394,30 +488,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let stats_task = if stats.enabled() {
-        Some(tokio::spawn(print_periodic_stats(
-            stats.clone(),
-            shutdown_rx.clone(),
-        )))
-    } else {
-        None
-    };
 
     if n_server_threads == 1 {
-        let server_task = tokio::spawn(run_server(
-            first_listener,
-            server,
-            tls_config,
-            shutdown_rx,
-            stats.clone(),
-        ));
+        let server_task = tokio::spawn(run_server(first_listener, server, tls_config, shutdown_rx));
         wait_for_shutdown_signal().await?;
         eprintln!("\nshutting down...");
         let _ = shutdown_tx.send(true);
         server_task.await??;
-        if let Some(stats_task) = stats_task {
-            stats_task.await?;
-        }
+        shutdown_otel_console_exporter(&meter_provider)?;
         return Ok(());
     }
 
@@ -427,7 +505,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         server.clone(),
         clone_tls_config(&tls_config),
         shutdown_rx.clone(),
-        stats.clone(),
     ));
     for _ in 1..n_server_threads {
         let socket = make_server_socket(&listen_addr, true)?;
@@ -438,7 +515,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             server.clone(),
             clone_tls_config(&tls_config),
             shutdown_rx.clone(),
-            stats.clone(),
         ));
     }
 
@@ -450,9 +526,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .map_err(|_| "server thread panicked")?
             .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(error) })?;
     }
-    if let Some(stats_task) = stats_task {
-        stats_task.await?;
-    }
+    shutdown_otel_console_exporter(&meter_provider)?;
 
     Ok(())
 }

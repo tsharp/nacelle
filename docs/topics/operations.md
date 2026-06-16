@@ -54,14 +54,12 @@ and memory approaching the configured budget.
 
 ## Benchmarking
 
-Use the stress server with `stats_enabled = false` for peak throughput. Enable
-`--stats` only for diagnostic runs; server-side per-request stats use atomics
-and can affect RPS.
-
 The default TCP OpenTelemetry profile keeps lifecycle/request metrics on and
-leaves byte counters, active request gauges, phase histograms, and opcode labels
-off. Turn those detailed TCP metrics on only for diagnostic runs; they add
-per-request writes and attribute work.
+leaves active request gauges, phase histograms, and opcode labels off. The stress
+server's default OTel build turns on TCP request/response byte counters and
+prints a compact console snapshot every 5 seconds. Turn the remaining detailed
+TCP metrics on only for diagnostic runs; they add per-request writes and
+attribute work.
 
 Run microbenchmarks before and after hot-path changes:
 
