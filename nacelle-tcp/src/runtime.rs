@@ -1429,7 +1429,6 @@ fn record_connection_rejection<Req, P, H>(
         server.listener_label(),
         server.protocol().name(),
         tls,
-        None,
     );
     server.tcp_telemetry().error(&context, "accept", error);
 }

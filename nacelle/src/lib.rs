@@ -109,8 +109,8 @@ pub use nacelle_tcp::NacelleUnixSocketOptions;
 pub use nacelle_tcp::{
     DecodedRequest, NacelleServer, NacelleServerBuilder, NacelleTcpBindOptions,
     NacelleTcpKeepalive, NacelleTcpLimits, NacelleTcpMetricsContext, NacelleTcpOptions,
-    NacelleTcpTelemetry, NacelleTcpTelemetryConfig, NacelleTlsDetectionOptions, Protocol,
-    TcpServer, serve_connection, serve_stream,
+    NacelleTcpRequestMetricsConfig, NacelleTcpTelemetry, NacelleTcpTelemetryConfig,
+    NacelleTlsDetectionOptions, Protocol, TcpServer, serve_connection, serve_stream,
 };
 #[cfg(feature = "reference_protocol")]
 pub use reference_protocol::{

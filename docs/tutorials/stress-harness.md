@@ -63,9 +63,13 @@ PowerShell example:
 ```
 
 OpenTelemetry metrics are enabled in the default stress server build. That build
-also enables TCP request/response byte counters and prints a compact OTel console
-snapshot every 5 seconds. Use `--no-default-features` with the plain TCP config
-when you intentionally want a metrics-free peak throughput baseline.
+prints a compact OTel console snapshot every 5 seconds and enables TCP
+request started/completed counters plus request/response wire-byte counters by
+default. The TCP telemetry API groups those switches under `request_metrics`;
+the stress server exposes wire-byte accounting as `wire_byte_metrics = true`.
+Use `--no-wire-byte-metrics` for a lower-overhead OTel run, or use
+`--no-default-features` with the plain TCP config when you intentionally want a
+metrics-free peak throughput baseline.
 
 The Tokio stress server default build includes `tls-self-signed` support. The
 checked-in root `config.toml` enables `tls_self_signed = true`, so the local

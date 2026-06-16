@@ -197,8 +197,8 @@ fn format_bytes(bytes: u64) -> String {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "otel")]
-fn init_otel_console_exporter() -> SdkMeterProvider {
-    let exporter = StressConsoleMetricExporter::default();
+fn init_otel_console_exporter(config: &shared::ServerConfig) -> SdkMeterProvider {
+    let exporter = StressConsoleMetricExporter::new(StressOtelByteMetrics::from(config));
     let reader = PeriodicReader::builder(exporter)
         .with_interval(OTEL_EXPORT_INTERVAL)
         .build();
@@ -215,12 +215,38 @@ fn init_otel_console_exporter() -> SdkMeterProvider {
 }
 
 #[cfg(not(feature = "otel"))]
-fn init_otel_console_exporter() {}
+fn init_otel_console_exporter(_config: &shared::ServerConfig) {}
 
 #[cfg(feature = "otel")]
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Copy)]
+struct StressOtelByteMetrics {
+    wire_bytes: bool,
+}
+
+#[cfg(feature = "otel")]
+impl From<&shared::ServerConfig> for StressOtelByteMetrics {
+    fn from(config: &shared::ServerConfig) -> Self {
+        Self {
+            wire_bytes: config.wire_byte_metrics,
+        }
+    }
+}
+
+#[cfg(feature = "otel")]
+#[derive(Debug)]
 struct StressConsoleMetricExporter {
     shutdown: AtomicBool,
+    byte_metrics: StressOtelByteMetrics,
+}
+
+#[cfg(feature = "otel")]
+impl StressConsoleMetricExporter {
+    fn new(byte_metrics: StressOtelByteMetrics) -> Self {
+        Self {
+            shutdown: AtomicBool::new(false),
+            byte_metrics,
+        }
+    }
 }
 
 #[cfg(feature = "otel")]
@@ -230,7 +256,10 @@ impl PushMetricExporter for StressConsoleMetricExporter {
             return Err(opentelemetry_sdk::error::OTelSdkError::AlreadyShutdown);
         }
 
-        print_otel_snapshot(StressOtelSnapshot::from_resource_metrics(metrics));
+        print_otel_snapshot(
+            StressOtelSnapshot::from_resource_metrics(metrics),
+            self.byte_metrics,
+        );
         Ok(())
     }
 
@@ -258,13 +287,13 @@ struct StressOtelSnapshot {
     memory_used_bytes: u64,
     accepted_connections: u64,
     closed_connections: u64,
+    started_requests: u64,
     completed_requests: u64,
     ok_requests: u64,
     failed_requests: u64,
     tcp_errors: u64,
     resource_limit_rejections: u64,
     request_wire_bytes: u64,
-    request_body_bytes: u64,
     response_wire_bytes: u64,
 }
 
@@ -296,6 +325,9 @@ impl StressOtelSnapshot {
                     "nacelle.tcp.connections.closed" => {
                         snapshot.closed_connections += sum_u64(metric.data());
                     }
+                    "nacelle.tcp.requests.started" => {
+                        snapshot.started_requests += sum_u64(metric.data());
+                    }
                     "nacelle.tcp.requests.completed" => {
                         snapshot.completed_requests += sum_u64(metric.data());
                         snapshot.ok_requests +=
@@ -312,9 +344,6 @@ impl StressOtelSnapshot {
                     "nacelle.tcp.request.bytes" => {
                         snapshot.request_wire_bytes += sum_u64(metric.data());
                     }
-                    "nacelle.tcp.request.body_bytes" => {
-                        snapshot.request_body_bytes += sum_u64(metric.data());
-                    }
                     "nacelle.tcp.response.bytes" => {
                         snapshot.response_wire_bytes += sum_u64(metric.data());
                     }
@@ -327,7 +356,7 @@ impl StressOtelSnapshot {
 }
 
 #[cfg(feature = "otel")]
-fn print_otel_snapshot(snapshot: StressOtelSnapshot) {
+fn print_otel_snapshot(snapshot: StressOtelSnapshot, byte_metrics: StressOtelByteMetrics) {
     let interval_secs = OTEL_EXPORT_INTERVAL.as_secs_f64();
     println!("nacelle-stress-server otel window={interval_secs:.1}s");
     println!(
@@ -340,8 +369,10 @@ fn print_otel_snapshot(snapshot: StressOtelSnapshot) {
         snapshot.closed_connections as f64 / interval_secs,
     );
     println!(
-        "  requests     active={} completed={} ({:.2}/s) ok={} failed={} ({:.2}/s) tcp_errors={} resource_limit_rejections={}",
+        "  requests     active={} started={} ({:.2}/s) completed={} ({:.2}/s) ok={} failed={} ({:.2}/s) tcp_errors={} resource_limit_rejections={}",
         snapshot.active_requests,
+        snapshot.started_requests,
+        snapshot.started_requests as f64 / interval_secs,
         snapshot.completed_requests,
         snapshot.completed_requests as f64 / interval_secs,
         snapshot.ok_requests,
@@ -350,15 +381,17 @@ fn print_otel_snapshot(snapshot: StressOtelSnapshot) {
         snapshot.tcp_errors,
         snapshot.resource_limit_rejections,
     );
-    println!(
-        "  bytes        request_wire={} ({:.2} MiB/s) request_body={} ({:.2} MiB/s) response_wire={} ({:.2} MiB/s)",
-        format_bytes(snapshot.request_wire_bytes),
-        bytes_to_mib(snapshot.request_wire_bytes) / interval_secs,
-        format_bytes(snapshot.request_body_bytes),
-        bytes_to_mib(snapshot.request_body_bytes) / interval_secs,
-        format_bytes(snapshot.response_wire_bytes),
-        bytes_to_mib(snapshot.response_wire_bytes) / interval_secs,
-    );
+    if byte_metrics.wire_bytes {
+        println!(
+            "  bytes        request_wire={} ({:.2} MiB/s) response_wire={} ({:.2} MiB/s)",
+            format_bytes(snapshot.request_wire_bytes),
+            bytes_to_mib(snapshot.request_wire_bytes) / interval_secs,
+            format_bytes(snapshot.response_wire_bytes),
+            bytes_to_mib(snapshot.response_wire_bytes) / interval_secs,
+        );
+    } else {
+        println!("  bytes        wire_byte_metrics=off");
+    }
     println!(
         "  runtime      streaming_tasks_active={} memory_used={}",
         snapshot.active_streaming_tasks,
@@ -445,15 +478,17 @@ async fn wait_for_shutdown_signal() -> Result<(), std::io::Error> {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    #[cfg(feature = "otel")]
-    let meter_provider = init_otel_console_exporter();
-    #[cfg(not(feature = "otel"))]
-    let meter_provider = init_otel_console_exporter();
-
     let config = parse_args(std::env::args().skip(1), "tokio")?;
     configure_allocator(config.low_memory);
-    let server = build_server(&config)?
-        .with_tcp_telemetry(NacelleTcpTelemetry::default().with_request_byte_metrics(true));
+
+    #[cfg(feature = "otel")]
+    let meter_provider = init_otel_console_exporter(&config);
+    #[cfg(not(feature = "otel"))]
+    let meter_provider = init_otel_console_exporter(&config);
+
+    let tcp_telemetry =
+        NacelleTcpTelemetry::default().with_wire_byte_metrics(config.wire_byte_metrics);
+    let server = build_server(&config)?.with_tcp_telemetry(tcp_telemetry);
     let tls_config = build_tls_config(&config)?;
 
     #[cfg(not(target_os = "linux"))]

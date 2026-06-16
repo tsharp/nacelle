@@ -54,12 +54,12 @@ and memory approaching the configured budget.
 
 ## Benchmarking
 
-The default TCP OpenTelemetry profile keeps lifecycle/request metrics on and
-leaves active request gauges, phase histograms, and opcode labels off. The stress
-server's default OTel build turns on TCP request/response byte counters and
-prints a compact console snapshot every 5 seconds. Turn the remaining detailed
-TCP metrics on only for diagnostic runs; they add per-request writes and
-attribute work.
+The default TCP OpenTelemetry profile keeps lifecycle metrics on. Request
+metrics are grouped under `NacelleTcpTelemetryConfig::request_metrics`:
+`request_started`, `request_completed`, and `wire_byte_metrics` are on by
+default, while `request_in_flight`, `request_duration_ms`, and phase histograms
+are opt-in. The stress server's default OTel build prints a compact console
+snapshot every 5 seconds.
 
 Run microbenchmarks before and after hot-path changes:
 
