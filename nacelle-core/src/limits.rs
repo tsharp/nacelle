@@ -35,7 +35,7 @@ impl Default for NacelleLimits {
             max_streaming_tasks: 8_192,
             max_connections_per_peer: None,
             max_connection_opens_per_peer_per_second: None,
-            max_memory_bytes: 512 * 1024 * 1024,
+            max_memory_bytes: usize::MAX,
             max_request_body_bytes: 16 * 1024 * 1024,
             max_response_body_bytes: 16 * 1024 * 1024,
             read_timeout: Some(Duration::from_secs(30)),
@@ -464,13 +464,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_limits_are_bounded_for_production_safety() {
+    fn default_limits_keep_memory_limiting_opt_in() {
         let limits = NacelleLimits::default();
 
         assert_ne!(limits.max_connections, usize::MAX);
         assert_ne!(limits.max_in_flight_requests, usize::MAX);
         assert_ne!(limits.max_streaming_tasks, usize::MAX);
-        assert_ne!(limits.max_memory_bytes, usize::MAX);
+        assert_eq!(limits.max_memory_bytes, usize::MAX);
         assert!(limits.max_connection_opens_per_peer_per_second.is_none());
         assert!(limits.read_timeout.is_some());
         assert!(limits.write_timeout.is_some());

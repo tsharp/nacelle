@@ -1,6 +1,2 @@
 low_memory = true
 tls_self_signed = true
-
-[limits]
-# 32 MiB
-max_memory_bytes = 33554432

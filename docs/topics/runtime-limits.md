@@ -19,7 +19,11 @@ a concurrency decision.
 
 For configuration details:
 
-Start from `NacelleLimits::default()` and tune downward for smaller machines. Avoid `usize::MAX` limits outside benchmarks.
+Start from `NacelleLimits::default()` and tune for the deployment. Active
+connections, in-flight requests, streaming tasks, body sizes, and timeouts are
+bounded by default. Memory reservation limiting is opt-in: the default
+`max_memory_bytes` is `usize::MAX`, which disables Nacelle memory-budget
+enforcement until you set an explicit byte limit.
 
 Recommended presets:
 
@@ -42,6 +46,11 @@ body_budget =
 total_budget =
   connection_budget + body_budget + handler/backend/runtime headroom
 ```
+
+When memory limiting is enabled with `NacelleLimits::with_max_memory_bytes(...)`,
+Nacelle reserves from that budget for connection buffers and buffered or
+streaming request bodies. The limiter accounts for Nacelle-managed reservations,
+not total process RSS, so keep process or container memory limits in place.
 
 TCP processes requests sequentially per connection. `request_body_channel_capacity` controls the queued streaming chunks between the socket reader and handler. HTTP uses Hyper's internal buffers plus Nacelle's body queue, so leave extra headroom when enabling large request bodies.
 

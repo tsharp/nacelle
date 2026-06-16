@@ -24,6 +24,7 @@ use nacelle_core::telemetry::NacelleTelemetry;
 use nacelle_core::tls::NacelleOpenSslConfig;
 #[cfg(feature = "rustls")]
 use nacelle_core::tls::NacelleTlsConfig;
+use std::sync::Arc as StdArc;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub struct Missing;
@@ -35,6 +36,7 @@ pub struct NacelleServer<Req, P, H = ()> {
     config: NacelleConfig,
     telemetry: NacelleTelemetry,
     runtime_state: NacelleRuntimeState,
+    listener: StdArc<str>,
     connection_extension_factory: Option<NacelleConnectionExtensionFactory>,
     _request: PhantomData<fn() -> Req>,
 }
@@ -52,6 +54,7 @@ where
             config: self.config.clone(),
             telemetry: self.telemetry.clone(),
             runtime_state: self.runtime_state.clone(),
+            listener: self.listener.clone(),
             connection_extension_factory: self.connection_extension_factory.clone(),
             _request: PhantomData,
         }
@@ -66,6 +69,7 @@ impl<Req> NacelleServer<Req, (), ()> {
             config: NacelleConfig::default(),
             telemetry: NacelleTelemetry::default(),
             runtime_state: NacelleRuntimeState::default(),
+            listener: StdArc::from("direct"),
             connection_extension_factory: None,
             _protocol: PhantomData,
             _handler: PhantomData,
@@ -92,8 +96,17 @@ where
         &self.telemetry
     }
 
+    pub fn listener_label(&self) -> StdArc<str> {
+        self.listener.clone()
+    }
+
     pub fn protocol(&self) -> &P {
         self.protocol.as_ref()
+    }
+
+    pub fn with_listener_label(mut self, listener: impl Into<StdArc<str>>) -> Self {
+        self.listener = listener.into();
+        self
     }
 
     pub fn with_runtime_state(mut self, runtime_state: NacelleRuntimeState) -> Self {
@@ -107,8 +120,9 @@ where
         connection: NacelleConnectionMeta,
     ) -> NacelleConnectionMeta {
         let Some(factory) = &self.connection_extension_factory else {
-            return connection;
+            return connection.with_listener(self.listener.clone());
         };
+        let connection = connection.with_listener(self.listener.clone());
         let Some(extension) = factory(&connection) else {
             return connection;
         };
@@ -665,6 +679,7 @@ pub struct NacelleServerBuilder<Req, ProtocolState, HandlerState, P, H> {
     config: NacelleConfig,
     telemetry: NacelleTelemetry,
     runtime_state: NacelleRuntimeState,
+    listener: StdArc<str>,
     connection_extension_factory: Option<NacelleConnectionExtensionFactory>,
     _protocol: PhantomData<ProtocolState>,
     _handler: PhantomData<HandlerState>,
@@ -686,6 +701,11 @@ impl<Req, ProtocolState, HandlerState, P, H>
 
     pub fn runtime_state(mut self, runtime_state: NacelleRuntimeState) -> Self {
         self.runtime_state = runtime_state;
+        self
+    }
+
+    pub fn listener_label(mut self, listener: impl Into<StdArc<str>>) -> Self {
+        self.listener = listener.into();
         self
     }
 
@@ -731,6 +751,7 @@ impl<Req, HandlerState, P, H> NacelleServerBuilder<Req, Missing, HandlerState, P
             config: self.config,
             telemetry: self.telemetry,
             runtime_state: self.runtime_state,
+            listener: self.listener,
             connection_extension_factory: self.connection_extension_factory,
             _protocol: PhantomData,
             _handler: PhantomData,
@@ -750,6 +771,7 @@ impl<Req, ProtocolState, P, H> NacelleServerBuilder<Req, ProtocolState, Missing,
             config: self.config,
             telemetry: self.telemetry,
             runtime_state: self.runtime_state,
+            listener: self.listener,
             connection_extension_factory: self.connection_extension_factory,
             _protocol: PhantomData,
             _handler: PhantomData,
@@ -777,6 +799,7 @@ where
             config: self.config,
             telemetry: self.telemetry,
             runtime_state: self.runtime_state,
+            listener: self.listener,
             connection_extension_factory: self.connection_extension_factory,
             _request: PhantomData,
         })

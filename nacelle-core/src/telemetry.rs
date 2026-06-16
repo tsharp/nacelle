@@ -52,6 +52,58 @@ pub trait NacelleTelemetrySink: Send + Sync + 'static {
     fn record(&self, event: NacelleTelemetryEvent);
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NacelleTelemetryConfig {
+    pub tcp_metrics: bool,
+    pub tcp_opcode_labels: bool,
+}
+
+impl Default for NacelleTelemetryConfig {
+    fn default() -> Self {
+        Self {
+            tcp_metrics: true,
+            tcp_opcode_labels: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NacelleTcpMetricsContext {
+    pub transport: NacelleTransport,
+    pub listener: Arc<str>,
+    pub protocol: &'static str,
+    pub tls: &'static str,
+    pub opcode: Option<u64>,
+}
+
+impl NacelleTcpMetricsContext {
+    pub fn new(
+        transport: NacelleTransport,
+        listener: Arc<str>,
+        protocol: &'static str,
+        tls: &'static str,
+        opcode: Option<u64>,
+    ) -> Self {
+        Self {
+            transport,
+            listener,
+            protocol,
+            tls,
+            opcode,
+        }
+    }
+
+    pub fn without_opcode(&self) -> Self {
+        Self {
+            transport: self.transport,
+            listener: self.listener.clone(),
+            protocol: self.protocol,
+            tls: self.tls,
+            opcode: None,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct NacelleInMemoryTelemetrySink {
     events: Mutex<Vec<NacelleTelemetryEvent>>,
@@ -79,6 +131,7 @@ impl NacelleTelemetrySink for NacelleInMemoryTelemetrySink {
 #[derive(Clone)]
 pub struct NacelleTelemetry {
     sink: Option<Arc<dyn NacelleTelemetrySink>>,
+    config: NacelleTelemetryConfig,
     #[cfg(feature = "otel")]
     metrics: std::sync::Arc<OtelMetrics>,
 }
@@ -87,6 +140,7 @@ impl std::fmt::Debug for NacelleTelemetry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NacelleTelemetry")
             .field("has_sink", &self.sink.is_some())
+            .field("config", &self.config)
             .finish()
     }
 }
@@ -101,6 +155,7 @@ impl NacelleTelemetry {
     pub fn new() -> Self {
         Self {
             sink: None,
+            config: NacelleTelemetryConfig::default(),
             #[cfg(feature = "otel")]
             metrics: std::sync::Arc::new(OtelMetrics::new()),
         }
@@ -109,6 +164,29 @@ impl NacelleTelemetry {
     pub fn with_sink(mut self, sink: Arc<dyn NacelleTelemetrySink>) -> Self {
         self.sink = Some(sink);
         self
+    }
+
+    pub fn with_config(mut self, config: NacelleTelemetryConfig) -> Self {
+        self.config = config;
+        self
+    }
+
+    pub fn with_tcp_metrics(mut self, enabled: bool) -> Self {
+        self.config.tcp_metrics = enabled;
+        self
+    }
+
+    pub fn with_tcp_opcode_labels(mut self, enabled: bool) -> Self {
+        self.config.tcp_opcode_labels = enabled;
+        self
+    }
+
+    pub fn config(&self) -> NacelleTelemetryConfig {
+        self.config
+    }
+
+    pub fn tcp_metrics_enabled(&self) -> bool {
+        cfg!(feature = "otel") && self.config.tcp_metrics
     }
 
     pub fn listener_configured(&self, transport: NacelleTransport, name: &str, addr: &str) {
@@ -389,6 +467,140 @@ impl NacelleTelemetry {
         let _ = state;
     }
 
+    pub fn tcp_connection_accepted(&self, context: &NacelleTcpMetricsContext) {
+        if !self.tcp_metrics_enabled() {
+            return;
+        }
+        #[cfg(feature = "otel")]
+        {
+            let attributes = tcp_connection_attributes(context);
+            self.metrics.tcp_connection_accepted.add(1, &attributes);
+            self.metrics.tcp_connection_active.add(1, &attributes);
+        }
+    }
+
+    pub fn tcp_connection_closed(
+        &self,
+        context: &NacelleTcpMetricsContext,
+        close_reason: &'static str,
+    ) {
+        if !self.tcp_metrics_enabled() {
+            return;
+        }
+        #[cfg(feature = "otel")]
+        {
+            let mut attributes = tcp_connection_attributes(context);
+            attributes.push(opentelemetry::KeyValue::new("close_reason", close_reason));
+            self.metrics.tcp_connection_closed.add(1, &attributes);
+            let active_attributes = tcp_connection_attributes(context);
+            self.metrics
+                .tcp_connection_active
+                .add(-1, &active_attributes);
+        }
+    }
+
+    pub fn tcp_request_started(&self, context: &NacelleTcpMetricsContext) {
+        if !self.tcp_metrics_enabled() {
+            return;
+        }
+        #[cfg(feature = "otel")]
+        {
+            let attributes = tcp_request_attributes(context, self.config.tcp_opcode_labels);
+            self.metrics.tcp_request_started.add(1, &attributes);
+            self.metrics.tcp_request_in_flight.add(1, &attributes);
+        }
+    }
+
+    pub fn tcp_request_completed(
+        &self,
+        context: &NacelleTcpMetricsContext,
+        status: &'static str,
+        request_bytes: usize,
+        response_bytes: usize,
+        elapsed: Duration,
+    ) {
+        if !self.tcp_metrics_enabled() {
+            return;
+        }
+        #[cfg(feature = "otel")]
+        {
+            let mut attributes = tcp_request_attributes(context, self.config.tcp_opcode_labels);
+            attributes.push(opentelemetry::KeyValue::new("status", status));
+            self.metrics.tcp_request_completed.add(1, &attributes);
+            self.metrics
+                .tcp_request_duration_ms
+                .record(elapsed.as_secs_f64() * 1_000.0, &attributes);
+            if request_bytes != 0 {
+                self.metrics
+                    .tcp_request_bytes
+                    .add(request_bytes as u64, &attributes);
+            }
+            if response_bytes != 0 {
+                self.metrics
+                    .tcp_response_bytes
+                    .add(response_bytes as u64, &attributes);
+            }
+
+            let active_attributes = tcp_request_attributes(context, self.config.tcp_opcode_labels);
+            self.metrics
+                .tcp_request_in_flight
+                .add(-1, &active_attributes);
+        }
+    }
+
+    pub fn tcp_request_body_bytes(&self, context: &NacelleTcpMetricsContext, bytes: usize) {
+        if bytes == 0 || !self.tcp_metrics_enabled() {
+            return;
+        }
+        #[cfg(feature = "otel")]
+        self.metrics.tcp_request_body_bytes.add(
+            bytes as u64,
+            &tcp_request_attributes(context, self.config.tcp_opcode_labels),
+        );
+    }
+
+    pub fn tcp_phase_duration(
+        &self,
+        context: &NacelleTcpMetricsContext,
+        phase: &'static str,
+        elapsed: Duration,
+    ) {
+        if !self.tcp_metrics_enabled() {
+            return;
+        }
+        #[cfg(feature = "otel")]
+        self.metrics.tcp_phase_duration_ms.record(
+            elapsed.as_secs_f64() * 1_000.0,
+            &tcp_phase_attributes(context, phase, self.config.tcp_opcode_labels),
+        );
+    }
+
+    pub fn tcp_error(
+        &self,
+        context: &NacelleTcpMetricsContext,
+        phase: &'static str,
+        error: &crate::error::NacelleError,
+    ) {
+        if !self.tcp_metrics_enabled() {
+            return;
+        }
+        #[cfg(feature = "otel")]
+        {
+            self.metrics.tcp_errors.add(
+                1,
+                &tcp_error_attributes(context, phase, error, self.config.tcp_opcode_labels),
+            );
+            if let crate::error::NacelleError::ResourceLimit(limit) = error {
+                let mut attributes = tcp_request_attributes(context, self.config.tcp_opcode_labels);
+                attributes.push(opentelemetry::KeyValue::new("limit", *limit));
+                attributes.push(opentelemetry::KeyValue::new("phase", phase));
+                self.metrics
+                    .tcp_resource_limit_rejections
+                    .add(1, &attributes);
+            }
+        }
+    }
+
     fn record(&self, event: NacelleTelemetryEvent) {
         if let Some(sink) = &self.sink {
             sink.record(event);
@@ -409,6 +621,71 @@ fn error_reason(error: &crate::error::NacelleError) -> Option<&'static str> {
         crate::error::NacelleError::Protocol(_) => Some("protocol"),
         crate::error::NacelleError::Handler(_) => Some("handler"),
         crate::error::NacelleError::Join(_) => Some("join"),
+    }
+}
+
+#[cfg(feature = "otel")]
+fn tcp_connection_attributes(context: &NacelleTcpMetricsContext) -> Vec<opentelemetry::KeyValue> {
+    vec![
+        opentelemetry::KeyValue::new("listener", context.listener.as_ref().to_owned()),
+        opentelemetry::KeyValue::new("transport", context.transport.as_str()),
+        opentelemetry::KeyValue::new("tls", context.tls),
+    ]
+}
+
+#[cfg(feature = "otel")]
+fn tcp_request_attributes(
+    context: &NacelleTcpMetricsContext,
+    include_opcode: bool,
+) -> Vec<opentelemetry::KeyValue> {
+    let mut attributes = tcp_connection_attributes(context);
+    attributes.push(opentelemetry::KeyValue::new("protocol", context.protocol));
+    if include_opcode && let Some(opcode) = context.opcode {
+        attributes.push(opentelemetry::KeyValue::new("opcode", opcode.to_string()));
+    }
+    attributes
+}
+
+#[cfg(feature = "otel")]
+fn tcp_phase_attributes(
+    context: &NacelleTcpMetricsContext,
+    phase: &'static str,
+    include_opcode: bool,
+) -> Vec<opentelemetry::KeyValue> {
+    let mut attributes = tcp_request_attributes(context, include_opcode);
+    attributes.push(opentelemetry::KeyValue::new("phase", phase));
+    attributes
+}
+
+#[cfg(feature = "otel")]
+fn tcp_error_attributes(
+    context: &NacelleTcpMetricsContext,
+    phase: &'static str,
+    error: &crate::error::NacelleError,
+    include_opcode: bool,
+) -> Vec<opentelemetry::KeyValue> {
+    let mut attributes = tcp_phase_attributes(context, phase, include_opcode);
+    attributes.push(opentelemetry::KeyValue::new(
+        "error_kind",
+        error_kind(error),
+    ));
+    attributes
+}
+
+#[cfg(feature = "otel")]
+fn error_kind(error: &crate::error::NacelleError) -> &'static str {
+    match error {
+        crate::error::NacelleError::ResourceLimit(_) => "resource_limit",
+        crate::error::NacelleError::Timeout(_) => "timeout",
+        crate::error::NacelleError::InvalidFrame(_) => "invalid_frame",
+        crate::error::NacelleError::FrameTooLarge { .. } => "frame_too_large",
+        crate::error::NacelleError::UnexpectedEof => "unexpected_eof",
+        crate::error::NacelleError::ConnectionClosed => "connection_closed",
+        crate::error::NacelleError::MissingProtocol => "missing_protocol",
+        crate::error::NacelleError::Io(_) => "io",
+        crate::error::NacelleError::Protocol(_) => "protocol",
+        crate::error::NacelleError::Handler(_) => "handler",
+        crate::error::NacelleError::Join(_) => "join",
     }
 }
 
@@ -440,6 +717,19 @@ struct OtelMetrics {
     request_bytes: opentelemetry::metrics::Counter<u64>,
     response_bytes: opentelemetry::metrics::Counter<u64>,
     request_duration_ms: opentelemetry::metrics::Histogram<f64>,
+    tcp_connection_active: opentelemetry::metrics::UpDownCounter<i64>,
+    tcp_connection_accepted: opentelemetry::metrics::Counter<u64>,
+    tcp_connection_closed: opentelemetry::metrics::Counter<u64>,
+    tcp_request_in_flight: opentelemetry::metrics::UpDownCounter<i64>,
+    tcp_request_started: opentelemetry::metrics::Counter<u64>,
+    tcp_request_completed: opentelemetry::metrics::Counter<u64>,
+    tcp_request_bytes: opentelemetry::metrics::Counter<u64>,
+    tcp_request_body_bytes: opentelemetry::metrics::Counter<u64>,
+    tcp_response_bytes: opentelemetry::metrics::Counter<u64>,
+    tcp_request_duration_ms: opentelemetry::metrics::Histogram<f64>,
+    tcp_phase_duration_ms: opentelemetry::metrics::Histogram<f64>,
+    tcp_errors: opentelemetry::metrics::Counter<u64>,
+    tcp_resource_limit_rejections: opentelemetry::metrics::Counter<u64>,
 }
 
 #[cfg(feature = "otel")]
@@ -459,6 +749,29 @@ impl OtelMetrics {
             request_bytes: meter.u64_counter("nacelle.request_bytes").build(),
             response_bytes: meter.u64_counter("nacelle.response_bytes").build(),
             request_duration_ms: meter.f64_histogram("nacelle.request_duration_ms").build(),
+            tcp_connection_active: meter
+                .i64_up_down_counter("nacelle.tcp.connections.active")
+                .build(),
+            tcp_connection_accepted: meter
+                .u64_counter("nacelle.tcp.connections.accepted")
+                .build(),
+            tcp_connection_closed: meter.u64_counter("nacelle.tcp.connections.closed").build(),
+            tcp_request_in_flight: meter
+                .i64_up_down_counter("nacelle.tcp.requests.in_flight")
+                .build(),
+            tcp_request_started: meter.u64_counter("nacelle.tcp.requests.started").build(),
+            tcp_request_completed: meter.u64_counter("nacelle.tcp.requests.completed").build(),
+            tcp_request_bytes: meter.u64_counter("nacelle.tcp.request.bytes").build(),
+            tcp_request_body_bytes: meter.u64_counter("nacelle.tcp.request.body_bytes").build(),
+            tcp_response_bytes: meter.u64_counter("nacelle.tcp.response.bytes").build(),
+            tcp_request_duration_ms: meter
+                .f64_histogram("nacelle.tcp.request.duration_ms")
+                .build(),
+            tcp_phase_duration_ms: meter.f64_histogram("nacelle.tcp.phase.duration_ms").build(),
+            tcp_errors: meter.u64_counter("nacelle.tcp.errors").build(),
+            tcp_resource_limit_rejections: meter
+                .u64_counter("nacelle.tcp.resource_limit.rejections")
+                .build(),
         }
     }
 
@@ -538,5 +851,17 @@ mod tests {
         assert_eq!(events[1].reason, Some("host"));
         assert_eq!(events[2].reason, Some("request_body_read"));
         assert_eq!(events[3].transport, None);
+    }
+
+    #[test]
+    fn telemetry_config_keeps_opcode_labels_opt_in() {
+        let telemetry = NacelleTelemetry::default();
+
+        assert!(telemetry.config().tcp_metrics);
+        assert!(!telemetry.config().tcp_opcode_labels);
+
+        let telemetry = telemetry.with_tcp_opcode_labels(true);
+
+        assert!(telemetry.config().tcp_opcode_labels);
     }
 }

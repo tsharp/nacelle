@@ -106,7 +106,7 @@ cargo run --features reference_protocol,http --example dual_echo -- 127.0.0.1:80
 | `openssl` | OpenSSL-backed TLS for TCP. |
 | `openssl-vendored` | Build OpenSSL from source when native OpenSSL is unavailable. |
 | `tls-self-signed` | Generate ephemeral Rustls self-signed certificates for local tests. |
-| `otel` | OpenTelemetry metrics API integration. |
+| `otel` | OpenTelemetry metrics API integration, including TCP lifecycle and phase metrics. |
 | `tokio-util` | Bridge `tokio_util::sync::CancellationToken` into Nacelle shutdown. |
 | `tower` | Adapt `tower::Service<NacelleRequest>` into a Nacelle handler. |
 
@@ -139,6 +139,10 @@ For direct HTTP exposure, configure `NacelleHttpPolicy` deliberately: trusted
 proxy IPs, Host/method/URI/header limits, access logging, and per-peer caps. For
 high connection counts, tune TCP read and response buffer capacities before
 raising `max_connections`.
+
+Nacelle does not enforce a runtime memory cap by default. Set
+`NacelleLimits::with_max_memory_bytes(...)` only when you want to opt into
+Nacelle's memory reservation limiter for a measured deployment or test profile.
 
 Self-signed certificates are intended for local tests and auto-deploy flows, not
 as a public-edge certificate strategy.

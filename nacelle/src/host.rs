@@ -97,7 +97,9 @@ impl NacelleHost {
         let telemetry = self.telemetry.clone();
         let shutdown = self.shutdown.token();
         let drain_deadline = self.drain_deadline.clone();
-        let server = server.with_runtime_state(self.runtime_state.clone());
+        let server = server
+            .with_runtime_state(self.runtime_state.clone())
+            .with_listener_label(name.clone());
         telemetry.listener_configured(NacelleTransport::Tcp, &name, &addr.to_string());
         self.tasks.spawn(async move {
             let result = nacelle_tcp::runtime::serve_tcp_with_shutdown_deadline(
@@ -132,7 +134,9 @@ impl NacelleHost {
         let telemetry = self.telemetry.clone();
         let shutdown = self.shutdown.token();
         let drain_deadline = self.drain_deadline.clone();
-        let server = server.with_runtime_state(self.runtime_state.clone());
+        let server = server
+            .with_runtime_state(self.runtime_state.clone())
+            .with_listener_label(name.clone());
         telemetry.listener_configured(NacelleTransport::Tcp, &name, &addr.to_string());
         self.tasks.spawn(async move {
             let result = nacelle_tcp::runtime::serve_tcp_with_options_and_shutdown_deadline(
@@ -168,7 +172,9 @@ impl NacelleHost {
         let telemetry = self.telemetry.clone();
         let shutdown = self.shutdown.token();
         let drain_deadline = self.drain_deadline.clone();
-        let server = server.with_runtime_state(self.runtime_state.clone());
+        let server = server
+            .with_runtime_state(self.runtime_state.clone())
+            .with_listener_label(name.clone());
         telemetry.listener_configured(NacelleTransport::Tcp, &name, &addr.to_string());
         self.tasks.spawn(async move {
             let result = nacelle_tcp::runtime::serve_tcp_with_bind_options_and_shutdown_deadline(
@@ -205,7 +211,9 @@ impl NacelleHost {
         let telemetry = self.telemetry.clone();
         let shutdown = self.shutdown.token();
         let drain_deadline = self.drain_deadline.clone();
-        let server = server.with_runtime_state(self.runtime_state.clone());
+        let server = server
+            .with_runtime_state(self.runtime_state.clone())
+            .with_listener_label(name.clone());
         telemetry.listener_configured(NacelleTransport::UnixSocket, &name, &path_label);
         self.tasks.spawn(async move {
             let result = nacelle_tcp::runtime::serve_unix_with_shutdown_deadline(
@@ -242,7 +250,9 @@ impl NacelleHost {
         let telemetry = self.telemetry.clone();
         let shutdown = self.shutdown.token();
         let drain_deadline = self.drain_deadline.clone();
-        let server = server.with_runtime_state(self.runtime_state.clone());
+        let server = server
+            .with_runtime_state(self.runtime_state.clone())
+            .with_listener_label(name.clone());
         telemetry.listener_configured(NacelleTransport::UnixSocket, &name, &path_label);
         self.tasks.spawn(async move {
             let result = nacelle_tcp::runtime::serve_unix_with_options_and_shutdown_deadline(
@@ -278,7 +288,9 @@ impl NacelleHost {
         let telemetry = self.telemetry.clone();
         let shutdown = self.shutdown.token();
         let drain_deadline = self.drain_deadline.clone();
-        let server = server.with_runtime_state(self.runtime_state.clone());
+        let server = server
+            .with_runtime_state(self.runtime_state.clone())
+            .with_listener_label(name.clone());
         telemetry.listener_configured(NacelleTransport::Tcp, &name, &addr.to_string());
         self.tasks.spawn(async move {
             let result = nacelle_tcp::runtime::serve_tcp_tls_with_shutdown_deadline(
@@ -360,7 +372,9 @@ impl NacelleHost {
         let telemetry = self.telemetry.clone();
         let shutdown = self.shutdown.token();
         let drain_deadline = self.drain_deadline.clone();
-        let server = server.with_runtime_state(self.runtime_state.clone());
+        let server = server
+            .with_runtime_state(self.runtime_state.clone())
+            .with_listener_label(name.clone());
         telemetry.listener_configured(NacelleTransport::Tcp, &name, &addr.to_string());
         self.tasks.spawn(async move {
             let result =
@@ -448,7 +462,9 @@ impl NacelleHost {
         let telemetry = self.telemetry.clone();
         let shutdown = self.shutdown.token();
         let drain_deadline = self.drain_deadline.clone();
-        let server = server.with_runtime_state(self.runtime_state.clone());
+        let server = server
+            .with_runtime_state(self.runtime_state.clone())
+            .with_listener_label(name.clone());
         telemetry.listener_configured(NacelleTransport::Tcp, &name, &addr.to_string());
         self.tasks.spawn(async move {
             let result =

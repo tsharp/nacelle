@@ -19,7 +19,9 @@ use nacelle_core::lifecycle::{NacelleDrainDeadline, NacelleShutdownToken};
 #[cfg(any(feature = "rustls", feature = "openssl"))]
 use nacelle_core::request::NacelleConnectionTlsMeta;
 use nacelle_core::request::{NacelleConnectionMeta, RequestMetadata};
-use nacelle_core::telemetry::{NacelleTelemetry, NacelleTelemetryEventKind, NacelleTransport};
+use nacelle_core::telemetry::{
+    NacelleTcpMetricsContext, NacelleTelemetry, NacelleTelemetryEventKind, NacelleTransport,
+};
 #[cfg(feature = "openssl")]
 use nacelle_core::tls::NacelleOpenSslConfig;
 #[cfg(feature = "rustls")]
@@ -923,6 +925,12 @@ where
                 let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
                     Ok(permit) => permit,
                     Err(error) => {
+                        record_connection_rejection(
+                            server.as_ref(),
+                            NacelleTransport::Tcp,
+                            "unknown",
+                            &error,
+                        );
                         server
                             .telemetry()
                             .connection_rejected(NacelleTransport::Tcp, connection_rejection_reason(&error));
@@ -1040,6 +1048,12 @@ where
                 let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
                     Ok(permit) => permit,
                     Err(error) => {
+                        record_connection_rejection(
+                            server.as_ref(),
+                            NacelleTransport::Tcp,
+                            "none",
+                            &error,
+                        );
                         server
                             .telemetry()
                             .connection_rejected(NacelleTransport::Tcp, connection_rejection_reason(&error));
@@ -1097,6 +1111,12 @@ where
                 let connection_permit = match server.runtime_state().acquire_connection_tracked() {
                     Ok(permit) => permit,
                     Err(error) => {
+                        record_connection_rejection(
+                            server.as_ref(),
+                            NacelleTransport::UnixSocket,
+                            "none",
+                            &error,
+                        );
                         server
                             .telemetry()
                             .connection_rejected(NacelleTransport::UnixSocket, connection_rejection_reason(&error));
@@ -1157,6 +1177,12 @@ where
                 let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
                     Ok(permit) => permit,
                     Err(error) => {
+                        record_connection_rejection(
+                            server.as_ref(),
+                            NacelleTransport::Tcp,
+                            "rustls",
+                            &error,
+                        );
                         server
                             .telemetry()
                             .connection_rejected(NacelleTransport::Tcp, connection_rejection_reason(&error));
@@ -1255,6 +1281,12 @@ where
                 let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
                     Ok(permit) => permit,
                     Err(error) => {
+                        record_connection_rejection(
+                            server.as_ref(),
+                            NacelleTransport::Tcp,
+                            "openssl",
+                            &error,
+                        );
                         server
                             .telemetry()
                             .connection_rejected(NacelleTransport::Tcp, connection_rejection_reason(&error));
@@ -1380,6 +1412,26 @@ fn connection_rejection_reason(error: &NacelleError) -> &'static str {
         NacelleError::ResourceLimit(reason) => reason,
         _ => "connections",
     }
+}
+
+fn record_connection_rejection<Req, P, H>(
+    server: &NacelleServer<Req, P, H>,
+    transport: NacelleTransport,
+    tls: &'static str,
+    error: &NacelleError,
+) where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let context = NacelleTcpMetricsContext::new(
+        transport,
+        server.listener_label(),
+        server.protocol().name(),
+        tls,
+        None,
+    );
+    server.telemetry().tcp_error(&context, "accept", error);
 }
 
 async fn drain_connection_tasks(
