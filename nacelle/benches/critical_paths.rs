@@ -188,7 +188,6 @@ fn telemetry_benches(c: &mut Criterion) {
         b.iter(|| {
             black_box(&disabled).request_completed(
                 black_box(NacelleTransport::Tcp),
-                black_box(Some(42)),
                 black_box(1024),
                 black_box(64),
                 black_box(elapsed),

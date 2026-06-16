@@ -30,9 +30,8 @@ pub use request::{
 pub use response::HttpResponseMeta;
 pub use response::{NacelleResponse, NacelleResponseMeta, TcpResponseMeta};
 pub use telemetry::{
-    NacelleInMemoryTelemetrySink, NacelleTcpMetricsContext, NacelleTelemetry,
-    NacelleTelemetryConfig, NacelleTelemetryEvent, NacelleTelemetryEventKind, NacelleTelemetrySink,
-    NacelleTransport,
+    NacelleInMemoryTelemetrySink, NacelleTelemetry, NacelleTelemetryEvent,
+    NacelleTelemetryEventKind, NacelleTelemetrySink, NacelleTransport,
 };
 #[cfg(feature = "tls-self-signed")]
 pub use tls::NacelleGeneratedTlsConfig;

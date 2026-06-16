@@ -95,22 +95,22 @@ pub use nacelle_core::{
     NacelleConnectionExtension, NacelleConnectionExtensionFactory, NacelleConnectionMeta,
     NacelleConnectionTlsMeta, NacelleError, NacelleInMemoryTelemetrySink, NacelleLimits,
     NacelleRequest, NacelleRequestMeta, NacelleResponse, NacelleResponseMeta, NacelleRuntimeState,
-    NacelleShutdown, NacelleShutdownToken, NacelleTcpMetricsContext, NacelleTelemetry,
-    NacelleTelemetryConfig, NacelleTelemetryEvent, NacelleTelemetryEventKind, NacelleTelemetrySink,
-    NacelleTransport, RequestBodyMode, RequestMetadata, TcpRequestMeta, TcpResponseMeta,
-    TrackedPermit, handler_fn,
+    NacelleShutdown, NacelleShutdownToken, NacelleTelemetry, NacelleTelemetryEvent,
+    NacelleTelemetryEventKind, NacelleTelemetrySink, NacelleTransport, RequestBodyMode,
+    RequestMetadata, TcpRequestMeta, TcpResponseMeta, TrackedPermit, handler_fn,
 };
 #[cfg(feature = "http")]
 pub use nacelle_core::{HttpRequestMeta, HttpResponseMeta};
 #[cfg(feature = "http")]
-pub use nacelle_http::{HyperServer, NacelleHttpPolicy};
+pub use nacelle_http::{HyperServer, NacelleHttpLimits, NacelleHttpPolicy};
 #[cfg(all(feature = "tcp", unix))]
 pub use nacelle_tcp::NacelleUnixSocketOptions;
 #[cfg(feature = "tcp")]
 pub use nacelle_tcp::{
     DecodedRequest, NacelleServer, NacelleServerBuilder, NacelleTcpBindOptions,
-    NacelleTcpKeepalive, NacelleTcpOptions, NacelleTlsDetectionOptions, Protocol, TcpServer,
-    serve_connection, serve_stream,
+    NacelleTcpKeepalive, NacelleTcpLimits, NacelleTcpMetricsContext, NacelleTcpOptions,
+    NacelleTcpTelemetry, NacelleTcpTelemetryConfig, NacelleTlsDetectionOptions, Protocol,
+    TcpServer, serve_connection, serve_stream,
 };
 #[cfg(feature = "reference_protocol")]
 pub use reference_protocol::{

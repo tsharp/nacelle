@@ -4,13 +4,19 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::connection::{serve_connection_with_connection_meta, serve_stream_with_connection_meta};
+use crate::connection::{
+    serve_connection_with_connection_meta_and_tcp_state,
+    serve_stream_with_connection_meta_and_tcp_state,
+    serve_stream_without_connection_limit_with_connection_meta_and_tcp_state,
+};
+use crate::limits::NacelleTcpLimits;
 #[cfg(feature = "openssl")]
 use crate::options::NacelleTlsDetectionOptions;
 #[cfg(unix)]
 use crate::options::NacelleUnixSocketOptions;
 use crate::options::{NacelleTcpBindOptions, NacelleTcpOptions};
 use crate::protocol::Protocol;
+use crate::telemetry::NacelleTcpTelemetry;
 use nacelle_core::config::NacelleConfig;
 use nacelle_core::error::NacelleError;
 use nacelle_core::handler::Handler;
@@ -35,7 +41,9 @@ pub struct NacelleServer<Req, P, H = ()> {
     handler: H,
     config: NacelleConfig,
     telemetry: NacelleTelemetry,
+    tcp_telemetry: NacelleTcpTelemetry,
     runtime_state: NacelleRuntimeState,
+    tcp_limits: NacelleTcpLimits,
     listener: StdArc<str>,
     connection_extension_factory: Option<NacelleConnectionExtensionFactory>,
     _request: PhantomData<fn() -> Req>,
@@ -53,7 +61,9 @@ where
             handler: self.handler.clone(),
             config: self.config.clone(),
             telemetry: self.telemetry.clone(),
+            tcp_telemetry: self.tcp_telemetry.clone(),
             runtime_state: self.runtime_state.clone(),
+            tcp_limits: self.tcp_limits,
             listener: self.listener.clone(),
             connection_extension_factory: self.connection_extension_factory.clone(),
             _request: PhantomData,
@@ -68,7 +78,9 @@ impl<Req> NacelleServer<Req, (), ()> {
             handler: None,
             config: NacelleConfig::default(),
             telemetry: NacelleTelemetry::default(),
+            tcp_telemetry: NacelleTcpTelemetry::default(),
             runtime_state: NacelleRuntimeState::default(),
+            tcp_limits: NacelleTcpLimits::default(),
             listener: StdArc::from("direct"),
             connection_extension_factory: None,
             _protocol: PhantomData,
@@ -96,6 +108,14 @@ where
         &self.telemetry
     }
 
+    pub fn tcp_telemetry(&self) -> &NacelleTcpTelemetry {
+        &self.tcp_telemetry
+    }
+
+    pub fn tcp_limits(&self) -> &NacelleTcpLimits {
+        &self.tcp_limits
+    }
+
     pub fn listener_label(&self) -> StdArc<str> {
         self.listener.clone()
     }
@@ -112,6 +132,16 @@ where
     pub fn with_runtime_state(mut self, runtime_state: NacelleRuntimeState) -> Self {
         self.telemetry.register_runtime_state(runtime_state.clone());
         self.runtime_state = runtime_state;
+        self
+    }
+
+    pub fn with_tcp_limits(mut self, tcp_limits: NacelleTcpLimits) -> Self {
+        self.tcp_limits = tcp_limits;
+        self
+    }
+
+    pub fn with_tcp_telemetry(mut self, tcp_telemetry: NacelleTcpTelemetry) -> Self {
+        self.tcp_telemetry = tcp_telemetry;
         self
     }
 
@@ -134,14 +164,16 @@ where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        serve_connection_with_connection_meta(
+        serve_connection_with_connection_meta_and_tcp_state(
             reader,
             writer,
             self.protocol.clone(),
             self.handler.clone(),
             self.config.clone(),
             self.telemetry.clone(),
+            self.tcp_telemetry.clone(),
             self.runtime_state.clone(),
+            self.tcp_limits,
             self.attach_connection_extension(NacelleConnectionMeta::tcp(None, None)),
         )
         .await
@@ -158,14 +190,16 @@ where
         R: AsyncRead + Unpin + Send + 'static,
         W: AsyncWrite + Unpin + Send + 'static,
     {
-        serve_connection_with_connection_meta(
+        serve_connection_with_connection_meta_and_tcp_state(
             reader,
             writer,
             self.protocol.clone(),
             self.handler.clone(),
             self.config.clone(),
             self.telemetry.clone(),
+            self.tcp_telemetry.clone(),
             self.runtime_state.clone(),
+            self.tcp_limits,
             self.attach_connection_extension(connection),
         )
         .await
@@ -176,13 +210,15 @@ where
     where
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        serve_stream_with_connection_meta(
+        serve_stream_with_connection_meta_and_tcp_state(
             io,
             self.protocol.clone(),
             self.handler.clone(),
             self.config.clone(),
             self.telemetry.clone(),
+            self.tcp_telemetry.clone(),
             self.runtime_state.clone(),
+            self.tcp_limits,
             self.attach_connection_extension(NacelleConnectionMeta::tcp(None, None)),
         )
         .await
@@ -197,13 +233,15 @@ where
     where
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        serve_stream_with_connection_meta(
+        serve_stream_with_connection_meta_and_tcp_state(
             io,
             self.protocol.clone(),
             self.handler.clone(),
             self.config.clone(),
             self.telemetry.clone(),
+            self.tcp_telemetry.clone(),
             self.runtime_state.clone(),
+            self.tcp_limits,
             self.attach_connection_extension(connection),
         )
         .await
@@ -217,13 +255,15 @@ where
     where
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        crate::connection::serve_stream_without_connection_limit_with_connection_meta(
+        serve_stream_without_connection_limit_with_connection_meta_and_tcp_state(
             io,
             self.protocol.clone(),
             self.handler.clone(),
             self.config.clone(),
             self.telemetry.clone(),
+            self.tcp_telemetry.clone(),
             self.runtime_state.clone(),
+            self.tcp_limits,
             self.attach_connection_extension(connection),
         )
         .await
@@ -678,7 +718,9 @@ pub struct NacelleServerBuilder<Req, ProtocolState, HandlerState, P, H> {
     handler: Option<H>,
     config: NacelleConfig,
     telemetry: NacelleTelemetry,
+    tcp_telemetry: NacelleTcpTelemetry,
     runtime_state: NacelleRuntimeState,
+    tcp_limits: NacelleTcpLimits,
     listener: StdArc<str>,
     connection_extension_factory: Option<NacelleConnectionExtensionFactory>,
     _protocol: PhantomData<ProtocolState>,
@@ -699,8 +741,18 @@ impl<Req, ProtocolState, HandlerState, P, H>
         self
     }
 
+    pub fn tcp_telemetry(mut self, tcp_telemetry: NacelleTcpTelemetry) -> Self {
+        self.tcp_telemetry = tcp_telemetry;
+        self
+    }
+
     pub fn runtime_state(mut self, runtime_state: NacelleRuntimeState) -> Self {
         self.runtime_state = runtime_state;
+        self
+    }
+
+    pub fn tcp_limits(mut self, tcp_limits: NacelleTcpLimits) -> Self {
+        self.tcp_limits = tcp_limits;
         self
     }
 
@@ -750,7 +802,9 @@ impl<Req, HandlerState, P, H> NacelleServerBuilder<Req, Missing, HandlerState, P
             handler: self.handler,
             config: self.config,
             telemetry: self.telemetry,
+            tcp_telemetry: self.tcp_telemetry,
             runtime_state: self.runtime_state,
+            tcp_limits: self.tcp_limits,
             listener: self.listener,
             connection_extension_factory: self.connection_extension_factory,
             _protocol: PhantomData,
@@ -770,7 +824,9 @@ impl<Req, ProtocolState, P, H> NacelleServerBuilder<Req, ProtocolState, Missing,
             handler: Some(handler),
             config: self.config,
             telemetry: self.telemetry,
+            tcp_telemetry: self.tcp_telemetry,
             runtime_state: self.runtime_state,
+            tcp_limits: self.tcp_limits,
             listener: self.listener,
             connection_extension_factory: self.connection_extension_factory,
             _protocol: PhantomData,
@@ -798,7 +854,9 @@ where
             handler,
             config: self.config,
             telemetry: self.telemetry,
+            tcp_telemetry: self.tcp_telemetry,
             runtime_state: self.runtime_state,
+            tcp_limits: self.tcp_limits,
             listener: self.listener,
             connection_extension_factory: self.connection_extension_factory,
             _request: PhantomData,

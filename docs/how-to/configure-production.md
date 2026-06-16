@@ -1,15 +1,17 @@
 # Configure production limits
 
-Start from `NacelleLimits::default()` and tune for the deployment. Active
-connections, in-flight requests, streaming tasks, body sizes, and timeouts are
-bounded by default. Memory reservation limiting is opt-in: set
+Start from `NacelleLimits::default()` and tune shared resource budgets for the
+deployment. Use `NacelleTcpLimits` for TCP socket timeouts and
+`NacelleHttpLimits` for HTTP edge timeouts and keep-alive behavior. Active
+connections, in-flight requests, streaming tasks, body sizes, handler timeouts,
+and transport timeouts are bounded by default. Memory reservation limiting is opt-in: set
 `max_memory_bytes` only after measuring that the limiter behaves correctly for
 your service.
 
 Recommended presets:
 
 - Internal service: keep defaults, set body limits to the largest expected payload, and run behind process supervision.
-- Internet-facing behind proxy: cap connections and requests to the container budget, keep 30 second header/body/write timeouts, and let the proxy own coarse traffic filtering or certificate automation when desired.
+- Internet-facing behind proxy: cap connections and requests to the container budget, keep 30 second transport timeouts, and let the proxy own coarse traffic filtering or certificate automation when desired.
 - Proxy-aware HTTP: configure `NacelleHttpPolicy::with_trusted_proxy_ips(...)` only with known proxy addresses before allowing `Forwarded` or `X-Forwarded-For` to affect per-peer request limits or request metadata.
 - Direct HTTPS listener: enable `http,tls`, load certificate/key material through `NacelleTlsConfig`, configure an SNI allowlist with `from_pem_with_allowed_server_names` or `from_der_with_allowed_server_names`, set a short TLS handshake timeout, configure `max_connections_per_peer` and `max_connection_opens_per_peer_per_second`, enable HTTP access logs, and attach `NacelleHttpPolicy` with Host, method, URI, header, security-header, and per-peer request-rate limits.
 - Direct TCP Rustls listener: enable `tcp,tls`, load certificate/key material through `NacelleTlsConfig`, use `serve_tcp_tls` or `enable_tcp_tls`, and keep protocol-level authentication/authorization in the application protocol.
@@ -18,7 +20,7 @@ Recommended presets:
 - IPv4 plus IPv6 TCP bind: use the `NacelleProtocols::*_dual_stack(...)` helpers when a serve-based app should bind both wildcard families for one protocol. The helpers register separate IPv4 and IPv6 listeners and force the IPv6 listener to v6-only mode.
 - Unix socket listener: enable `tcp` on Unix and call `serve_unix(...)` or `NacelleHost::enable_unix_socket(...)`; use `NacelleUnixSocketOptions` only when this process owns stale-path cleanup or socket-file permissions.
 - Local load-test/autodeploy HTTPS: enable `tls-self-signed` and call `NacelleTlsConfig::self_signed(...)`; do not treat generated certificates as a public trust or rotation strategy.
-- High concurrency: reduce TCP buffer capacities before raising `max_connections`.
+- High concurrency: reduce TCP buffer capacities before raising `max_connections`, and tune `NacelleTcpLimits` separately from shared resource budgets.
 
 Memory budget:
 
@@ -33,7 +35,7 @@ total_budget =
 
 Set `NacelleLimits::with_max_memory_bytes(...)` when you want Nacelle to enforce
 the calculated budget. Without an explicit memory limit, Nacelle still enforces
-connection/request/body/time limits but leaves total memory governance to the
+connection/request/body limits and transport-owned timeouts but leaves total memory governance to the
 application, runtime, process supervisor, or container.
 
 TCP processes requests sequentially per connection. `request_body_channel_capacity` controls the queued streaming chunks between the socket reader and handler. HTTP uses Hyper's internal buffers plus Nacelle's body queue, so leave extra headroom when enabling large request bodies.
@@ -48,6 +50,10 @@ existing behavior: `TCP_NODELAY` enabled and TCP keepalive disabled. Enable
 keepalive deliberately per deployment target because OS defaults and supported
 fields vary. `NacelleTcpBindOptions` adds listener bind controls such as
 IPv6-only mode for APIs that need explicit family behavior.
+
+Use `NacelleTcpLimits` for TCP socket read, socket write, and idle timeouts.
+Use `NacelleHttpLimits` on `HyperServer` for HTTP header read, request body
+read, response write, keep-alive, and max connection age behavior.
 
 Dangerous configurations:
 

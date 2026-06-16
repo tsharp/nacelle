@@ -834,6 +834,7 @@ dependencies = [
  "bytes",
  "nacelle-core",
  "openssl",
+ "opentelemetry",
  "rustls",
  "socket2",
  "tokio",

@@ -12,7 +12,7 @@ use std::time::Instant;
 use bytes::Bytes;
 use nacelle::{
     FrameRequest, Handler, LengthDelimitedProtocol, NacelleConfig, NacelleError, NacelleRequest,
-    NacelleResponse, NacelleRuntimeState, TcpServer, handler_fn,
+    NacelleResponse, NacelleRuntimeState, NacelleTcpLimits, TcpServer, handler_fn,
 };
 use nacelle_stress_common::STRESS_OPCODE;
 use serde::Deserialize;
@@ -187,6 +187,7 @@ pub struct ServerConfig {
     pub stats_enabled: bool,
     pub tls_self_signed: bool,
     pub limits: nacelle::NacelleLimits,
+    pub tcp_limits: NacelleTcpLimits,
 }
 
 impl Default for ServerConfig {
@@ -206,6 +207,7 @@ impl Default for ServerConfig {
             stats_enabled: false,
             tls_self_signed: false,
             limits: nacelle::NacelleLimits::default(),
+            tcp_limits: NacelleTcpLimits::default(),
         }
     }
 }
@@ -224,6 +226,7 @@ struct ServerConfigFile {
     stats_enabled: Option<bool>,
     tls_self_signed: Option<bool>,
     limits: Option<LimitsConfigFile>,
+    tcp_limits: Option<TcpLimitsConfigFile>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -237,15 +240,15 @@ struct LimitsConfigFile {
     max_memory_bytes: Option<usize>,
     max_request_body_bytes: Option<usize>,
     max_response_body_bytes: Option<usize>,
+    handler_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TcpLimitsConfigFile {
     read_timeout_ms: Option<u64>,
     write_timeout_ms: Option<u64>,
-    handler_timeout_ms: Option<u64>,
     idle_timeout_ms: Option<u64>,
-    http_header_read_timeout_ms: Option<u64>,
-    http_request_body_read_timeout_ms: Option<u64>,
-    http_response_write_timeout_ms: Option<u64>,
-    http_keep_alive: Option<bool>,
-    http_max_connection_age_ms: Option<u64>,
 }
 
 impl ServerConfig {
@@ -295,6 +298,9 @@ impl ServerConfig {
         if let Some(limits) = file.limits {
             self.apply_limits_file(limits);
         }
+        if let Some(tcp_limits) = file.tcp_limits {
+            self.apply_tcp_limits_file(tcp_limits);
+        }
     }
 
     fn apply_limits_file(&mut self, file: LimitsConfigFile) {
@@ -322,36 +328,20 @@ impl ServerConfig {
         if let Some(max_response_body_bytes) = file.max_response_body_bytes {
             self.limits.max_response_body_bytes = max_response_body_bytes;
         }
-        if let Some(read_timeout_ms) = file.read_timeout_ms {
-            self.limits.read_timeout = Some(Duration::from_millis(read_timeout_ms));
-        }
-        if let Some(write_timeout_ms) = file.write_timeout_ms {
-            self.limits.write_timeout = Some(Duration::from_millis(write_timeout_ms));
-        }
         if let Some(handler_timeout_ms) = file.handler_timeout_ms {
             self.limits.handler_timeout = Some(Duration::from_millis(handler_timeout_ms));
         }
+    }
+
+    fn apply_tcp_limits_file(&mut self, file: TcpLimitsConfigFile) {
+        if let Some(read_timeout_ms) = file.read_timeout_ms {
+            self.tcp_limits.read_timeout = Some(Duration::from_millis(read_timeout_ms));
+        }
+        if let Some(write_timeout_ms) = file.write_timeout_ms {
+            self.tcp_limits.write_timeout = Some(Duration::from_millis(write_timeout_ms));
+        }
         if let Some(idle_timeout_ms) = file.idle_timeout_ms {
-            self.limits.idle_timeout = Some(Duration::from_millis(idle_timeout_ms));
-        }
-        if let Some(http_header_read_timeout_ms) = file.http_header_read_timeout_ms {
-            self.limits.http_header_read_timeout =
-                Some(Duration::from_millis(http_header_read_timeout_ms));
-        }
-        if let Some(http_request_body_read_timeout_ms) = file.http_request_body_read_timeout_ms {
-            self.limits.http_request_body_read_timeout =
-                Some(Duration::from_millis(http_request_body_read_timeout_ms));
-        }
-        if let Some(http_response_write_timeout_ms) = file.http_response_write_timeout_ms {
-            self.limits.http_response_write_timeout =
-                Some(Duration::from_millis(http_response_write_timeout_ms));
-        }
-        if let Some(http_keep_alive) = file.http_keep_alive {
-            self.limits.http_keep_alive = http_keep_alive;
-        }
-        if let Some(http_max_connection_age_ms) = file.http_max_connection_age_ms {
-            self.limits.http_max_connection_age =
-                Some(Duration::from_millis(http_max_connection_age_ms));
+            self.tcp_limits.idle_timeout = Some(Duration::from_millis(idle_timeout_ms));
         }
     }
 }
@@ -398,6 +388,7 @@ pub fn build_server(
                 .with_request_body_channel_capacity(config.request_body_channel_capacity),
         )
         .runtime_state(NacelleRuntimeState::new(config.limits.clone()))
+        .tcp_limits(config.tcp_limits)
         .handler(handler_fn(move |mut request: NacelleRequest| {
             let response_payload = response_payload.clone();
             let stats = stats.clone();
@@ -587,37 +578,21 @@ pub fn print_config(config: &ServerConfig, runtime: &str, actual_server_threads:
         config.limits.max_response_body_bytes
     );
     println!(
-        "    read_timeout_ms: {}",
-        format_duration_ms(config.limits.read_timeout)
-    );
-    println!(
-        "    write_timeout_ms: {}",
-        format_duration_ms(config.limits.write_timeout)
-    );
-    println!(
         "    handler_timeout_ms: {}",
         format_duration_ms(config.limits.handler_timeout)
     );
+    println!("  tcp_limits:");
+    println!(
+        "    read_timeout_ms: {}",
+        format_duration_ms(config.tcp_limits.read_timeout)
+    );
+    println!(
+        "    write_timeout_ms: {}",
+        format_duration_ms(config.tcp_limits.write_timeout)
+    );
     println!(
         "    idle_timeout_ms: {}",
-        format_duration_ms(config.limits.idle_timeout)
-    );
-    println!(
-        "    http_header_read_timeout_ms: {}",
-        format_duration_ms(config.limits.http_header_read_timeout)
-    );
-    println!(
-        "    http_request_body_read_timeout_ms: {}",
-        format_duration_ms(config.limits.http_request_body_read_timeout)
-    );
-    println!(
-        "    http_response_write_timeout_ms: {}",
-        format_duration_ms(config.limits.http_response_write_timeout)
-    );
-    println!("    http_keep_alive: {}", config.limits.http_keep_alive);
-    println!(
-        "    http_max_connection_age_ms: {}",
-        format_duration_ms(config.limits.http_max_connection_age)
+        format_duration_ms(config.tcp_limits.idle_timeout)
     );
 }
 
@@ -747,15 +722,12 @@ max_streaming_tasks = 8192
 max_memory_bytes = 8589934592
 max_request_body_bytes = 16777216
 max_response_body_bytes = 15728640
+handler_timeout_ms = 60000
+
+[tcp_limits]
 read_timeout_ms = 30000
 write_timeout_ms = 30000
-handler_timeout_ms = 60000
 idle_timeout_ms = 120000
-http_header_read_timeout_ms = 5000
-http_request_body_read_timeout_ms = 10000
-http_response_write_timeout_ms = 15000
-http_keep_alive = false
-http_max_connection_age_ms = 300000
 "#;
         let file = toml::from_str::<ServerConfigFile>(toml).unwrap();
         let mut config = ServerConfig::default();
@@ -782,26 +754,18 @@ http_max_connection_age_ms = 300000
         assert_eq!(config.limits.max_memory_bytes, 8_589_934_592);
         assert_eq!(config.limits.max_request_body_bytes, 16_777_216);
         assert_eq!(config.limits.max_response_body_bytes, 15_728_640);
-        assert_eq!(config.limits.read_timeout, Some(Duration::from_secs(30)));
-        assert_eq!(config.limits.write_timeout, Some(Duration::from_secs(30)));
         assert_eq!(config.limits.handler_timeout, Some(Duration::from_secs(60)));
-        assert_eq!(config.limits.idle_timeout, Some(Duration::from_secs(120)));
         assert_eq!(
-            config.limits.http_header_read_timeout,
-            Some(Duration::from_secs(5))
+            config.tcp_limits.read_timeout,
+            Some(Duration::from_secs(30))
         );
         assert_eq!(
-            config.limits.http_request_body_read_timeout,
-            Some(Duration::from_secs(10))
+            config.tcp_limits.write_timeout,
+            Some(Duration::from_secs(30))
         );
         assert_eq!(
-            config.limits.http_response_write_timeout,
-            Some(Duration::from_secs(15))
-        );
-        assert!(!config.limits.http_keep_alive);
-        assert_eq!(
-            config.limits.http_max_connection_age,
-            Some(Duration::from_secs(300))
+            config.tcp_limits.idle_timeout,
+            Some(Duration::from_secs(120))
         );
     }
 

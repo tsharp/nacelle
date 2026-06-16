@@ -91,9 +91,11 @@ Telemetry is deliberately low-cardinality. Reasons are static strings such as
 
 With `otel`, active gauges are observable instruments backed by runtime-state
 atomics, so collection reads current values without per-request metric writes.
-The TCP transport also emits listener/protocol/TLS-labeled lifecycle counters,
-request counters, byte counters, error/rejection counters, and phase duration
-histograms for decode, request body read, handler execution, response encode,
-socket read, and socket write. Opcode labels are disabled by default and can be
-enabled with `NacelleTelemetry::with_tcp_opcode_labels(true)` when the protocol
-has a bounded opcode space.
+Core telemetry owns shared lifecycle and request events. The TCP transport owns
+its TCP-specific metrics in `nacelle-tcp`: listener/protocol/TLS-labeled
+lifecycle counters, request counters, byte counters, error/rejection counters,
+and phase duration histograms for decode, request body read, handler execution,
+response encode, socket read, and socket write. Opcode labels are disabled by
+default and can be enabled with
+`NacelleTcpTelemetry::default().with_opcode_labels(true)` on the TCP server or
+app when the protocol has a bounded opcode space.

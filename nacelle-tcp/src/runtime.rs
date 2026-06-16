@@ -19,9 +19,7 @@ use nacelle_core::lifecycle::{NacelleDrainDeadline, NacelleShutdownToken};
 #[cfg(any(feature = "rustls", feature = "openssl"))]
 use nacelle_core::request::NacelleConnectionTlsMeta;
 use nacelle_core::request::{NacelleConnectionMeta, RequestMetadata};
-use nacelle_core::telemetry::{
-    NacelleTcpMetricsContext, NacelleTelemetry, NacelleTelemetryEventKind, NacelleTransport,
-};
+use nacelle_core::telemetry::{NacelleTelemetry, NacelleTelemetryEventKind, NacelleTransport};
 #[cfg(feature = "openssl")]
 use nacelle_core::tls::NacelleOpenSslConfig;
 #[cfg(feature = "rustls")]
@@ -30,6 +28,8 @@ use nacelle_core::tls::NacelleTlsConfig;
 use openssl::ssl::{NameType, Ssl, SslRef};
 #[cfg(unix)]
 use tokio::net::UnixListener;
+
+use crate::telemetry::NacelleTcpMetricsContext;
 
 /// Listen on `addr` and serve each accepted TCP connection in its own task.
 pub async fn serve_tcp<Req, P, H>(
@@ -1431,7 +1431,7 @@ fn record_connection_rejection<Req, P, H>(
         tls,
         None,
     );
-    server.telemetry().tcp_error(&context, "accept", error);
+    server.tcp_telemetry().error(&context, "accept", error);
 }
 
 async fn drain_connection_tasks(

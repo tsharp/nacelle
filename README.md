@@ -115,17 +115,20 @@ OpenSSL builds need native OpenSSL development files unless you enable
 
 ## Workspace Layout
 
-- `nacelle-core` contains shared request, response, body, limits, lifecycle,
-  telemetry, and TLS primitives.
-- `nacelle-tcp` contains the TCP transport and protocol runtime.
-- `nacelle-http` contains the Hyper HTTP/1 transport and HTTP edge policy.
+- `nacelle-core` contains shared request, response, body, resource limits,
+    lifecycle, core telemetry, and TLS primitives.
+- `nacelle-tcp` contains the TCP transport, protocol runtime, TCP limits, and
+    TCP telemetry.
+- `nacelle-http` contains the Hyper HTTP/1 transport, HTTP limits, and HTTP edge
+    policy.
 - `nacelle` is the convenience crate with re-exports and the reference protocol.
 - `examples/nacelle-stress-*` contains the stress harness.
 
 ## Production Notes
 
-Use explicit `NacelleLimits` for production services. For internet-facing
-deployments, the recommended shape is:
+Use explicit `NacelleLimits` plus transport-specific `NacelleTcpLimits` or
+`NacelleHttpLimits` for production services. For internet-facing deployments,
+the recommended shape is:
 
 ```text
 client -> proxy/load balancer/TLS -> Nacelle service
