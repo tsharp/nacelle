@@ -73,6 +73,7 @@ impl NacelleConnectionTlsMeta {
 pub struct NacelleConnectionMeta {
     pub connection_id: u64,
     pub transport: NacelleTransport,
+    pub listener: Arc<str>,
     pub peer_addr: Option<SocketAddr>,
     pub peer_ip: Option<IpAddr>,
     pub local_addr: Option<SocketAddr>,
@@ -86,6 +87,7 @@ impl fmt::Debug for NacelleConnectionMeta {
         f.debug_struct("NacelleConnectionMeta")
             .field("connection_id", &self.connection_id)
             .field("transport", &self.transport)
+            .field("listener", &self.listener)
             .field("peer_addr", &self.peer_addr)
             .field("peer_ip", &self.peer_ip)
             .field("local_addr", &self.local_addr)
@@ -101,6 +103,7 @@ impl NacelleConnectionMeta {
         Self {
             connection_id: next_connection_id(),
             transport: NacelleTransport::Tcp,
+            listener: default_listener(),
             peer_ip: peer_addr.map(|addr| addr.ip()),
             peer_addr,
             local_addr,
@@ -114,6 +117,7 @@ impl NacelleConnectionMeta {
         Self {
             connection_id: next_connection_id(),
             transport: NacelleTransport::UnixSocket,
+            listener: default_listener(),
             peer_addr: None,
             peer_ip: None,
             local_addr: None,
@@ -127,6 +131,7 @@ impl NacelleConnectionMeta {
         Self {
             connection_id: next_connection_id(),
             transport: NacelleTransport::Http,
+            listener: default_listener(),
             peer_addr: None,
             peer_ip,
             local_addr: None,
@@ -139,6 +144,15 @@ impl NacelleConnectionMeta {
     pub fn with_tls(mut self, tls: NacelleConnectionTlsMeta) -> Self {
         self.tls = Some(tls);
         self
+    }
+
+    pub fn with_listener(mut self, listener: impl Into<Arc<str>>) -> Self {
+        self.listener = listener.into();
+        self
+    }
+
+    pub fn tls_label(&self) -> &'static str {
+        self.tls.as_ref().map_or("none", |tls| tls.provider)
     }
 
     pub fn with_connection_id(mut self, connection_id: u64) -> Self {
@@ -168,6 +182,10 @@ impl NacelleConnectionMeta {
 
 fn next_connection_id() -> u64 {
     NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn default_listener() -> Arc<str> {
+    Arc::from("direct")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

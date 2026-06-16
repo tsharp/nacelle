@@ -78,14 +78,21 @@ impl NacelleTelemetrySink for NacelleInMemoryTelemetrySink {
 
 #[derive(Clone)]
 pub struct NacelleTelemetry {
+    config: NacelleTelemetryConfig,
     sink: Option<Arc<dyn NacelleTelemetrySink>>,
     #[cfg(feature = "otel")]
     metrics: std::sync::Arc<OtelMetrics>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NacelleTelemetryConfig {
+    pub request_duration_metrics: bool,
+}
+
 impl std::fmt::Debug for NacelleTelemetry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NacelleTelemetry")
+            .field("config", &self.config)
             .field("has_sink", &self.sink.is_some())
             .finish()
     }
@@ -100,15 +107,38 @@ impl Default for NacelleTelemetry {
 impl NacelleTelemetry {
     pub fn new() -> Self {
         Self {
+            config: NacelleTelemetryConfig::default(),
             sink: None,
             #[cfg(feature = "otel")]
             metrics: std::sync::Arc::new(OtelMetrics::new()),
         }
     }
 
+    pub fn with_config(mut self, config: NacelleTelemetryConfig) -> Self {
+        self.config = config;
+        self
+    }
+
     pub fn with_sink(mut self, sink: Arc<dyn NacelleTelemetrySink>) -> Self {
         self.sink = Some(sink);
         self
+    }
+
+    pub fn with_request_duration_metrics(mut self, enabled: bool) -> Self {
+        self.config.request_duration_metrics = enabled;
+        self
+    }
+
+    pub fn config(&self) -> NacelleTelemetryConfig {
+        self.config
+    }
+
+    pub fn request_duration_metrics_enabled(&self) -> bool {
+        self.config.request_duration_metrics
+    }
+
+    pub fn request_events_enabled(&self) -> bool {
+        self.sink.is_some() || cfg!(feature = "otel")
     }
 
     pub fn listener_configured(&self, transport: NacelleTransport, name: &str, addr: &str) {
@@ -221,7 +251,6 @@ impl NacelleTelemetry {
     pub fn request_completed(
         &self,
         transport: NacelleTransport,
-        opcode: Option<u64>,
         request_bytes: usize,
         response_bytes: usize,
         elapsed: Duration,
@@ -229,7 +258,6 @@ impl NacelleTelemetry {
         tracing::debug!(
             target: "nacelle",
             transport = transport.as_str(),
-            opcode,
             request_bytes,
             response_bytes,
             elapsed_us = elapsed.as_micros() as u64,
@@ -248,9 +276,11 @@ impl NacelleTelemetry {
                 transport.as_str(),
             )];
             self.metrics.request_count.add(1, &attributes);
-            self.metrics
-                .request_duration_ms
-                .record(elapsed.as_secs_f64() * 1_000.0, &attributes);
+            if self.config.request_duration_metrics {
+                self.metrics
+                    .request_duration_ms
+                    .record(elapsed.as_secs_f64() * 1_000.0, &attributes);
+            }
             self.metrics
                 .request_bytes
                 .add(request_bytes as u64, &attributes);
@@ -263,14 +293,12 @@ impl NacelleTelemetry {
     pub fn request_failed(
         &self,
         transport: NacelleTransport,
-        opcode: Option<u64>,
         elapsed: Duration,
         error: &crate::error::NacelleError,
     ) {
         tracing::warn!(
             target: "nacelle",
             transport = transport.as_str(),
-            opcode,
             elapsed_us = elapsed.as_micros() as u64,
             error = %error,
             "request failed"
@@ -288,9 +316,11 @@ impl NacelleTelemetry {
                 transport.as_str(),
             )];
             self.metrics.request_error_count.add(1, &attributes);
-            self.metrics
-                .request_duration_ms
-                .record(elapsed.as_secs_f64() * 1_000.0, &attributes);
+            if self.config.request_duration_metrics {
+                self.metrics
+                    .request_duration_ms
+                    .record(elapsed.as_secs_f64() * 1_000.0, &attributes);
+            }
         }
     }
 
@@ -538,5 +568,18 @@ mod tests {
         assert_eq!(events[1].reason, Some("host"));
         assert_eq!(events[2].reason, Some("request_body_read"));
         assert_eq!(events[3].transport, None);
+    }
+
+    #[test]
+    fn request_duration_metrics_are_opt_in() {
+        let telemetry = NacelleTelemetry::default();
+
+        assert!(!telemetry.config().request_duration_metrics);
+        assert!(!telemetry.request_duration_metrics_enabled());
+
+        let telemetry = telemetry.with_request_duration_metrics(true);
+
+        assert!(telemetry.config().request_duration_metrics);
+        assert!(telemetry.request_duration_metrics_enabled());
     }
 }

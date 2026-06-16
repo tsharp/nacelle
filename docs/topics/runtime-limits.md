@@ -11,7 +11,10 @@ Key budgets include:
 - optional per-peer connections
 - memory reservations
 - request and response body size
-- read, write, handler, idle, HTTP, and TLS handshake timeouts
+- core handler timeout
+- TCP read, write, and idle timeouts through `NacelleTcpLimits`
+- HTTP header, body, write, keep-alive, and connection-age limits through `NacelleHttpLimits`
+- TLS handshake timeouts through the TLS config types
 
 The important production habit is to size limits together. A high connection
 count with large read and response buffers is a memory budget decision, not just
@@ -19,18 +22,24 @@ a concurrency decision.
 
 For configuration details:
 
-Start from `NacelleLimits::default()` and tune downward for smaller machines. Avoid `usize::MAX` limits outside benchmarks.
+Start from `NacelleLimits::default()` and tune shared resource budgets for the
+deployment. Use `NacelleTcpLimits` for TCP socket timeouts and
+`NacelleHttpLimits` for HTTP edge timeouts and keep-alive behavior. Active
+connections, in-flight requests, streaming tasks, body sizes, handler timeouts,
+and transport timeouts are bounded by default. Memory reservation limiting is opt-in: the default
+`max_memory_bytes` is `usize::MAX`, which disables Nacelle memory-budget
+enforcement until you set an explicit byte limit.
 
 Recommended presets:
 
 - Internal service: keep defaults, set body limits to the largest expected payload, and run behind process supervision.
-- Internet-facing behind proxy: cap connections and requests to the container budget, keep 30 second header/body/write timeouts, and let the proxy own coarse traffic filtering or certificate automation when desired.
+- Internet-facing behind proxy: cap connections and requests to the container budget, keep 30 second transport timeouts, and let the proxy own coarse traffic filtering or certificate automation when desired.
 - Proxy-aware HTTP: configure `NacelleHttpPolicy::with_trusted_proxy_ips(...)` only with known proxy addresses before allowing `Forwarded` or `X-Forwarded-For` to affect per-peer request limits or request metadata.
 - Direct HTTPS listener: enable `http,tls`, load certificate/key material through `NacelleTlsConfig`, configure an SNI allowlist with `from_pem_with_allowed_server_names` or `from_der_with_allowed_server_names`, set a short TLS handshake timeout, configure `max_connections_per_peer` and `max_connection_opens_per_peer_per_second`, enable HTTP access logs, and attach `NacelleHttpPolicy` with Host, method, URI, header, security-header, and per-peer request-rate limits.
 - Direct TCP Rustls listener: enable `tcp,tls`, load certificate/key material through `NacelleTlsConfig`, use `serve_tcp_tls` or `enable_tcp_tls`, and keep protocol-level authentication/authorization in the application protocol.
 - Direct TCP OpenSSL listener: enable `tcp,openssl`, load certificate/key material through `NacelleOpenSslConfig`, use `serve_tcp_openssl`, `enable_tcp_openssl`, or `NacelleProtocols::tcp_openssl`, and configure the `SslAcceptor` yourself when you need OpenSSL-specific policy.
 - Local load-test/autodeploy HTTPS: enable `tls-self-signed` and call `NacelleTlsConfig::self_signed(...)`; do not treat generated certificates as a public trust or rotation strategy.
-- High concurrency: reduce TCP buffer capacities before raising `max_connections`.
+- High concurrency: reduce TCP buffer capacities before raising `max_connections`, and tune `NacelleTcpLimits` separately from shared resource budgets.
 
 Memory budget:
 
@@ -42,6 +51,11 @@ body_budget =
 total_budget =
   connection_budget + body_budget + handler/backend/runtime headroom
 ```
+
+When memory limiting is enabled with `NacelleLimits::with_max_memory_bytes(...)`,
+Nacelle reserves from that budget for connection buffers and buffered or
+streaming request bodies. The limiter accounts for Nacelle-managed reservations,
+not total process RSS, so keep process or container memory limits in place.
 
 TCP processes requests sequentially per connection. `request_body_channel_capacity` controls the queued streaming chunks between the socket reader and handler. HTTP uses Hyper's internal buffers plus Nacelle's body queue, so leave extra headroom when enabling large request bodies.
 

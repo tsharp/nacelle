@@ -6,21 +6,18 @@ response_buffer_capacity = 16384
 request_body_chunk_size = 16384
 request_body_channel_capacity = 8
 low_memory = false
-stats_enabled = false
+wire_byte_metrics = true
 tls_self_signed = false
 
 [limits]
 max_connections = 16384
 max_in_flight_requests = 65536
 max_streaming_tasks = 8192
-max_memory_bytes = 536870912
 max_request_body_bytes = 16777216
 max_response_body_bytes = 16777216
+handler_timeout_ms = 60000
+
+[tcp_limits]
 read_timeout_ms = 30000
 write_timeout_ms = 30000
-handler_timeout_ms = 60000
 idle_timeout_ms = 120000
-http_header_read_timeout_ms = 30000
-http_request_body_read_timeout_ms = 30000
-http_response_write_timeout_ms = 30000
-http_keep_alive = true

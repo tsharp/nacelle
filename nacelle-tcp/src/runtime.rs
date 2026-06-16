@@ -29,6 +29,8 @@ use openssl::ssl::{NameType, Ssl, SslRef};
 #[cfg(unix)]
 use tokio::net::UnixListener;
 
+use crate::telemetry::NacelleTcpMetricsContext;
+
 /// Listen on `addr` and serve each accepted TCP connection in its own task.
 pub async fn serve_tcp<Req, P, H>(
     server: Arc<NacelleServer<Req, P, H>>,
@@ -923,6 +925,12 @@ where
                 let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
                     Ok(permit) => permit,
                     Err(error) => {
+                        record_connection_rejection(
+                            server.as_ref(),
+                            NacelleTransport::Tcp,
+                            "unknown",
+                            &error,
+                        );
                         server
                             .telemetry()
                             .connection_rejected(NacelleTransport::Tcp, connection_rejection_reason(&error));
@@ -1040,6 +1048,12 @@ where
                 let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
                     Ok(permit) => permit,
                     Err(error) => {
+                        record_connection_rejection(
+                            server.as_ref(),
+                            NacelleTransport::Tcp,
+                            "none",
+                            &error,
+                        );
                         server
                             .telemetry()
                             .connection_rejected(NacelleTransport::Tcp, connection_rejection_reason(&error));
@@ -1097,6 +1111,12 @@ where
                 let connection_permit = match server.runtime_state().acquire_connection_tracked() {
                     Ok(permit) => permit,
                     Err(error) => {
+                        record_connection_rejection(
+                            server.as_ref(),
+                            NacelleTransport::UnixSocket,
+                            "none",
+                            &error,
+                        );
                         server
                             .telemetry()
                             .connection_rejected(NacelleTransport::UnixSocket, connection_rejection_reason(&error));
@@ -1157,6 +1177,12 @@ where
                 let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
                     Ok(permit) => permit,
                     Err(error) => {
+                        record_connection_rejection(
+                            server.as_ref(),
+                            NacelleTransport::Tcp,
+                            "rustls",
+                            &error,
+                        );
                         server
                             .telemetry()
                             .connection_rejected(NacelleTransport::Tcp, connection_rejection_reason(&error));
@@ -1255,6 +1281,12 @@ where
                 let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
                     Ok(permit) => permit,
                     Err(error) => {
+                        record_connection_rejection(
+                            server.as_ref(),
+                            NacelleTransport::Tcp,
+                            "openssl",
+                            &error,
+                        );
                         server
                             .telemetry()
                             .connection_rejected(NacelleTransport::Tcp, connection_rejection_reason(&error));
@@ -1380,6 +1412,25 @@ fn connection_rejection_reason(error: &NacelleError) -> &'static str {
         NacelleError::ResourceLimit(reason) => reason,
         _ => "connections",
     }
+}
+
+fn record_connection_rejection<Req, P, H>(
+    server: &NacelleServer<Req, P, H>,
+    transport: NacelleTransport,
+    tls: &'static str,
+    error: &NacelleError,
+) where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+{
+    let context = NacelleTcpMetricsContext::new(
+        transport,
+        server.listener_label(),
+        server.protocol().name(),
+        tls,
+    );
+    server.tcp_telemetry().error(&context, "accept", error);
 }
 
 async fn drain_connection_tasks(

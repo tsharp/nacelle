@@ -4,174 +4,17 @@ use std::net::SocketAddr;
 use std::os::raw::c_long;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use std::time::Instant;
 
 use bytes::Bytes;
 use nacelle::{
     FrameRequest, Handler, LengthDelimitedProtocol, NacelleConfig, NacelleError, NacelleRequest,
-    NacelleResponse, NacelleRuntimeState, TcpServer, handler_fn,
+    NacelleResponse, NacelleRuntimeState, NacelleTcpLimits, TcpServer, handler_fn,
 };
 use nacelle_stress_common::STRESS_OPCODE;
 use serde::Deserialize;
 
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
-
-#[derive(Debug)]
-pub struct StressServerStats {
-    enabled: bool,
-    started_at: Instant,
-    accepted_connections: AtomicU64,
-    active_connections: AtomicU64,
-    completed_connections: AtomicU64,
-    failed_connections: AtomicU64,
-    active_requests: AtomicU64,
-    completed_requests: AtomicU64,
-    failed_requests: AtomicU64,
-    request_body_bytes: AtomicU64,
-    response_body_bytes: AtomicU64,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct StressServerStatsSnapshot {
-    pub uptime: Duration,
-    pub accepted_connections: u64,
-    pub active_connections: u64,
-    pub completed_connections: u64,
-    pub failed_connections: u64,
-    pub active_requests: u64,
-    pub completed_requests: u64,
-    pub failed_requests: u64,
-    pub request_body_bytes: u64,
-    pub response_body_bytes: u64,
-}
-
-impl Default for StressServerStats {
-    fn default() -> Self {
-        Self::new(false)
-    }
-}
-
-impl StressServerStats {
-    pub fn new(enabled: bool) -> Self {
-        Self {
-            enabled,
-            started_at: Instant::now(),
-            accepted_connections: AtomicU64::new(0),
-            active_connections: AtomicU64::new(0),
-            completed_connections: AtomicU64::new(0),
-            failed_connections: AtomicU64::new(0),
-            active_requests: AtomicU64::new(0),
-            completed_requests: AtomicU64::new(0),
-            failed_requests: AtomicU64::new(0),
-            request_body_bytes: AtomicU64::new(0),
-            response_body_bytes: AtomicU64::new(0),
-        }
-    }
-
-    pub fn enabled(&self) -> bool {
-        self.enabled
-    }
-
-    pub fn record_accepted_connection(&self) {
-        if !self.enabled {
-            return;
-        }
-        self.accepted_connections.fetch_add(1, Ordering::Relaxed);
-        self.active_connections.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn record_finished_connection(&self, failed: bool) {
-        if !self.enabled {
-            return;
-        }
-        self.completed_connections.fetch_add(1, Ordering::Relaxed);
-        if failed {
-            self.failed_connections.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    pub fn record_inactive_connection(&self) {
-        if !self.enabled {
-            return;
-        }
-        self.active_connections.fetch_sub(1, Ordering::Relaxed);
-    }
-
-    pub fn start_request(self: &Arc<Self>) -> ActiveRequest {
-        self.active_requests.fetch_add(1, Ordering::Relaxed);
-        ActiveRequest {
-            stats: self.clone(),
-            finished: false,
-        }
-    }
-
-    pub fn snapshot(&self) -> StressServerStatsSnapshot {
-        StressServerStatsSnapshot {
-            uptime: self.started_at.elapsed(),
-            accepted_connections: self.accepted_connections.load(Ordering::Relaxed),
-            active_connections: self.active_connections.load(Ordering::Relaxed),
-            completed_connections: self.completed_connections.load(Ordering::Relaxed),
-            failed_connections: self.failed_connections.load(Ordering::Relaxed),
-            active_requests: self.active_requests.load(Ordering::Relaxed),
-            completed_requests: self.completed_requests.load(Ordering::Relaxed),
-            failed_requests: self.failed_requests.load(Ordering::Relaxed),
-            request_body_bytes: self.request_body_bytes.load(Ordering::Relaxed),
-            response_body_bytes: self.response_body_bytes.load(Ordering::Relaxed),
-        }
-    }
-
-    fn record_finished_request(&self, failed: bool, request_bytes: u64, response_bytes: u64) {
-        if !self.enabled {
-            return;
-        }
-        if failed {
-            self.failed_requests.fetch_add(1, Ordering::Relaxed);
-        } else {
-            self.completed_requests.fetch_add(1, Ordering::Relaxed);
-        }
-        self.request_body_bytes
-            .fetch_add(request_bytes, Ordering::Relaxed);
-        self.response_body_bytes
-            .fetch_add(response_bytes, Ordering::Relaxed);
-    }
-
-    fn record_inactive_request(&self) {
-        if !self.enabled {
-            return;
-        }
-        self.active_requests.fetch_sub(1, Ordering::Relaxed);
-    }
-}
-
-pub struct ActiveRequest {
-    stats: Arc<StressServerStats>,
-    finished: bool,
-}
-
-impl ActiveRequest {
-    pub fn record_completed(mut self, request_bytes: u64, response_bytes: u64) {
-        self.stats
-            .record_finished_request(false, request_bytes, response_bytes);
-        self.finished = true;
-    }
-
-    pub fn record_failed(mut self, request_bytes: u64) {
-        self.stats.record_finished_request(true, request_bytes, 0);
-        self.finished = true;
-    }
-}
-
-impl Drop for ActiveRequest {
-    fn drop(&mut self) {
-        if !self.finished {
-            self.stats.record_finished_request(true, 0, 0);
-        }
-        self.stats.record_inactive_request();
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -184,9 +27,10 @@ pub struct ServerConfig {
     pub request_body_chunk_size: usize,
     pub request_body_channel_capacity: usize,
     pub low_memory: bool,
-    pub stats_enabled: bool,
+    pub wire_byte_metrics: bool,
     pub tls_self_signed: bool,
     pub limits: nacelle::NacelleLimits,
+    pub tcp_limits: NacelleTcpLimits,
 }
 
 impl Default for ServerConfig {
@@ -203,9 +47,10 @@ impl Default for ServerConfig {
             request_body_chunk_size: 16 * 1024,
             request_body_channel_capacity: 8,
             low_memory: false,
-            stats_enabled: false,
+            wire_byte_metrics: true,
             tls_self_signed: false,
             limits: nacelle::NacelleLimits::default(),
+            tcp_limits: NacelleTcpLimits::default(),
         }
     }
 }
@@ -221,9 +66,10 @@ struct ServerConfigFile {
     request_body_chunk_size: Option<usize>,
     request_body_channel_capacity: Option<usize>,
     low_memory: Option<bool>,
-    stats_enabled: Option<bool>,
+    wire_byte_metrics: Option<bool>,
     tls_self_signed: Option<bool>,
     limits: Option<LimitsConfigFile>,
+    tcp_limits: Option<TcpLimitsConfigFile>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -237,15 +83,15 @@ struct LimitsConfigFile {
     max_memory_bytes: Option<usize>,
     max_request_body_bytes: Option<usize>,
     max_response_body_bytes: Option<usize>,
+    handler_timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TcpLimitsConfigFile {
     read_timeout_ms: Option<u64>,
     write_timeout_ms: Option<u64>,
-    handler_timeout_ms: Option<u64>,
     idle_timeout_ms: Option<u64>,
-    http_header_read_timeout_ms: Option<u64>,
-    http_request_body_read_timeout_ms: Option<u64>,
-    http_response_write_timeout_ms: Option<u64>,
-    http_keep_alive: Option<bool>,
-    http_max_connection_age_ms: Option<u64>,
 }
 
 impl ServerConfig {
@@ -286,14 +132,17 @@ impl ServerConfig {
         if let Some(low_memory) = file.low_memory {
             self.low_memory = low_memory;
         }
-        if let Some(stats_enabled) = file.stats_enabled {
-            self.stats_enabled = stats_enabled;
+        if let Some(wire_byte_metrics) = file.wire_byte_metrics {
+            self.wire_byte_metrics = wire_byte_metrics;
         }
         if let Some(tls_self_signed) = file.tls_self_signed {
             self.tls_self_signed = tls_self_signed;
         }
         if let Some(limits) = file.limits {
             self.apply_limits_file(limits);
+        }
+        if let Some(tcp_limits) = file.tcp_limits {
+            self.apply_tcp_limits_file(tcp_limits);
         }
     }
 
@@ -322,36 +171,20 @@ impl ServerConfig {
         if let Some(max_response_body_bytes) = file.max_response_body_bytes {
             self.limits.max_response_body_bytes = max_response_body_bytes;
         }
-        if let Some(read_timeout_ms) = file.read_timeout_ms {
-            self.limits.read_timeout = Some(Duration::from_millis(read_timeout_ms));
-        }
-        if let Some(write_timeout_ms) = file.write_timeout_ms {
-            self.limits.write_timeout = Some(Duration::from_millis(write_timeout_ms));
-        }
         if let Some(handler_timeout_ms) = file.handler_timeout_ms {
             self.limits.handler_timeout = Some(Duration::from_millis(handler_timeout_ms));
         }
+    }
+
+    fn apply_tcp_limits_file(&mut self, file: TcpLimitsConfigFile) {
+        if let Some(read_timeout_ms) = file.read_timeout_ms {
+            self.tcp_limits.read_timeout = Some(Duration::from_millis(read_timeout_ms));
+        }
+        if let Some(write_timeout_ms) = file.write_timeout_ms {
+            self.tcp_limits.write_timeout = Some(Duration::from_millis(write_timeout_ms));
+        }
         if let Some(idle_timeout_ms) = file.idle_timeout_ms {
-            self.limits.idle_timeout = Some(Duration::from_millis(idle_timeout_ms));
-        }
-        if let Some(http_header_read_timeout_ms) = file.http_header_read_timeout_ms {
-            self.limits.http_header_read_timeout =
-                Some(Duration::from_millis(http_header_read_timeout_ms));
-        }
-        if let Some(http_request_body_read_timeout_ms) = file.http_request_body_read_timeout_ms {
-            self.limits.http_request_body_read_timeout =
-                Some(Duration::from_millis(http_request_body_read_timeout_ms));
-        }
-        if let Some(http_response_write_timeout_ms) = file.http_response_write_timeout_ms {
-            self.limits.http_response_write_timeout =
-                Some(Duration::from_millis(http_response_write_timeout_ms));
-        }
-        if let Some(http_keep_alive) = file.http_keep_alive {
-            self.limits.http_keep_alive = http_keep_alive;
-        }
-        if let Some(http_max_connection_age_ms) = file.http_max_connection_age_ms {
-            self.limits.http_max_connection_age =
-                Some(Duration::from_millis(http_max_connection_age_ms));
+            self.tcp_limits.idle_timeout = Some(Duration::from_millis(idle_timeout_ms));
         }
     }
 }
@@ -384,10 +217,8 @@ pub fn configure_allocator(low_memory: bool) {
 
 pub fn build_server(
     config: &ServerConfig,
-    stats: Arc<StressServerStats>,
 ) -> Result<TcpServer<FrameRequest, LengthDelimitedProtocol, impl Handler>, NacelleError> {
     let response_payload = Bytes::from(vec![0x5A; config.response_bytes]);
-    let stats_enabled = stats.enabled();
     TcpServer::<FrameRequest, ()>::builder()
         .protocol(LengthDelimitedProtocol)
         .config(
@@ -398,45 +229,20 @@ pub fn build_server(
                 .with_request_body_channel_capacity(config.request_body_channel_capacity),
         )
         .runtime_state(NacelleRuntimeState::new(config.limits.clone()))
+        .tcp_limits(config.tcp_limits)
         .handler(handler_fn(move |mut request: NacelleRequest| {
             let response_payload = response_payload.clone();
-            let stats = stats.clone();
             async move {
-                if !stats_enabled {
-                    let opcode = request.tcp_opcode().unwrap_or_default();
-                    while let Some(chunk) = request.body.next_chunk().await {
-                        let _ = chunk?;
-                    }
-                    if opcode != STRESS_OPCODE {
-                        return Err(NacelleError::handler(std::io::Error::other(format!(
-                            "unknown opcode {}",
-                            opcode
-                        ))));
-                    }
-                    return Ok(NacelleResponse::tcp_bytes(response_payload));
-                }
-
-                let request_stats = stats.start_request();
                 let opcode = request.tcp_opcode().unwrap_or_default();
-                let mut request_body_bytes = 0_u64;
                 while let Some(chunk) = request.body.next_chunk().await {
-                    let chunk = match chunk {
-                        Ok(chunk) => chunk,
-                        Err(error) => {
-                            request_stats.record_failed(request_body_bytes);
-                            return Err(error);
-                        }
-                    };
-                    request_body_bytes = request_body_bytes.saturating_add(chunk.len() as u64);
+                    let _ = chunk?;
                 }
                 if opcode != STRESS_OPCODE {
-                    request_stats.record_failed(request_body_bytes);
                     return Err(NacelleError::handler(std::io::Error::other(format!(
                         "unknown opcode {}",
                         opcode
                     ))));
                 }
-                request_stats.record_completed(request_body_bytes, response_payload.len() as u64);
                 Ok(NacelleResponse::tcp_bytes(response_payload))
             }
         }))
@@ -504,8 +310,11 @@ fn parse_args_with_default_config(
             "--low-memory" => {
                 config.low_memory = true;
             }
-            "--stats" => {
-                config.stats_enabled = true;
+            "--wire-byte-metrics" => {
+                config.wire_byte_metrics = true;
+            }
+            "--no-wire-byte-metrics" => {
+                config.wire_byte_metrics = false;
             }
             "--tls-self-signed" => {
                 config.tls_self_signed = true;
@@ -549,7 +358,7 @@ pub fn print_config(config: &ServerConfig, runtime: &str, actual_server_threads:
         config.request_body_channel_capacity
     );
     println!("  low_memory: {}", config.low_memory);
-    println!("  stats_enabled: {}", config.stats_enabled);
+    println!("  wire_byte_metrics: {}", config.wire_byte_metrics);
     println!("  tls_self_signed: {}", config.tls_self_signed);
     println!("  limits:");
     println!("    max_connections: {}", config.limits.max_connections);
@@ -587,37 +396,21 @@ pub fn print_config(config: &ServerConfig, runtime: &str, actual_server_threads:
         config.limits.max_response_body_bytes
     );
     println!(
-        "    read_timeout_ms: {}",
-        format_duration_ms(config.limits.read_timeout)
-    );
-    println!(
-        "    write_timeout_ms: {}",
-        format_duration_ms(config.limits.write_timeout)
-    );
-    println!(
         "    handler_timeout_ms: {}",
         format_duration_ms(config.limits.handler_timeout)
     );
+    println!("  tcp_limits:");
+    println!(
+        "    read_timeout_ms: {}",
+        format_duration_ms(config.tcp_limits.read_timeout)
+    );
+    println!(
+        "    write_timeout_ms: {}",
+        format_duration_ms(config.tcp_limits.write_timeout)
+    );
     println!(
         "    idle_timeout_ms: {}",
-        format_duration_ms(config.limits.idle_timeout)
-    );
-    println!(
-        "    http_header_read_timeout_ms: {}",
-        format_duration_ms(config.limits.http_header_read_timeout)
-    );
-    println!(
-        "    http_request_body_read_timeout_ms: {}",
-        format_duration_ms(config.limits.http_request_body_read_timeout)
-    );
-    println!(
-        "    http_response_write_timeout_ms: {}",
-        format_duration_ms(config.limits.http_response_write_timeout)
-    );
-    println!("    http_keep_alive: {}", config.limits.http_keep_alive);
-    println!(
-        "    http_max_connection_age_ms: {}",
-        format_duration_ms(config.limits.http_max_connection_age)
+        format_duration_ms(config.tcp_limits.idle_timeout)
     );
 }
 
@@ -705,8 +498,8 @@ pub fn print_help(runtime: &str) {
                                                      Equivalent env vars (no recompile required):\n\
                                                        MIMALLOC_PURGE_DELAY=0\n\
                                                        MIMALLOC_ARENA_EAGER_COMMIT=0\n\
-           --stats                                   Enable server-side per-request atomic counters.\n\
-                                                     Leave disabled for peak throughput benchmarks.\n\
+           --wire-byte-metrics                       Enable OTel request/response wire byte counters.\n\
+           --no-wire-byte-metrics                    Disable OTel request/response wire byte counters.\n\
            --tls-self-signed                         Serve TCP over TLS with an ephemeral\n\
                                                      self-signed certificate. The stress server\n\
                                                      default build includes this capability, but\n\
@@ -735,7 +528,7 @@ response_buffer_capacity = 2048
 request_body_chunk_size = 1024
 request_body_channel_capacity = 2
 low_memory = true
-stats_enabled = true
+wire_byte_metrics = true
 tls_self_signed = true
 
 [limits]
@@ -747,15 +540,12 @@ max_streaming_tasks = 8192
 max_memory_bytes = 8589934592
 max_request_body_bytes = 16777216
 max_response_body_bytes = 15728640
+handler_timeout_ms = 60000
+
+[tcp_limits]
 read_timeout_ms = 30000
 write_timeout_ms = 30000
-handler_timeout_ms = 60000
 idle_timeout_ms = 120000
-http_header_read_timeout_ms = 5000
-http_request_body_read_timeout_ms = 10000
-http_response_write_timeout_ms = 15000
-http_keep_alive = false
-http_max_connection_age_ms = 300000
 "#;
         let file = toml::from_str::<ServerConfigFile>(toml).unwrap();
         let mut config = ServerConfig::default();
@@ -769,7 +559,7 @@ http_max_connection_age_ms = 300000
         assert_eq!(config.request_body_chunk_size, 1024);
         assert_eq!(config.request_body_channel_capacity, 2);
         assert!(config.low_memory);
-        assert!(config.stats_enabled);
+        assert!(config.wire_byte_metrics);
         assert!(config.tls_self_signed);
         assert_eq!(config.limits.max_connections, 128_000);
         assert_eq!(config.limits.max_connections_per_peer, Some(4_096));
@@ -782,26 +572,18 @@ http_max_connection_age_ms = 300000
         assert_eq!(config.limits.max_memory_bytes, 8_589_934_592);
         assert_eq!(config.limits.max_request_body_bytes, 16_777_216);
         assert_eq!(config.limits.max_response_body_bytes, 15_728_640);
-        assert_eq!(config.limits.read_timeout, Some(Duration::from_secs(30)));
-        assert_eq!(config.limits.write_timeout, Some(Duration::from_secs(30)));
         assert_eq!(config.limits.handler_timeout, Some(Duration::from_secs(60)));
-        assert_eq!(config.limits.idle_timeout, Some(Duration::from_secs(120)));
         assert_eq!(
-            config.limits.http_header_read_timeout,
-            Some(Duration::from_secs(5))
+            config.tcp_limits.read_timeout,
+            Some(Duration::from_secs(30))
         );
         assert_eq!(
-            config.limits.http_request_body_read_timeout,
-            Some(Duration::from_secs(10))
+            config.tcp_limits.write_timeout,
+            Some(Duration::from_secs(30))
         );
         assert_eq!(
-            config.limits.http_response_write_timeout,
-            Some(Duration::from_secs(15))
-        );
-        assert!(!config.limits.http_keep_alive);
-        assert_eq!(
-            config.limits.http_max_connection_age,
-            Some(Duration::from_secs(300))
+            config.tcp_limits.idle_timeout,
+            Some(Duration::from_secs(120))
         );
     }
 

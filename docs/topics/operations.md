@@ -54,9 +54,16 @@ and memory approaching the configured budget.
 
 ## Benchmarking
 
-Use the stress server with `stats_enabled = false` for peak throughput. Enable
-`--stats` only for diagnostic runs; server-side per-request stats use atomics
-and can affect RPS.
+The default TCP OpenTelemetry profile keeps lifecycle metrics on. Request
+metrics are grouped under `NacelleTcpTelemetryConfig::request_metrics`:
+`request_started`, `request_completed`, and `wire_byte_metrics` are on by
+default, while `request_in_flight`, `request_duration_ms`, and phase histograms
+are opt-in. The stress server's default OTel build prints a compact console
+snapshot every 5 seconds.
+
+Core request duration metrics are also opt-in through `NacelleTelemetryConfig`.
+With the default config, core/HTTP request paths avoid request timer work unless
+HTTP access logging is enabled.
 
 Run microbenchmarks before and after hot-path changes:
 

@@ -1,10 +1,13 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
+use crate::limits::NacelleTcpLimits;
 use crate::protocol::{DecodedRequest, Protocol};
+use crate::telemetry::{NacelleTcpMetricsContext, NacelleTcpTelemetry};
 use nacelle_core::config::{NacelleConfig, RequestBodyMode};
 use nacelle_core::error::NacelleError;
 use nacelle_core::handler::Handler;
@@ -13,7 +16,7 @@ use nacelle_core::request::{
     NacelleBody, NacelleConnectionMeta, NacelleRequest, NacelleRequestMeta, RequestMetadata,
 };
 use nacelle_core::response::NacelleResponse;
-use nacelle_core::telemetry::NacelleTelemetry;
+use nacelle_core::telemetry::{NacelleTelemetry, NacelleTransport};
 
 /// Drive one TCP framed connection and coalesce completed responses into writes.
 pub async fn serve_connection<Req, P, H, R, W>(
@@ -32,14 +35,16 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    serve_connection_with_connection_meta(
+    serve_connection_with_connection_meta_and_tcp_state(
         reader,
         writer,
         protocol,
         handler,
         config,
         telemetry,
+        NacelleTcpTelemetry::default(),
         runtime_state,
+        NacelleTcpLimits::default(),
         NacelleConnectionMeta::tcp(None, None),
     )
     .await
@@ -48,8 +53,8 @@ where
 /// Drive one TCP framed connection with caller-supplied connection metadata.
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_connection_with_connection_meta<Req, P, H, R, W>(
-    mut reader: R,
-    mut writer: W,
+    reader: R,
+    writer: W,
     protocol: Arc<P>,
     handler: H,
     config: NacelleConfig,
@@ -64,18 +69,66 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    serve_connection_with_connection_meta_and_tcp_state(
+        reader,
+        writer,
+        protocol,
+        handler,
+        config,
+        telemetry,
+        NacelleTcpTelemetry::default(),
+        runtime_state,
+        NacelleTcpLimits::default(),
+        connection,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn serve_connection_with_connection_meta_and_tcp_state<Req, P, H, R, W>(
+    mut reader: R,
+    mut writer: W,
+    protocol: Arc<P>,
+    handler: H,
+    config: NacelleConfig,
+    telemetry: NacelleTelemetry,
+    tcp_telemetry: NacelleTcpTelemetry,
+    runtime_state: NacelleRuntimeState,
+    tcp_limits: NacelleTcpLimits,
+    connection: NacelleConnectionMeta,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let _connection_permit = runtime_state.acquire_connection_tracked()?;
     let _buffer_reservation = reserve_connection_buffers(&config, &runtime_state)?;
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     let mut write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
     let transport = connection.transport;
+    let connection_metrics = tcp_metrics_context(protocol.as_ref(), &connection);
+    tcp_telemetry.connection_accepted(&connection_metrics);
     telemetry.connection_opened(transport);
 
     let result: Result<(), NacelleError> = async {
         'conn: loop {
             if !write_buf.is_empty() {
-                write_all_with_timeout(&mut writer, &write_buf, &runtime_state, "tcp_write")
-                    .await?;
+                let write_started = start_tcp_phase(&tcp_telemetry);
+                let write_result =
+                    write_all_with_timeout(&mut writer, &write_buf, &tcp_limits, "tcp_write").await;
+                finish_tcp_phase(
+                    &tcp_telemetry,
+                    Some(&connection_metrics),
+                    "socket_write",
+                    write_started,
+                );
+                if let Err(error) = write_result {
+                    tcp_telemetry.error(&connection_metrics, "socket_write", &error);
+                    return Err(error);
+                }
                 write_buf.clear();
                 if write_buf.capacity() > config.response_buffer_capacity {
                     write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
@@ -86,9 +139,22 @@ where
                 read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
             }
 
-            let bytes_read =
-                read_buf_with_timeout(&mut reader, &mut read_buf, &runtime_state, "tcp_read")
-                    .await?;
+            let read_started = start_tcp_phase(&tcp_telemetry);
+            let read_result =
+                read_buf_with_timeout(&mut reader, &mut read_buf, &tcp_limits, "tcp_read").await;
+            finish_tcp_phase(
+                &tcp_telemetry,
+                Some(&connection_metrics),
+                "socket_read",
+                read_started,
+            );
+            let bytes_read = match read_result {
+                Ok(bytes_read) => bytes_read,
+                Err(error) => {
+                    tcp_telemetry.error(&connection_metrics, "socket_read", &error);
+                    return Err(error);
+                }
+            };
             if bytes_read == 0 {
                 if read_buf.is_empty() {
                     break 'conn;
@@ -96,7 +162,13 @@ where
                 return Err(NacelleError::UnexpectedEof);
             }
 
-            while let Some(decoded) = protocol.decode_head(&mut read_buf, config.max_frame_len)? {
+            while let Some(decoded) = decode_next_request(
+                protocol.as_ref(),
+                &mut read_buf,
+                config.max_frame_len,
+                &tcp_telemetry,
+                &connection_metrics,
+            )? {
                 let error_context = protocol.error_context(&decoded.request);
                 run_request(
                     &mut reader,
@@ -108,7 +180,9 @@ where
                     error_context,
                     &config,
                     &telemetry,
+                    &tcp_telemetry,
                     &runtime_state,
+                    &tcp_limits,
                     &connection,
                 )
                 .await?;
@@ -120,10 +194,21 @@ where
     .await;
 
     if !write_buf.is_empty() {
-        let _ = write_all_with_timeout(&mut writer, &write_buf, &runtime_state, "tcp_final_write")
-            .await;
+        let write_started = start_tcp_phase(&tcp_telemetry);
+        let final_write =
+            write_all_with_timeout(&mut writer, &write_buf, &tcp_limits, "tcp_final_write").await;
+        finish_tcp_phase(
+            &tcp_telemetry,
+            Some(&connection_metrics),
+            "socket_write",
+            write_started,
+        );
+        if let Err(error) = &final_write {
+            tcp_telemetry.error(&connection_metrics, "socket_write", error);
+        }
     }
 
+    tcp_telemetry.connection_closed(&connection_metrics, tcp_close_reason(&result));
     result
 }
 
@@ -142,13 +227,15 @@ where
     H: Handler,
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    serve_stream_with_connection_meta(
+    serve_stream_with_connection_meta_and_tcp_state(
         io,
         protocol,
         handler,
         config,
         telemetry,
+        NacelleTcpTelemetry::default(),
         runtime_state,
+        NacelleTcpLimits::default(),
         NacelleConnectionMeta::tcp(None, None),
     )
     .await
@@ -156,7 +243,7 @@ where
 
 /// Drive one TCP framed connection using a single unsplit I/O object and caller-supplied metadata.
 pub async fn serve_stream_with_connection_meta<Req, P, H, IO>(
-    mut io: IO,
+    io: IO,
     protocol: Arc<P>,
     handler: H,
     config: NacelleConfig,
@@ -170,17 +257,63 @@ where
     H: Handler,
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    serve_stream_with_connection_meta_and_tcp_state(
+        io,
+        protocol,
+        handler,
+        config,
+        telemetry,
+        NacelleTcpTelemetry::default(),
+        runtime_state,
+        NacelleTcpLimits::default(),
+        connection,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn serve_stream_with_connection_meta_and_tcp_state<Req, P, H, IO>(
+    mut io: IO,
+    protocol: Arc<P>,
+    handler: H,
+    config: NacelleConfig,
+    telemetry: NacelleTelemetry,
+    tcp_telemetry: NacelleTcpTelemetry,
+    runtime_state: NacelleRuntimeState,
+    tcp_limits: NacelleTcpLimits,
+    connection: NacelleConnectionMeta,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let _connection_permit = runtime_state.acquire_connection_tracked()?;
     let _buffer_reservation = reserve_connection_buffers(&config, &runtime_state)?;
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     let mut write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
     let transport = connection.transport;
+    let connection_metrics = tcp_metrics_context(protocol.as_ref(), &connection);
+    tcp_telemetry.connection_accepted(&connection_metrics);
     telemetry.connection_opened(transport);
 
     let result: Result<(), NacelleError> = async {
         'conn: loop {
             if !write_buf.is_empty() {
-                write_all_with_timeout(&mut io, &write_buf, &runtime_state, "tcp_write").await?;
+                let write_started = start_tcp_phase(&tcp_telemetry);
+                let write_result =
+                    write_all_with_timeout(&mut io, &write_buf, &tcp_limits, "tcp_write").await;
+                finish_tcp_phase(
+                    &tcp_telemetry,
+                    Some(&connection_metrics),
+                    "socket_write",
+                    write_started,
+                );
+                if let Err(error) = write_result {
+                    tcp_telemetry.error(&connection_metrics, "socket_write", &error);
+                    return Err(error);
+                }
                 write_buf.clear();
                 if write_buf.capacity() > config.response_buffer_capacity {
                     write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
@@ -191,8 +324,22 @@ where
                 read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
             }
 
-            let bytes_read =
-                read_buf_with_timeout(&mut io, &mut read_buf, &runtime_state, "tcp_read").await?;
+            let read_started = start_tcp_phase(&tcp_telemetry);
+            let read_result =
+                read_buf_with_timeout(&mut io, &mut read_buf, &tcp_limits, "tcp_read").await;
+            finish_tcp_phase(
+                &tcp_telemetry,
+                Some(&connection_metrics),
+                "socket_read",
+                read_started,
+            );
+            let bytes_read = match read_result {
+                Ok(bytes_read) => bytes_read,
+                Err(error) => {
+                    tcp_telemetry.error(&connection_metrics, "socket_read", &error);
+                    return Err(error);
+                }
+            };
             if bytes_read == 0 {
                 if read_buf.is_empty() {
                     break 'conn;
@@ -200,7 +347,13 @@ where
                 return Err(NacelleError::UnexpectedEof);
             }
 
-            while let Some(decoded) = protocol.decode_head(&mut read_buf, config.max_frame_len)? {
+            while let Some(decoded) = decode_next_request(
+                protocol.as_ref(),
+                &mut read_buf,
+                config.max_frame_len,
+                &tcp_telemetry,
+                &connection_metrics,
+            )? {
                 let error_context = protocol.error_context(&decoded.request);
                 run_request(
                     &mut io,
@@ -212,7 +365,9 @@ where
                     error_context,
                     &config,
                     &telemetry,
+                    &tcp_telemetry,
                     &runtime_state,
+                    &tcp_limits,
                     &connection,
                 )
                 .await?;
@@ -224,10 +379,21 @@ where
     .await;
 
     if !write_buf.is_empty() {
-        let _ =
-            write_all_with_timeout(&mut io, &write_buf, &runtime_state, "tcp_final_write").await;
+        let write_started = start_tcp_phase(&tcp_telemetry);
+        let final_write =
+            write_all_with_timeout(&mut io, &write_buf, &tcp_limits, "tcp_final_write").await;
+        finish_tcp_phase(
+            &tcp_telemetry,
+            Some(&connection_metrics),
+            "socket_write",
+            write_started,
+        );
+        if let Err(error) = &final_write {
+            tcp_telemetry.error(&connection_metrics, "socket_write", error);
+        }
     }
 
+    tcp_telemetry.connection_closed(&connection_metrics, tcp_close_reason(&result));
     result
 }
 
@@ -246,13 +412,15 @@ where
     H: Handler,
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    serve_stream_without_connection_limit_with_connection_meta(
+    serve_stream_without_connection_limit_with_connection_meta_and_tcp_state(
         io,
         protocol,
         handler,
         config,
         telemetry,
+        NacelleTcpTelemetry::default(),
         runtime_state,
+        NacelleTcpLimits::default(),
         NacelleConnectionMeta::tcp(None, None),
     )
     .await
@@ -260,7 +428,7 @@ where
 
 /// Drive one TCP framed connection without taking a connection permit.
 pub async fn serve_stream_without_connection_limit_with_connection_meta<Req, P, H, IO>(
-    mut io: IO,
+    io: IO,
     protocol: Arc<P>,
     handler: H,
     config: NacelleConfig,
@@ -274,16 +442,67 @@ where
     H: Handler,
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    serve_stream_without_connection_limit_with_connection_meta_and_tcp_state(
+        io,
+        protocol,
+        handler,
+        config,
+        telemetry,
+        NacelleTcpTelemetry::default(),
+        runtime_state,
+        NacelleTcpLimits::default(),
+        connection,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn serve_stream_without_connection_limit_with_connection_meta_and_tcp_state<
+    Req,
+    P,
+    H,
+    IO,
+>(
+    mut io: IO,
+    protocol: Arc<P>,
+    handler: H,
+    config: NacelleConfig,
+    telemetry: NacelleTelemetry,
+    tcp_telemetry: NacelleTcpTelemetry,
+    runtime_state: NacelleRuntimeState,
+    tcp_limits: NacelleTcpLimits,
+    connection: NacelleConnectionMeta,
+) -> Result<(), NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+    H: Handler,
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
     let _buffer_reservation = reserve_connection_buffers(&config, &runtime_state)?;
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     let mut write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
     let transport = connection.transport;
+    let connection_metrics = tcp_metrics_context(protocol.as_ref(), &connection);
+    tcp_telemetry.connection_accepted(&connection_metrics);
     telemetry.connection_opened(transport);
 
     let result: Result<(), NacelleError> = async {
         'conn: loop {
             if !write_buf.is_empty() {
-                write_all_with_timeout(&mut io, &write_buf, &runtime_state, "tcp_write").await?;
+                let write_started = start_tcp_phase(&tcp_telemetry);
+                let write_result =
+                    write_all_with_timeout(&mut io, &write_buf, &tcp_limits, "tcp_write").await;
+                finish_tcp_phase(
+                    &tcp_telemetry,
+                    Some(&connection_metrics),
+                    "socket_write",
+                    write_started,
+                );
+                if let Err(error) = write_result {
+                    tcp_telemetry.error(&connection_metrics, "socket_write", &error);
+                    return Err(error);
+                }
                 write_buf.clear();
                 if write_buf.capacity() > config.response_buffer_capacity {
                     write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
@@ -294,8 +513,22 @@ where
                 read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
             }
 
-            let bytes_read =
-                read_buf_with_timeout(&mut io, &mut read_buf, &runtime_state, "tcp_read").await?;
+            let read_started = start_tcp_phase(&tcp_telemetry);
+            let read_result =
+                read_buf_with_timeout(&mut io, &mut read_buf, &tcp_limits, "tcp_read").await;
+            finish_tcp_phase(
+                &tcp_telemetry,
+                Some(&connection_metrics),
+                "socket_read",
+                read_started,
+            );
+            let bytes_read = match read_result {
+                Ok(bytes_read) => bytes_read,
+                Err(error) => {
+                    tcp_telemetry.error(&connection_metrics, "socket_read", &error);
+                    return Err(error);
+                }
+            };
             if bytes_read == 0 {
                 if read_buf.is_empty() {
                     break 'conn;
@@ -303,7 +536,13 @@ where
                 return Err(NacelleError::UnexpectedEof);
             }
 
-            while let Some(decoded) = protocol.decode_head(&mut read_buf, config.max_frame_len)? {
+            while let Some(decoded) = decode_next_request(
+                protocol.as_ref(),
+                &mut read_buf,
+                config.max_frame_len,
+                &tcp_telemetry,
+                &connection_metrics,
+            )? {
                 let error_context = protocol.error_context(&decoded.request);
                 run_request(
                     &mut io,
@@ -315,7 +554,9 @@ where
                     error_context,
                     &config,
                     &telemetry,
+                    &tcp_telemetry,
                     &runtime_state,
+                    &tcp_limits,
                     &connection,
                 )
                 .await?;
@@ -327,10 +568,21 @@ where
     .await;
 
     if !write_buf.is_empty() {
-        let _ =
-            write_all_with_timeout(&mut io, &write_buf, &runtime_state, "tcp_final_write").await;
+        let write_started = start_tcp_phase(&tcp_telemetry);
+        let final_write =
+            write_all_with_timeout(&mut io, &write_buf, &tcp_limits, "tcp_final_write").await;
+        finish_tcp_phase(
+            &tcp_telemetry,
+            Some(&connection_metrics),
+            "socket_write",
+            write_started,
+        );
+        if let Err(error) = &final_write {
+            tcp_telemetry.error(&connection_metrics, "socket_write", error);
+        }
     }
 
+    tcp_telemetry.connection_closed(&connection_metrics, tcp_close_reason(&result));
     result
 }
 
@@ -345,7 +597,9 @@ async fn run_request<Req, P, H, R>(
     error_context: P::ErrorContext,
     config: &NacelleConfig,
     telemetry: &NacelleTelemetry,
+    tcp_telemetry: &NacelleTcpTelemetry,
     runtime_state: &NacelleRuntimeState,
+    tcp_limits: &NacelleTcpLimits,
     connection: &NacelleConnectionMeta,
 ) -> Result<(), NacelleError>
 where
@@ -355,18 +609,32 @@ where
     R: AsyncRead + Unpin + Send,
 {
     let request = decoded.request;
-    let request_started = std::time::Instant::now();
-    let opcode = request.opcode();
+    let tcp_metrics = tcp_telemetry.metrics_enabled();
+    let tcp_request_metrics = tcp_telemetry.request_metrics_enabled();
+    let core_request_events = telemetry.request_events_enabled() && !tcp_request_metrics;
+    let core_request_duration_metrics =
+        core_request_events && telemetry.request_duration_metrics_enabled();
+    let request_started = (core_request_duration_metrics
+        || tcp_telemetry.request_duration_metrics_enabled())
+    .then(Instant::now);
+    let metrics_context = tcp_metrics.then(|| tcp_metrics_context(protocol, connection));
     let request_bytes = 4 + 20 + decoded.body_len;
     let response_context = protocol.response_context(&request);
     let max_request_body_bytes =
         request.max_body_bytes(connection, runtime_state.limits().max_request_body_bytes);
     if decoded.body_len > max_request_body_bytes {
         let error = NacelleError::ResourceLimit("request_body_bytes");
-        telemetry.request_failed(
+        record_tcp_error(
+            tcp_telemetry,
+            metrics_context.as_ref(),
+            "request_body_limit",
+            &error,
+        );
+        record_core_request_failed(
+            telemetry,
+            core_request_events,
             connection.transport,
-            Some(opcode),
-            request_started.elapsed(),
+            request_started,
             &error,
         );
         write_error::<Req, P>(
@@ -378,54 +646,162 @@ where
         )?;
         return Err(NacelleError::ResourceLimit("request_body_bytes"));
     }
-    let _request_permit = runtime_state.acquire_request_tracked()?;
+    let _request_permit = match runtime_state.acquire_request_tracked() {
+        Ok(permit) => permit,
+        Err(error) => {
+            record_tcp_error(
+                tcp_telemetry,
+                metrics_context.as_ref(),
+                "request_permit",
+                &error,
+            );
+            return Err(error);
+        }
+    };
+    let mut request_metrics = TcpRequestMetricsGuard::new(
+        tcp_telemetry,
+        metrics_context.clone(),
+        request_bytes,
+        request_started,
+    );
     let outcome = if decoded.body_len <= read_buf.len() {
+        let body_started = start_tcp_phase(tcp_telemetry);
         let body =
             buffered_request_body(read_buf, decoded.body_len, config.request_body_chunk_size);
-        execute_handler(
+        finish_tcp_phase(
+            tcp_telemetry,
+            metrics_context.as_ref(),
+            "request_body_read",
+            body_started,
+        );
+        execute_handler_with_metrics(
             handler,
             request,
             decoded.body_len,
             body,
             runtime_state,
             connection,
+            tcp_telemetry,
+            metrics_context.as_ref(),
         )
         .await
     } else if config.request_body_mode == RequestBodyMode::Buffered {
-        let body =
-            read_buffered_request_body(reader, read_buf, decoded.body_len, runtime_state).await?;
-        execute_handler(
+        let body_started = start_tcp_phase(tcp_telemetry);
+        let body = read_buffered_request_body(
+            reader,
+            read_buf,
+            decoded.body_len,
+            runtime_state,
+            tcp_limits,
+        )
+        .await
+        .inspect_err(|error| {
+            record_tcp_error(
+                tcp_telemetry,
+                metrics_context.as_ref(),
+                "request_body_read",
+                error,
+            )
+        })?;
+        finish_tcp_phase(
+            tcp_telemetry,
+            metrics_context.as_ref(),
+            "request_body_read",
+            body_started,
+        );
+        execute_handler_with_metrics(
             handler,
             request,
             decoded.body_len,
             body,
             runtime_state,
             connection,
+            tcp_telemetry,
+            metrics_context.as_ref(),
         )
         .await
     } else {
-        let _streaming_permit = runtime_state.acquire_streaming_task_tracked()?;
-        let _streaming_body_reservation = runtime_state.reserve_memory(decoded.body_len)?;
+        let _streaming_permit =
+            runtime_state
+                .acquire_streaming_task_tracked()
+                .inspect_err(|error| {
+                    record_tcp_error(
+                        tcp_telemetry,
+                        metrics_context.as_ref(),
+                        "streaming_task",
+                        error,
+                    )
+                })?;
+        let _streaming_body_reservation = runtime_state
+            .reserve_memory(decoded.body_len)
+            .inspect_err(|error| {
+                record_tcp_error(
+                    tcp_telemetry,
+                    metrics_context.as_ref(),
+                    "streaming_memory",
+                    error,
+                )
+            })?;
         let (body_tx, body_rx) = mpsc::channel(config.request_body_channel_capacity);
         let body = NacelleBody::new(body_rx, decoded.body_len);
         let h = handler.clone();
         let state = runtime_state.clone();
+        let tcp_limits = *tcp_limits;
         let connection = connection.clone();
+        let handler_tcp_telemetry = tcp_telemetry.clone();
+        let handler_metrics_context = metrics_context.clone();
         let handler_task = nacelle_core::runtime::spawn(async move {
-            execute_handler(&h, request, decoded.body_len, body, &state, &connection).await
+            execute_handler_with_metrics(
+                &h,
+                request,
+                decoded.body_len,
+                body,
+                &state,
+                &connection,
+                &handler_tcp_telemetry,
+                handler_metrics_context.as_ref(),
+            )
+            .await
         });
 
+        let body_started = start_tcp_phase(tcp_telemetry);
         let pump_result = pump_request_body(
             reader,
             read_buf,
             decoded.body_len,
             &body_tx,
             config,
-            runtime_state,
+            &tcp_limits,
         )
         .await;
+        finish_tcp_phase(
+            tcp_telemetry,
+            metrics_context.as_ref(),
+            "request_body_read",
+            body_started,
+        );
+        if let Err(error) = &pump_result {
+            record_tcp_error(
+                tcp_telemetry,
+                metrics_context.as_ref(),
+                "request_body_read",
+                error,
+            );
+        }
         drop(body_tx);
-        let outcome = handler_task.await??;
+        let outcome = match handler_task.await {
+            Ok(outcome) => outcome?,
+            Err(error) => {
+                let error = NacelleError::from(error);
+                record_tcp_error(
+                    tcp_telemetry,
+                    metrics_context.as_ref(),
+                    "handler_join",
+                    &error,
+                );
+                return Err(error);
+            }
+        };
         pump_result?;
         Ok(outcome)
     };
@@ -433,28 +809,49 @@ where
     match outcome {
         Ok(response) => {
             let prev_response_len = write_buf.len();
-            encode_response_body::<Req, P>(
+            let encode_started = start_tcp_phase(tcp_telemetry);
+            let encode_result = encode_response_body::<Req, P>(
                 protocol,
                 response_context,
                 response,
                 write_buf,
                 runtime_state,
             )
-            .await?;
-            telemetry.request_completed(
-                connection.transport,
-                Some(opcode),
-                request_bytes,
-                write_buf.len().saturating_sub(prev_response_len),
-                request_started.elapsed(),
+            .await;
+            finish_tcp_phase(
+                tcp_telemetry,
+                metrics_context.as_ref(),
+                "response_encode",
+                encode_started,
             );
+            if let Err(error) = encode_result {
+                record_tcp_error(
+                    tcp_telemetry,
+                    metrics_context.as_ref(),
+                    "response_encode",
+                    &error,
+                );
+                return Err(error);
+            }
+            let response_bytes = write_buf.len().saturating_sub(prev_response_len);
+            record_core_request_completed(
+                telemetry,
+                core_request_events,
+                connection.transport,
+                request_bytes,
+                response_bytes,
+                request_started,
+            );
+            request_metrics.complete("ok", response_bytes);
         }
         Err(error) => {
             let prev_response_len = write_buf.len();
-            telemetry.request_failed(
+            record_tcp_error(tcp_telemetry, metrics_context.as_ref(), "handler", &error);
+            record_core_request_failed(
+                telemetry,
+                core_request_events,
                 connection.transport,
-                Some(opcode),
-                request_started.elapsed(),
+                request_started,
                 &error,
             );
             write_error::<Req, P>(
@@ -464,17 +861,41 @@ where
                 error,
                 config.response_buffer_capacity,
             )?;
-            telemetry.request_completed(
+            let response_bytes = write_buf.len().saturating_sub(prev_response_len);
+            record_core_request_completed(
+                telemetry,
+                core_request_events,
                 connection.transport,
-                Some(opcode),
                 request_bytes,
-                write_buf.len().saturating_sub(prev_response_len),
-                request_started.elapsed(),
+                response_bytes,
+                request_started,
             );
+            request_metrics.complete("error", response_bytes);
         }
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_handler_with_metrics<Req, H>(
+    handler: &H,
+    request: Req,
+    body_len: usize,
+    body: NacelleBody,
+    runtime_state: &NacelleRuntimeState,
+    connection: &NacelleConnectionMeta,
+    tcp_telemetry: &NacelleTcpTelemetry,
+    metrics_context: Option<&NacelleTcpMetricsContext>,
+) -> Result<NacelleResponse, NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    H: Handler,
+{
+    let handler_started = metrics_context.and_then(|_| start_tcp_phase(tcp_telemetry));
+    let result = execute_handler(handler, request, body_len, body, runtime_state, connection).await;
+    finish_tcp_phase(tcp_telemetry, metrics_context, "handler", handler_started);
+    result
 }
 
 async fn read_buffered_request_body<R>(
@@ -482,6 +903,7 @@ async fn read_buffered_request_body<R>(
     read_buf: &mut BytesMut,
     body_len: usize,
     runtime_state: &NacelleRuntimeState,
+    tcp_limits: &NacelleTcpLimits,
 ) -> Result<NacelleBody, NacelleError>
 where
     R: AsyncRead + Unpin,
@@ -499,7 +921,7 @@ where
 
     while body.len() < body_len {
         let bytes_read =
-            read_buf_with_timeout(reader, &mut body, runtime_state, "request_body_read").await?;
+            read_buf_with_timeout(reader, &mut body, tcp_limits, "request_body_read").await?;
         if bytes_read == 0 {
             return Err(NacelleError::UnexpectedEof);
         }
@@ -544,7 +966,7 @@ async fn pump_request_body<R>(
     body_len: usize,
     tx: &mpsc::Sender<Result<Bytes, NacelleError>>,
     config: &NacelleConfig,
-    runtime_state: &NacelleRuntimeState,
+    tcp_limits: &NacelleTcpLimits,
 ) -> Result<(), NacelleError>
 where
     R: AsyncRead + Unpin,
@@ -567,7 +989,7 @@ where
         let next_len = remaining.min(config.request_body_chunk_size);
         let mut chunk = BytesMut::with_capacity(next_len);
         let bytes_read =
-            read_buf_with_timeout(reader, &mut chunk, runtime_state, "request_body_read").await?;
+            read_buf_with_timeout(reader, &mut chunk, tcp_limits, "request_body_read").await?;
         if bytes_read == 0 {
             if receiver_open {
                 let _ = tx.send(Err(NacelleError::UnexpectedEof)).await;
@@ -691,21 +1113,195 @@ fn reserve_connection_buffers(
     runtime_state.reserve_memory(bytes)
 }
 
+fn decode_next_request<Req, P>(
+    protocol: &P,
+    read_buf: &mut BytesMut,
+    max_frame_len: usize,
+    tcp_telemetry: &NacelleTcpTelemetry,
+    metrics_context: &NacelleTcpMetricsContext,
+) -> Result<Option<DecodedRequest<Req>>, NacelleError>
+where
+    Req: RequestMetadata + Send + 'static,
+    P: Protocol<Req> + Send + Sync + 'static,
+{
+    let decode_started = start_tcp_phase(tcp_telemetry);
+    let result = protocol.decode_head(read_buf, max_frame_len);
+    finish_tcp_phase(
+        tcp_telemetry,
+        Some(metrics_context),
+        "decode",
+        decode_started,
+    );
+    if let Err(error) = &result {
+        tcp_telemetry.error(metrics_context, "decode", error);
+    }
+    result
+}
+
+fn tcp_metrics_context<Req, P>(
+    protocol: &P,
+    connection: &NacelleConnectionMeta,
+) -> NacelleTcpMetricsContext
+where
+    Req: RequestMetadata,
+    P: Protocol<Req> + Send + Sync + 'static,
+{
+    NacelleTcpMetricsContext::new(
+        connection.transport,
+        connection.listener.clone(),
+        protocol.name(),
+        connection.tls_label(),
+    )
+}
+
+fn start_tcp_phase(tcp_telemetry: &NacelleTcpTelemetry) -> Option<std::time::Instant> {
+    tcp_telemetry
+        .phase_duration_metrics_enabled()
+        .then(std::time::Instant::now)
+}
+
+fn finish_tcp_phase(
+    tcp_telemetry: &NacelleTcpTelemetry,
+    metrics_context: Option<&NacelleTcpMetricsContext>,
+    phase: &'static str,
+    started: Option<std::time::Instant>,
+) {
+    if let (Some(started), Some(metrics_context)) = (started, metrics_context) {
+        tcp_telemetry.phase_duration(metrics_context, phase, started.elapsed());
+    }
+}
+
+fn record_tcp_error(
+    tcp_telemetry: &NacelleTcpTelemetry,
+    metrics_context: Option<&NacelleTcpMetricsContext>,
+    phase: &'static str,
+    error: &NacelleError,
+) {
+    if let Some(metrics_context) = metrics_context {
+        tcp_telemetry.error(metrics_context, phase, error);
+    }
+}
+
+fn record_core_request_completed(
+    telemetry: &NacelleTelemetry,
+    enabled: bool,
+    transport: NacelleTransport,
+    request_bytes: usize,
+    response_bytes: usize,
+    started: Option<Instant>,
+) {
+    if enabled {
+        telemetry.request_completed(
+            transport,
+            request_bytes,
+            response_bytes,
+            elapsed_since(started),
+        );
+    }
+}
+
+fn record_core_request_failed(
+    telemetry: &NacelleTelemetry,
+    enabled: bool,
+    transport: NacelleTransport,
+    started: Option<Instant>,
+    error: &NacelleError,
+) {
+    if enabled {
+        telemetry.request_failed(transport, elapsed_since(started), error);
+    }
+}
+
+fn elapsed_since(started: Option<Instant>) -> Duration {
+    started.map_or(Duration::ZERO, |started| started.elapsed())
+}
+
+fn tcp_close_reason(result: &Result<(), NacelleError>) -> &'static str {
+    match result {
+        Ok(()) => "eof",
+        Err(NacelleError::Timeout(_)) => "timeout",
+        Err(NacelleError::UnexpectedEof) => "unexpected_eof",
+        Err(NacelleError::ConnectionClosed) => "connection_closed",
+        Err(NacelleError::ResourceLimit(_)) => "resource_limit",
+        Err(NacelleError::Io(_)) => "io",
+        Err(NacelleError::Protocol(_)) => "protocol",
+        Err(NacelleError::Handler(_)) => "handler",
+        Err(NacelleError::Join(_)) => "join",
+        Err(NacelleError::InvalidFrame(_)) | Err(NacelleError::FrameTooLarge { .. }) => {
+            "invalid_frame"
+        }
+        Err(NacelleError::MissingProtocol) => "missing_protocol",
+    }
+}
+
+struct TcpRequestMetricsGuard<'a> {
+    telemetry: &'a NacelleTcpTelemetry,
+    context: Option<NacelleTcpMetricsContext>,
+    request_bytes: usize,
+    started: Option<Instant>,
+    completed: bool,
+}
+
+impl<'a> TcpRequestMetricsGuard<'a> {
+    fn new(
+        telemetry: &'a NacelleTcpTelemetry,
+        context: Option<NacelleTcpMetricsContext>,
+        request_bytes: usize,
+        started: Option<Instant>,
+    ) -> Self {
+        if let Some(context) = &context {
+            telemetry.request_started(context);
+        }
+        Self {
+            telemetry,
+            context,
+            request_bytes,
+            started,
+            completed: false,
+        }
+    }
+
+    fn complete(&mut self, status: &'static str, response_bytes: usize) {
+        if let Some(context) = &self.context {
+            self.telemetry.request_completed(
+                context,
+                status,
+                self.request_bytes,
+                response_bytes,
+                elapsed_since(self.started),
+            );
+        }
+        self.completed = true;
+    }
+}
+
+impl Drop for TcpRequestMetricsGuard<'_> {
+    fn drop(&mut self) {
+        if !self.completed
+            && let Some(context) = &self.context
+        {
+            self.telemetry.request_completed(
+                context,
+                "error",
+                self.request_bytes,
+                0,
+                elapsed_since(self.started),
+            );
+        }
+    }
+}
+
 async fn read_buf_with_timeout<R>(
     reader: &mut R,
     buf: &mut BytesMut,
-    runtime_state: &NacelleRuntimeState,
+    tcp_limits: &NacelleTcpLimits,
     name: &'static str,
 ) -> Result<usize, NacelleError>
 where
     R: AsyncRead + Unpin,
 {
     let future = reader.read_buf(buf);
-    if let Some(timeout) = runtime_state
-        .limits()
-        .read_timeout
-        .or(runtime_state.limits().idle_timeout)
-    {
+    if let Some(timeout) = tcp_limits.read_timeout.or(tcp_limits.idle_timeout) {
         tokio::time::timeout(timeout, future)
             .await
             .map_err(|_| NacelleError::Timeout(name))?
@@ -718,14 +1314,14 @@ where
 async fn write_all_with_timeout<W>(
     writer: &mut W,
     buf: &[u8],
-    runtime_state: &NacelleRuntimeState,
+    tcp_limits: &NacelleTcpLimits,
     name: &'static str,
 ) -> Result<(), NacelleError>
 where
     W: AsyncWrite + Unpin,
 {
     let future = writer.write_all(buf);
-    if let Some(timeout) = runtime_state.limits().write_timeout {
+    if let Some(timeout) = tcp_limits.write_timeout {
         tokio::time::timeout(timeout, future)
             .await
             .map_err(|_| NacelleError::Timeout(name))?

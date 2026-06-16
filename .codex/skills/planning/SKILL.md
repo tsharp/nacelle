@@ -1,5 +1,5 @@
 ---
-name: project-planning
+name: planning
 description: Plan repository work before implementation in any software project. Use when Codex needs to scope broad or risky work, architecture changes, migrations, production/readiness posture, security hardening, performance baselines, release gates, documentation structure, validation strategy, or checkpoint commits across one or more sessions.
 ---
 

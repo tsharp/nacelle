@@ -23,13 +23,20 @@ use nacelle_tcp::NacelleTlsDetectionOptions;
 #[cfg(all(feature = "tcp", unix))]
 use nacelle_tcp::NacelleUnixSocketOptions;
 #[cfg(feature = "tcp")]
-use nacelle_tcp::{NacelleTcpBindOptions, NacelleTcpOptions, Protocol, TcpServer};
+use nacelle_tcp::{
+    NacelleTcpBindOptions, NacelleTcpLimits, NacelleTcpOptions, NacelleTcpTelemetry, Protocol,
+    TcpServer,
+};
 
 pub struct NacelleApp<H> {
     handler: H,
     config: NacelleConfig,
     telemetry: NacelleTelemetry,
+    #[cfg(feature = "tcp")]
+    tcp_telemetry: NacelleTcpTelemetry,
     runtime_state: NacelleRuntimeState,
+    #[cfg(feature = "tcp")]
+    tcp_limits: NacelleTcpLimits,
     shutdown: NacelleShutdown,
     drain_timeout: std::time::Duration,
     connection_extension_factory: Option<NacelleConnectionExtensionFactory>,
@@ -44,7 +51,11 @@ where
             handler,
             config: NacelleConfig::default(),
             telemetry: NacelleTelemetry::default(),
+            #[cfg(feature = "tcp")]
+            tcp_telemetry: NacelleTcpTelemetry::default(),
             runtime_state: NacelleRuntimeState::default(),
+            #[cfg(feature = "tcp")]
+            tcp_limits: NacelleTcpLimits::default(),
             shutdown: NacelleShutdown::new(),
             drain_timeout: std::time::Duration::from_secs(30),
             connection_extension_factory: None,
@@ -61,8 +72,20 @@ where
         self
     }
 
+    #[cfg(feature = "tcp")]
+    pub fn with_tcp_telemetry(mut self, tcp_telemetry: NacelleTcpTelemetry) -> Self {
+        self.tcp_telemetry = tcp_telemetry;
+        self
+    }
+
     pub fn with_limits(mut self, limits: NacelleLimits) -> Self {
         self.runtime_state = NacelleRuntimeState::new(limits);
+        self
+    }
+
+    #[cfg(feature = "tcp")]
+    pub fn with_tcp_limits(mut self, tcp_limits: NacelleTcpLimits) -> Self {
+        self.tcp_limits = tcp_limits;
         self
     }
 
@@ -548,7 +571,9 @@ where
         .protocol(protocol)
         .config(app.config.clone())
         .telemetry(app.telemetry.clone())
+        .tcp_telemetry(app.tcp_telemetry.clone())
         .runtime_state(app.runtime_state.clone());
+    let builder = builder.tcp_limits(app.tcp_limits);
     let builder = if let Some(factory) = app.connection_extension_factory.clone() {
         builder.connection_extension_factory_arc(factory)
     } else {

@@ -1,14 +1,14 @@
 # Harden HTTP listeners
 
-Nacelle's HTTP transport is Hyper HTTP/1. Configure HTTP timeout and body policy through `NacelleLimits`, and configure request-shape policy through `NacelleHttpPolicy`.
+Nacelle's HTTP transport is Hyper HTTP/1. Configure HTTP timeout and keep-alive behavior through `NacelleHttpLimits`, shared body-size budgets through `NacelleLimits`, and request-shape policy through `NacelleHttpPolicy`.
 
 Defaults:
 
-- `http_header_read_timeout`: 30 seconds, enforced with Hyper's HTTP/1 header timeout and `TokioTimer`.
-- `http_request_body_read_timeout`: 30 seconds, enforced while reading body frames.
-- `http_response_write_timeout`: 30 seconds, enforced at Hyper's I/O write boundary.
-- `http_keep_alive`: enabled.
-- `http_max_connection_age`: disabled by default.
+- `NacelleHttpLimits::header_read_timeout`: 30 seconds, enforced with Hyper's HTTP/1 header timeout and `TokioTimer`.
+- `NacelleHttpLimits::request_body_read_timeout`: 30 seconds, enforced while reading body frames.
+- `NacelleHttpLimits::response_write_timeout`: 30 seconds, enforced at Hyper's I/O write boundary.
+- `NacelleHttpLimits::keep_alive`: enabled.
+- `NacelleHttpLimits::max_connection_age`: disabled by default.
 - request and response body size limits: 16 MiB each.
 
 `NacelleHttpPolicy` can reject requests before the handler runs:
@@ -50,4 +50,4 @@ request metadata, and access logs use the socket peer address.
 
 For internet-facing deployments, a reverse proxy or load balancer can still own coarse traffic filtering and certificate automation. Nacelle now also enforces application-level body, request, connection, per-peer connection/request/connection-open-rate, timeout, TLS handshake, security header, and optional Host/header/method/URI limits in-process.
 
-Slowloris-style clients are closed by `http_header_read_timeout`. Trickle request bodies are closed by `http_request_body_read_timeout`. Slow response readers are closed by `http_response_write_timeout` when socket writes stop making progress.
+Slowloris-style clients are closed by `NacelleHttpLimits::header_read_timeout`. Trickle request bodies are closed by `NacelleHttpLimits::request_body_read_timeout`. Slow response readers are closed by `NacelleHttpLimits::response_write_timeout` when socket writes stop making progress.

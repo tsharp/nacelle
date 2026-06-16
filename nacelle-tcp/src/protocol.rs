@@ -17,6 +17,10 @@ where
     type ResponseContext: Send + 'static;
     type ErrorContext: Send + 'static;
 
+    fn name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
     fn decode_head(
         &self,
         src: &mut BytesMut,
