@@ -44,6 +44,10 @@ PowerShell example:
 Server-side stats are disabled by default for peak throughput. Add `--stats`
 when you want periodic server counters during a diagnostic run.
 
+OpenTelemetry metrics are enabled in the default stress server build. Use
+`--no-default-features` with the plain TCP config when you intentionally want a
+metrics-free peak throughput baseline.
+
 The Tokio stress server default build includes `tls-self-signed` support. The
 checked-in root `config.toml` enables `tls_self_signed = true`, so the local
 stress client should use `--tls-insecure` with that default config. Use

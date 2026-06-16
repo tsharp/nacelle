@@ -111,6 +111,10 @@ impl NacelleTelemetry {
         self
     }
 
+    pub fn request_events_enabled(&self) -> bool {
+        self.sink.is_some() || cfg!(feature = "otel")
+    }
+
     pub fn listener_configured(&self, transport: NacelleTransport, name: &str, addr: &str) {
         tracing::info!(
             target: "nacelle",
