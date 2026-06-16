@@ -61,6 +61,10 @@ default, while `request_in_flight`, `request_duration_ms`, and phase histograms
 are opt-in. The stress server's default OTel build prints a compact console
 snapshot every 5 seconds.
 
+Core request duration metrics are also opt-in through `NacelleTelemetryConfig`.
+With the default config, core/HTTP request paths avoid request timer work unless
+HTTP access logging is enabled.
+
 Run microbenchmarks before and after hot-path changes:
 
 ```bash

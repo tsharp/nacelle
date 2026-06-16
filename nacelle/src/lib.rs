@@ -95,9 +95,9 @@ pub use nacelle_core::{
     NacelleConnectionExtension, NacelleConnectionExtensionFactory, NacelleConnectionMeta,
     NacelleConnectionTlsMeta, NacelleError, NacelleInMemoryTelemetrySink, NacelleLimits,
     NacelleRequest, NacelleRequestMeta, NacelleResponse, NacelleResponseMeta, NacelleRuntimeState,
-    NacelleShutdown, NacelleShutdownToken, NacelleTelemetry, NacelleTelemetryEvent,
-    NacelleTelemetryEventKind, NacelleTelemetrySink, NacelleTransport, RequestBodyMode,
-    RequestMetadata, TcpRequestMeta, TcpResponseMeta, TrackedPermit, handler_fn,
+    NacelleShutdown, NacelleShutdownToken, NacelleTelemetry, NacelleTelemetryConfig,
+    NacelleTelemetryEvent, NacelleTelemetryEventKind, NacelleTelemetrySink, NacelleTransport,
+    RequestBodyMode, RequestMetadata, TcpRequestMeta, TcpResponseMeta, TrackedPermit, handler_fn,
 };
 #[cfg(feature = "http")]
 pub use nacelle_core::{HttpRequestMeta, HttpResponseMeta};

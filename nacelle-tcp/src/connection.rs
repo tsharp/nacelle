@@ -612,8 +612,11 @@ where
     let tcp_metrics = tcp_telemetry.metrics_enabled();
     let tcp_request_metrics = tcp_telemetry.request_metrics_enabled();
     let core_request_events = telemetry.request_events_enabled() && !tcp_request_metrics;
-    let request_started = (core_request_events || tcp_telemetry.request_duration_metrics_enabled())
-        .then(Instant::now);
+    let core_request_duration_metrics =
+        core_request_events && telemetry.request_duration_metrics_enabled();
+    let request_started = (core_request_duration_metrics
+        || tcp_telemetry.request_duration_metrics_enabled())
+    .then(Instant::now);
     let metrics_context = tcp_metrics.then(|| tcp_metrics_context(protocol, connection));
     let request_bytes = 4 + 20 + decoded.body_len;
     let response_context = protocol.response_context(&request);

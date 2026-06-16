@@ -37,6 +37,8 @@ The default stress server build also prints a compact OTel console snapshot ever
 5 seconds. TCP request metrics are grouped under the telemetry
 `request_metrics` config; request started/completed counters and wire-byte
 counters are on by default, while in-flight and duration metrics remain opt-in.
+Core request duration metrics are opt-in as well, which avoids request `Instant`
+work on core/HTTP paths unless duration metrics or HTTP access logs are enabled.
 Use `--no-wire-byte-metrics` when comparing the cost of wire-byte accounting,
 and use `--no-default-features` with the plain TCP config for a metrics-free
 baseline.

@@ -471,7 +471,7 @@ where
         request: Request<Incoming>,
         peer_ip: Option<IpAddr>,
     ) -> Result<Response<HttpBody>, NacelleError> {
-        let request_started = std::time::Instant::now();
+        let request_started = self.request_timing_enabled().then(Instant::now);
         let method = request.method().clone();
         let uri = request.uri().clone();
         let effective_peer_ip = self.effective_peer_ip(peer_ip, &request);
@@ -484,7 +484,7 @@ where
                 peer_ip: effective_peer_ip,
                 status: rejection.status,
                 request_bytes: 0,
-                elapsed: request_started.elapsed(),
+                elapsed: elapsed_since(request_started),
                 reason: Some(rejection.reason),
             });
             return response_to_http(
@@ -505,7 +505,7 @@ where
                 peer_ip: effective_peer_ip,
                 status: StatusCode::TOO_MANY_REQUESTS,
                 request_bytes: 0,
-                elapsed: request_started.elapsed(),
+                elapsed: elapsed_since(request_started),
                 reason: Some("peer_rate"),
             });
             return response_to_http(
@@ -520,7 +520,7 @@ where
             Err(error) => {
                 self.telemetry.request_failed(
                     NacelleTransport::Http,
-                    request_started.elapsed(),
+                    elapsed_since(request_started),
                     &error,
                 );
                 self.access_log(HttpAccessLog {
@@ -529,7 +529,7 @@ where
                     peer_ip: effective_peer_ip,
                     status: StatusCode::SERVICE_UNAVAILABLE,
                     request_bytes: 0,
-                    elapsed: request_started.elapsed(),
+                    elapsed: elapsed_since(request_started),
                     reason: Some("in_flight_requests"),
                 });
                 return response_to_http(
@@ -589,7 +589,7 @@ where
                         peer_ip: effective_peer_ip,
                         status: response.status(),
                         request_bytes,
-                        elapsed: request_started.elapsed(),
+                        elapsed: elapsed_since(request_started),
                         reason: None,
                     });
                 }
@@ -597,14 +597,14 @@ where
                     NacelleTransport::Http,
                     request_bytes,
                     0,
-                    request_started.elapsed(),
+                    elapsed_since(request_started),
                 );
                 response
             }
             Err(error) => {
                 self.telemetry.request_failed(
                     NacelleTransport::Http,
-                    request_started.elapsed(),
+                    elapsed_since(request_started),
                     &error,
                 );
                 let request_bytes = request_body_bytes.load(Ordering::Relaxed);
@@ -624,7 +624,7 @@ where
                         peer_ip: effective_peer_ip,
                         status: response.status(),
                         request_bytes,
-                        elapsed: request_started.elapsed(),
+                        elapsed: elapsed_since(request_started),
                         reason: Some("handler"),
                     });
                 }
@@ -632,11 +632,15 @@ where
                     NacelleTransport::Http,
                     request_bytes,
                     0,
-                    request_started.elapsed(),
+                    elapsed_since(request_started),
                 );
                 response
             }
         }
+    }
+
+    fn request_timing_enabled(&self) -> bool {
+        self.access_log_enabled || self.telemetry.request_duration_metrics_enabled()
     }
 
     fn allow_peer_request(&self, peer_ip: IpAddr) -> bool {
@@ -708,6 +712,10 @@ struct HttpAccessLog<'a> {
     request_bytes: usize,
     elapsed: Duration,
     reason: Option<&'static str>,
+}
+
+fn elapsed_since(started: Option<Instant>) -> Duration {
+    started.map_or(Duration::ZERO, |started| started.elapsed())
 }
 
 fn incoming_to_body(
