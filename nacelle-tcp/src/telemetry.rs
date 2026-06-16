@@ -8,6 +8,11 @@ use nacelle_core::telemetry::NacelleTransport;
 pub struct NacelleTcpTelemetryConfig {
     pub metrics: bool,
     pub opcode_labels: bool,
+    pub request_start_metrics: bool,
+    pub request_duration_metrics: bool,
+    pub request_byte_metrics: bool,
+    pub active_request_metrics: bool,
+    pub phase_duration_metrics: bool,
 }
 
 impl Default for NacelleTcpTelemetryConfig {
@@ -15,6 +20,11 @@ impl Default for NacelleTcpTelemetryConfig {
         Self {
             metrics: true,
             opcode_labels: false,
+            request_start_metrics: false,
+            request_duration_metrics: false,
+            request_byte_metrics: false,
+            active_request_metrics: false,
+            phase_duration_metrics: false,
         }
     }
 }
@@ -26,6 +36,14 @@ pub struct NacelleTcpMetricsContext {
     pub protocol: &'static str,
     pub tls: &'static str,
     pub opcode: Option<u64>,
+    #[cfg(feature = "otel")]
+    connection_attributes: Arc<[opentelemetry::KeyValue]>,
+    #[cfg(feature = "otel")]
+    request_attributes: Arc<[opentelemetry::KeyValue]>,
+    #[cfg(feature = "otel")]
+    request_ok_attributes: Arc<[opentelemetry::KeyValue]>,
+    #[cfg(feature = "otel")]
+    request_error_attributes: Arc<[opentelemetry::KeyValue]>,
 }
 
 impl NacelleTcpMetricsContext {
@@ -36,12 +54,70 @@ impl NacelleTcpMetricsContext {
         tls: &'static str,
         opcode: Option<u64>,
     ) -> Self {
+        Self::with_opcode_labels(transport, listener, protocol, tls, opcode, false)
+    }
+
+    pub(crate) fn with_opcode_labels(
+        transport: NacelleTransport,
+        listener: Arc<str>,
+        protocol: &'static str,
+        tls: &'static str,
+        opcode: Option<u64>,
+        include_opcode: bool,
+    ) -> Self {
+        #[cfg(feature = "otel")]
+        let connection_attributes = tcp_connection_attributes(transport, &listener, tls);
+        #[cfg(feature = "otel")]
+        let request_attributes = tcp_request_attributes(
+            connection_attributes.as_ref(),
+            protocol,
+            opcode,
+            include_opcode,
+        );
+        #[cfg(feature = "otel")]
+        let request_ok_attributes = attributes_with_key_value(
+            request_attributes.as_ref(),
+            opentelemetry::KeyValue::new("status", "ok"),
+        );
+        #[cfg(feature = "otel")]
+        let request_error_attributes = attributes_with_key_value(
+            request_attributes.as_ref(),
+            opentelemetry::KeyValue::new("status", "error"),
+        );
+
         Self {
             transport,
             listener,
             protocol,
             tls,
             opcode,
+            #[cfg(feature = "otel")]
+            connection_attributes,
+            #[cfg(feature = "otel")]
+            request_attributes,
+            #[cfg(feature = "otel")]
+            request_ok_attributes,
+            #[cfg(feature = "otel")]
+            request_error_attributes,
+        }
+    }
+
+    #[cfg(feature = "otel")]
+    fn connection_attributes(&self) -> &[opentelemetry::KeyValue] {
+        &self.connection_attributes
+    }
+
+    #[cfg(feature = "otel")]
+    fn request_attributes(&self) -> &[opentelemetry::KeyValue] {
+        &self.request_attributes
+    }
+
+    #[cfg(feature = "otel")]
+    fn request_status_attributes(&self, status: &'static str) -> &[opentelemetry::KeyValue] {
+        match status {
+            "ok" => &self.request_ok_attributes,
+            "error" => &self.request_error_attributes,
+            _ => &self.request_attributes,
         }
     }
 }
@@ -91,12 +167,49 @@ impl NacelleTcpTelemetry {
         self
     }
 
+    pub fn with_request_start_metrics(mut self, enabled: bool) -> Self {
+        self.config.request_start_metrics = enabled;
+        self
+    }
+
+    pub fn with_request_duration_metrics(mut self, enabled: bool) -> Self {
+        self.config.request_duration_metrics = enabled;
+        self
+    }
+
+    pub fn with_request_byte_metrics(mut self, enabled: bool) -> Self {
+        self.config.request_byte_metrics = enabled;
+        self
+    }
+
+    pub fn with_active_request_metrics(mut self, enabled: bool) -> Self {
+        self.config.active_request_metrics = enabled;
+        self
+    }
+
+    pub fn with_phase_duration_metrics(mut self, enabled: bool) -> Self {
+        self.config.phase_duration_metrics = enabled;
+        self
+    }
+
     pub fn config(&self) -> NacelleTcpTelemetryConfig {
         self.config
     }
 
     pub fn metrics_enabled(&self) -> bool {
         cfg!(feature = "otel") && self.config.metrics
+    }
+
+    pub fn request_metrics_enabled(&self) -> bool {
+        self.metrics_enabled()
+    }
+
+    pub fn request_duration_metrics_enabled(&self) -> bool {
+        self.metrics_enabled() && self.config.request_duration_metrics
+    }
+
+    pub fn phase_duration_metrics_enabled(&self) -> bool {
+        self.metrics_enabled() && self.config.phase_duration_metrics
     }
 
     pub fn connection_accepted(&self, context: &NacelleTcpMetricsContext) {
@@ -106,9 +219,9 @@ impl NacelleTcpTelemetry {
         }
         #[cfg(feature = "otel")]
         {
-            let attributes = tcp_connection_attributes(context);
-            self.metrics.connection_accepted.add(1, &attributes);
-            self.metrics.connection_active.add(1, &attributes);
+            let attributes = context.connection_attributes();
+            self.metrics.connection_accepted.add(1, attributes);
+            self.metrics.connection_active.add(1, attributes);
         }
     }
 
@@ -123,11 +236,12 @@ impl NacelleTcpTelemetry {
         }
         #[cfg(feature = "otel")]
         {
-            let mut attributes = tcp_connection_attributes(context);
+            let mut attributes = context.connection_attributes().to_vec();
             attributes.push(opentelemetry::KeyValue::new("close_reason", close_reason));
             self.metrics.connection_closed.add(1, &attributes);
-            let active_attributes = tcp_connection_attributes(context);
-            self.metrics.connection_active.add(-1, &active_attributes);
+            self.metrics
+                .connection_active
+                .add(-1, context.connection_attributes());
         }
     }
 
@@ -138,9 +252,16 @@ impl NacelleTcpTelemetry {
         }
         #[cfg(feature = "otel")]
         {
-            let attributes = tcp_request_attributes(context, self.config.opcode_labels);
-            self.metrics.request_started.add(1, &attributes);
-            self.metrics.request_in_flight.add(1, &attributes);
+            if !self.config.request_start_metrics && !self.config.active_request_metrics {
+                return;
+            }
+            let attributes = context.request_attributes();
+            if self.config.request_start_metrics {
+                self.metrics.request_started.add(1, attributes);
+            }
+            if self.config.active_request_metrics {
+                self.metrics.request_in_flight.add(1, attributes);
+            }
         }
     }
 
@@ -158,38 +279,41 @@ impl NacelleTcpTelemetry {
         }
         #[cfg(feature = "otel")]
         {
-            let mut attributes = tcp_request_attributes(context, self.config.opcode_labels);
-            attributes.push(opentelemetry::KeyValue::new("status", status));
-            self.metrics.request_completed.add(1, &attributes);
-            self.metrics
-                .request_duration_ms
-                .record(elapsed.as_secs_f64() * 1_000.0, &attributes);
-            if request_bytes != 0 {
+            let attributes = context.request_status_attributes(status);
+            self.metrics.request_completed.add(1, attributes);
+            if self.config.request_duration_metrics {
+                self.metrics
+                    .request_duration_ms
+                    .record(elapsed.as_secs_f64() * 1_000.0, attributes);
+            }
+            if self.config.request_byte_metrics && request_bytes != 0 {
                 self.metrics
                     .request_bytes
-                    .add(request_bytes as u64, &attributes);
+                    .add(request_bytes as u64, attributes);
             }
-            if response_bytes != 0 {
+            if self.config.request_byte_metrics && response_bytes != 0 {
                 self.metrics
                     .response_bytes
-                    .add(response_bytes as u64, &attributes);
+                    .add(response_bytes as u64, attributes);
             }
 
-            let active_attributes = tcp_request_attributes(context, self.config.opcode_labels);
-            self.metrics.request_in_flight.add(-1, &active_attributes);
+            if self.config.active_request_metrics {
+                self.metrics
+                    .request_in_flight
+                    .add(-1, context.request_attributes());
+            }
         }
     }
 
     pub fn request_body_bytes(&self, context: &NacelleTcpMetricsContext, bytes: usize) {
         let _ = context;
-        if bytes == 0 || !self.metrics_enabled() {
+        if bytes == 0 || !self.metrics_enabled() || !self.config.request_byte_metrics {
             return;
         }
         #[cfg(feature = "otel")]
-        self.metrics.request_body_bytes.add(
-            bytes as u64,
-            &tcp_request_attributes(context, self.config.opcode_labels),
-        );
+        self.metrics
+            .request_body_bytes
+            .add(bytes as u64, context.request_attributes());
     }
 
     pub fn phase_duration(
@@ -199,7 +323,7 @@ impl NacelleTcpTelemetry {
         elapsed: Duration,
     ) {
         let _ = (context, phase, elapsed);
-        if !self.metrics_enabled() {
+        if !self.phase_duration_metrics_enabled() {
             return;
         }
         #[cfg(feature = "otel")]
@@ -226,7 +350,7 @@ impl NacelleTcpTelemetry {
                 &tcp_error_attributes(context, phase, error, self.config.opcode_labels),
             );
             if let NacelleError::ResourceLimit(limit) = error {
-                let mut attributes = tcp_request_attributes(context, self.config.opcode_labels);
+                let mut attributes = context.request_attributes().to_vec();
                 attributes.push(opentelemetry::KeyValue::new("limit", *limit));
                 attributes.push(opentelemetry::KeyValue::new("phase", phase));
                 self.metrics.resource_limit_rejections.add(1, &attributes);
@@ -236,25 +360,44 @@ impl NacelleTcpTelemetry {
 }
 
 #[cfg(feature = "otel")]
-fn tcp_connection_attributes(context: &NacelleTcpMetricsContext) -> Vec<opentelemetry::KeyValue> {
-    vec![
-        opentelemetry::KeyValue::new("listener", context.listener.as_ref().to_owned()),
-        opentelemetry::KeyValue::new("transport", context.transport.as_str()),
-        opentelemetry::KeyValue::new("tls", context.tls),
-    ]
+fn tcp_connection_attributes(
+    transport: NacelleTransport,
+    listener: &Arc<str>,
+    tls: &'static str,
+) -> Arc<[opentelemetry::KeyValue]> {
+    Arc::from(
+        vec![
+            opentelemetry::KeyValue::new("listener", listener.as_ref().to_owned()),
+            opentelemetry::KeyValue::new("transport", transport.as_str()),
+            opentelemetry::KeyValue::new("tls", tls),
+        ]
+        .into_boxed_slice(),
+    )
 }
 
 #[cfg(feature = "otel")]
 fn tcp_request_attributes(
-    context: &NacelleTcpMetricsContext,
+    connection_attributes: &[opentelemetry::KeyValue],
+    protocol: &'static str,
+    opcode: Option<u64>,
     include_opcode: bool,
-) -> Vec<opentelemetry::KeyValue> {
-    let mut attributes = tcp_connection_attributes(context);
-    attributes.push(opentelemetry::KeyValue::new("protocol", context.protocol));
-    if include_opcode && let Some(opcode) = context.opcode {
+) -> Arc<[opentelemetry::KeyValue]> {
+    let mut attributes = connection_attributes.to_vec();
+    attributes.push(opentelemetry::KeyValue::new("protocol", protocol));
+    if include_opcode && let Some(opcode) = opcode {
         attributes.push(opentelemetry::KeyValue::new("opcode", opcode.to_string()));
     }
-    attributes
+    Arc::from(attributes.into_boxed_slice())
+}
+
+#[cfg(feature = "otel")]
+fn attributes_with_key_value(
+    attributes: &[opentelemetry::KeyValue],
+    key_value: opentelemetry::KeyValue,
+) -> Arc<[opentelemetry::KeyValue]> {
+    let mut attributes = attributes.to_vec();
+    attributes.push(key_value);
+    Arc::from(attributes.into_boxed_slice())
 }
 
 #[cfg(feature = "otel")]
@@ -263,7 +406,13 @@ fn tcp_phase_attributes(
     phase: &'static str,
     include_opcode: bool,
 ) -> Vec<opentelemetry::KeyValue> {
-    let mut attributes = tcp_request_attributes(context, include_opcode);
+    let mut attributes = tcp_request_attributes(
+        context.connection_attributes(),
+        context.protocol,
+        context.opcode,
+        include_opcode,
+    )
+    .to_vec();
     attributes.push(opentelemetry::KeyValue::new("phase", phase));
     attributes
 }
@@ -355,14 +504,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn telemetry_config_keeps_opcode_labels_opt_in() {
+    fn telemetry_config_keeps_expensive_metrics_opt_in() {
         let telemetry = NacelleTcpTelemetry::default();
 
         assert!(telemetry.config().metrics);
         assert!(!telemetry.config().opcode_labels);
+        assert!(!telemetry.config().request_start_metrics);
+        assert!(!telemetry.config().request_duration_metrics);
+        assert!(!telemetry.config().request_byte_metrics);
+        assert!(!telemetry.config().active_request_metrics);
+        assert!(!telemetry.config().phase_duration_metrics);
 
-        let telemetry = telemetry.with_opcode_labels(true);
+        let telemetry = telemetry
+            .with_opcode_labels(true)
+            .with_request_start_metrics(true)
+            .with_request_duration_metrics(true)
+            .with_request_byte_metrics(true)
+            .with_active_request_metrics(true)
+            .with_phase_duration_metrics(true);
 
         assert!(telemetry.config().opcode_labels);
+        assert!(telemetry.config().request_start_metrics);
+        assert!(telemetry.config().request_duration_metrics);
+        assert!(telemetry.config().request_byte_metrics);
+        assert!(telemetry.config().active_request_metrics);
+        assert!(telemetry.config().phase_duration_metrics);
     }
 }

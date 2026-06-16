@@ -106,7 +106,7 @@ cargo run --features reference_protocol,http --example dual_echo -- 127.0.0.1:80
 | `openssl` | OpenSSL-backed TLS for TCP. |
 | `openssl-vendored` | Build OpenSSL from source when native OpenSSL is unavailable. |
 | `tls-self-signed` | Generate ephemeral Rustls self-signed certificates for local tests. |
-| `otel` | OpenTelemetry metrics API integration, including TCP lifecycle and phase metrics. |
+| `otel` | OpenTelemetry metrics API integration, with low-overhead TCP lifecycle/request metrics by default. |
 | `tokio-util` | Bridge `tokio_util::sync::CancellationToken` into Nacelle shutdown. |
 | `tower` | Adapt `tower::Service<NacelleRequest>` into a Nacelle handler. |
 

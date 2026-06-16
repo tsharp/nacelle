@@ -109,7 +109,7 @@ where
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     let mut write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
     let transport = connection.transport;
-    let connection_metrics = tcp_metrics_context(protocol.as_ref(), &connection, None);
+    let connection_metrics = tcp_metrics_context(protocol.as_ref(), &connection, None, false);
     tcp_telemetry.connection_accepted(&connection_metrics);
     telemetry.connection_opened(transport);
 
@@ -294,7 +294,7 @@ where
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     let mut write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
     let transport = connection.transport;
-    let connection_metrics = tcp_metrics_context(protocol.as_ref(), &connection, None);
+    let connection_metrics = tcp_metrics_context(protocol.as_ref(), &connection, None, false);
     tcp_telemetry.connection_accepted(&connection_metrics);
     telemetry.connection_opened(transport);
 
@@ -483,7 +483,7 @@ where
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     let mut write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
     let transport = connection.transport;
-    let connection_metrics = tcp_metrics_context(protocol.as_ref(), &connection, None);
+    let connection_metrics = tcp_metrics_context(protocol.as_ref(), &connection, None, false);
     tcp_telemetry.connection_accepted(&connection_metrics);
     telemetry.connection_opened(transport);
 
@@ -609,11 +609,17 @@ where
     R: AsyncRead + Unpin + Send,
 {
     let request = decoded.request;
-    let core_request_events = telemetry.request_events_enabled();
-    let tcp_request_metrics = tcp_telemetry.metrics_enabled();
+    let tcp_request_metrics = tcp_telemetry.request_metrics_enabled();
+    let core_request_events = telemetry.request_events_enabled() && !tcp_request_metrics;
     let request_started = (core_request_events || tcp_request_metrics).then(Instant::now);
-    let metrics_context = tcp_request_metrics
-        .then(|| tcp_metrics_context(protocol, connection, Some(request.opcode())));
+    let metrics_context = tcp_request_metrics.then(|| {
+        tcp_metrics_context(
+            protocol,
+            connection,
+            Some(request.opcode()),
+            tcp_telemetry.config().opcode_labels,
+        )
+    });
     let request_bytes = 4 + 20 + decoded.body_len;
     let response_context = protocol.response_context(&request);
     let max_request_body_bytes =
@@ -1139,23 +1145,25 @@ fn tcp_metrics_context<Req, P>(
     protocol: &P,
     connection: &NacelleConnectionMeta,
     opcode: Option<u64>,
+    include_opcode: bool,
 ) -> NacelleTcpMetricsContext
 where
     Req: RequestMetadata,
     P: Protocol<Req> + Send + Sync + 'static,
 {
-    NacelleTcpMetricsContext::new(
+    NacelleTcpMetricsContext::with_opcode_labels(
         connection.transport,
         connection.listener.clone(),
         protocol.name(),
         connection.tls_label(),
         opcode,
+        include_opcode,
     )
 }
 
 fn start_tcp_phase(tcp_telemetry: &NacelleTcpTelemetry) -> Option<std::time::Instant> {
     tcp_telemetry
-        .metrics_enabled()
+        .phase_duration_metrics_enabled()
         .then(std::time::Instant::now)
 }
 

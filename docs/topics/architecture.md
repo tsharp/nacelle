@@ -93,9 +93,9 @@ With `otel`, active gauges are observable instruments backed by runtime-state
 atomics, so collection reads current values without per-request metric writes.
 Core telemetry owns shared lifecycle and request events. The TCP transport owns
 its TCP-specific metrics in `nacelle-tcp`: listener/protocol/TLS-labeled
-lifecycle counters, request counters, byte counters, error/rejection counters,
-and phase duration histograms for decode, request body read, handler execution,
-response encode, socket read, and socket write. Opcode labels are disabled by
-default and can be enabled with
-`NacelleTcpTelemetry::default().with_opcode_labels(true)` on the TCP server or
-app when the protocol has a bounded opcode space.
+lifecycle counters, request counters, request duration histograms, and
+error/rejection counters. Higher-frequency byte counters, active per-request
+gauges, phase duration histograms, and opcode labels are disabled by default.
+Enable them deliberately with `NacelleTcpTelemetry::default()` builder methods
+on the TCP server or app when you need diagnostic detail and can afford the
+extra per-request metric writes.
