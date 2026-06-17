@@ -193,6 +193,9 @@ where
                     &runtime_state,
                     &tcp_limits,
                     &connection,
+                    tcp_telemetry
+                        .metrics_enabled()
+                        .then_some(&connection_metrics),
                 )
                 .await?;
             }
@@ -506,6 +509,9 @@ where
                     &runtime_state,
                     &tcp_limits,
                     &connection,
+                    tcp_telemetry
+                        .metrics_enabled()
+                        .then_some(&connection_metrics),
                 )
                 .await?;
             }
