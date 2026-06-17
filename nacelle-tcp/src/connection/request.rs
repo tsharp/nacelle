@@ -16,9 +16,11 @@ use nacelle_core::response::NacelleResponse;
 use nacelle_core::telemetry::NacelleTelemetry;
 
 use super::body::{buffered_request_body, pump_request_body, read_buffered_request_body};
+use crate::telemetry::NacelleTcpMetricsContext;
+
 use super::metrics::{
     TcpRequestMetricsGuard, finish_tcp_phase, record_core_request_completed,
-    record_core_request_failed, record_tcp_error, start_tcp_phase, tcp_metrics_context,
+    record_core_request_failed, record_tcp_error, start_tcp_phase,
 };
 use super::response::{encode_response_body, write_error};
 
@@ -37,6 +39,7 @@ pub(super) async fn run_request<Req, P, H, R>(
     runtime_state: &NacelleRuntimeState,
     tcp_limits: &NacelleTcpLimits,
     connection: &NacelleConnectionMeta,
+    metrics_context: Option<&NacelleTcpMetricsContext>,
 ) -> Result<(), NacelleError>
 where
     Req: RequestMetadata + Send + 'static,
@@ -45,7 +48,6 @@ where
     R: AsyncRead + Unpin + Send,
 {
     let request = decoded.request;
-    let tcp_metrics = tcp_telemetry.metrics_enabled();
     let tcp_request_metrics = tcp_telemetry.request_metrics_enabled();
     let core_request_events = telemetry.request_events_enabled() && !tcp_request_metrics;
     let core_request_duration_metrics =
@@ -53,19 +55,13 @@ where
     let request_started = (core_request_duration_metrics
         || tcp_telemetry.request_duration_metrics_enabled())
     .then(std::time::Instant::now);
-    let metrics_context = tcp_metrics.then(|| tcp_metrics_context(protocol, connection));
     let request_bytes = 4 + 20 + decoded.body_len;
     let response_context = protocol.response_context(&request);
     let max_request_body_bytes =
         request.max_body_bytes(connection, runtime_state.limits().max_request_body_bytes);
     if decoded.body_len > max_request_body_bytes {
         let error = NacelleError::ResourceLimit("request_body_bytes");
-        record_tcp_error(
-            tcp_telemetry,
-            metrics_context.as_ref(),
-            "request_body_limit",
-            &error,
-        );
+        record_tcp_error(tcp_telemetry, metrics_context, "request_body_limit", &error);
         record_core_request_failed(
             telemetry,
             core_request_events,
@@ -85,18 +81,13 @@ where
     let _request_permit = match runtime_state.acquire_request_tracked() {
         Ok(permit) => permit,
         Err(error) => {
-            record_tcp_error(
-                tcp_telemetry,
-                metrics_context.as_ref(),
-                "request_permit",
-                &error,
-            );
+            record_tcp_error(tcp_telemetry, metrics_context, "request_permit", &error);
             return Err(error);
         }
     };
     let mut request_metrics = TcpRequestMetricsGuard::new(
         tcp_telemetry,
-        metrics_context.clone(),
+        metrics_context.cloned(),
         request_bytes,
         request_started,
     );
@@ -106,7 +97,7 @@ where
             buffered_request_body(read_buf, decoded.body_len, config.request_body_chunk_size);
         finish_tcp_phase(
             tcp_telemetry,
-            metrics_context.as_ref(),
+            metrics_context,
             "request_body_read",
             body_started,
         );
@@ -118,7 +109,7 @@ where
             runtime_state,
             connection,
             tcp_telemetry,
-            metrics_context.as_ref(),
+            metrics_context,
         )
         .await
     } else if config.request_body_mode == RequestBodyMode::Buffered {
@@ -132,16 +123,11 @@ where
         )
         .await
         .inspect_err(|error| {
-            record_tcp_error(
-                tcp_telemetry,
-                metrics_context.as_ref(),
-                "request_body_read",
-                error,
-            )
+            record_tcp_error(tcp_telemetry, metrics_context, "request_body_read", error)
         })?;
         finish_tcp_phase(
             tcp_telemetry,
-            metrics_context.as_ref(),
+            metrics_context,
             "request_body_read",
             body_started,
         );
@@ -153,7 +139,7 @@ where
             runtime_state,
             connection,
             tcp_telemetry,
-            metrics_context.as_ref(),
+            metrics_context,
         )
         .await
     } else {
@@ -161,22 +147,12 @@ where
             runtime_state
                 .acquire_streaming_task_tracked()
                 .inspect_err(|error| {
-                    record_tcp_error(
-                        tcp_telemetry,
-                        metrics_context.as_ref(),
-                        "streaming_task",
-                        error,
-                    )
+                    record_tcp_error(tcp_telemetry, metrics_context, "streaming_task", error)
                 })?;
         let _streaming_body_reservation = runtime_state
             .reserve_memory(decoded.body_len)
             .inspect_err(|error| {
-                record_tcp_error(
-                    tcp_telemetry,
-                    metrics_context.as_ref(),
-                    "streaming_memory",
-                    error,
-                )
+                record_tcp_error(tcp_telemetry, metrics_context, "streaming_memory", error)
             })?;
         let (body_tx, body_rx) = mpsc::channel(config.request_body_channel_capacity);
         let body = NacelleBody::new(body_rx, decoded.body_len);
@@ -185,7 +161,7 @@ where
         let tcp_limits = *tcp_limits;
         let connection = connection.clone();
         let handler_tcp_telemetry = tcp_telemetry.clone();
-        let handler_metrics_context = metrics_context.clone();
+        let handler_metrics_context = metrics_context.cloned();
         let handler_task = nacelle_core::runtime::spawn(async move {
             execute_handler_with_metrics(
                 &h,
@@ -212,29 +188,19 @@ where
         .await;
         finish_tcp_phase(
             tcp_telemetry,
-            metrics_context.as_ref(),
+            metrics_context,
             "request_body_read",
             body_started,
         );
         if let Err(error) = &pump_result {
-            record_tcp_error(
-                tcp_telemetry,
-                metrics_context.as_ref(),
-                "request_body_read",
-                error,
-            );
+            record_tcp_error(tcp_telemetry, metrics_context, "request_body_read", error);
         }
         drop(body_tx);
         let outcome = match handler_task.await {
             Ok(outcome) => outcome?,
             Err(error) => {
                 let error = NacelleError::from(error);
-                record_tcp_error(
-                    tcp_telemetry,
-                    metrics_context.as_ref(),
-                    "handler_join",
-                    &error,
-                );
+                record_tcp_error(tcp_telemetry, metrics_context, "handler_join", &error);
                 return Err(error);
             }
         };
@@ -256,17 +222,12 @@ where
             .await;
             finish_tcp_phase(
                 tcp_telemetry,
-                metrics_context.as_ref(),
+                metrics_context,
                 "response_encode",
                 encode_started,
             );
             if let Err(error) = encode_result {
-                record_tcp_error(
-                    tcp_telemetry,
-                    metrics_context.as_ref(),
-                    "response_encode",
-                    &error,
-                );
+                record_tcp_error(tcp_telemetry, metrics_context, "response_encode", &error);
                 return Err(error);
             }
             let response_bytes = write_buf.len().saturating_sub(prev_response_len);
@@ -282,7 +243,7 @@ where
         }
         Err(error) => {
             let prev_response_len = write_buf.len();
-            record_tcp_error(tcp_telemetry, metrics_context.as_ref(), "handler", &error);
+            record_tcp_error(tcp_telemetry, metrics_context, "handler", &error);
             record_core_request_failed(
                 telemetry,
                 core_request_events,
