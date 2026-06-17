@@ -163,7 +163,7 @@ where
     P: Protocol<Req> + Send + Sync + 'static,
     H: Handler,
 {
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = bind_tcp_listener(addr, &NacelleTcpBindOptions::default())?;
     serve_tcp_listener_with_options_and_shutdown_deadline(
         server,
         listener,
@@ -187,7 +187,8 @@ where
     P: Protocol<Req> + Send + Sync + 'static,
     H: Handler,
 {
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let bind_options = NacelleTcpBindOptions::from(tcp_options.clone());
+    let listener = bind_tcp_listener(addr, &bind_options)?;
     serve_tcp_listener_with_options_and_shutdown_deadline(
         server,
         listener,

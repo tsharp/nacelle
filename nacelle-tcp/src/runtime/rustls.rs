@@ -12,7 +12,7 @@ use nacelle_core::telemetry::{NacelleTelemetryEventKind, NacelleTransport};
 use nacelle_core::tls::NacelleTlsConfig;
 
 use super::common::{
-    connection_rejection_reason, drain_connection_tasks, log_connection_result,
+    bind_tcp_listener, connection_rejection_reason, drain_connection_tasks, log_connection_result,
     record_connection_rejection,
 };
 
@@ -80,7 +80,7 @@ where
     P: Protocol<Req> + Send + Sync + 'static,
     H: Handler,
 {
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = bind_tcp_listener(addr, &Default::default())?;
     serve_tcp_tls_listener_with_shutdown_deadline(
         server,
         listener,

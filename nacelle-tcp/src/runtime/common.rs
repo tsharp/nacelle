@@ -20,6 +20,7 @@ pub(super) fn bind_tcp_listener(
         socket2::Domain::IPV6
     };
     let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
     if addr.is_ipv6()
         && let Some(ipv6_only) = bind_options.ipv6_only
     {
