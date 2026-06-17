@@ -13,6 +13,7 @@ Make small, validated changes that respect the repository's conventions, ownersh
 - Read surrounding code, tests, manifests, configs, docs, CI, and existing plans before editing.
 - Use `project-planning` first for broad, risky, architectural, release, readiness, migration, or multi-session work.
 - Infer module, package, crate, service, layer, and public/private boundaries from the codebase; keep changes inside the smallest fitting boundary.
+- Keep implementation files focused and reviewable. Prefer 200-600 line source files for active implementation modules; split files that exceed 600 lines unless there is a clear, documented reason to keep the boundary intact. Small facade, type-only, or config modules may be shorter.
 - Preserve public APIs, schemas, config defaults, persisted data formats, and user-facing behavior unless the request requires changing them.
 - Let the project's package manager update lockfiles only when dependencies change.
 - Protect performance-sensitive paths by default; add measurement, feature gates, batching, caching, or opt-in controls when new work could add steady-state overhead.
