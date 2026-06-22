@@ -1,0 +1,76 @@
+# Compare performance profiles
+
+Use separate profiles for each transport mode:
+
+- plain TCP
+- TCP with low-memory allocator behavior
+- TCP with TLS
+- HTTP
+
+Do not compare TLS and non-TLS runs as if they measure the same path. Likewise,
+do not compare two runs if the stress client version changed.
+
+Recommended plain TCP baseline config:
+
+```text
+examples/nacelle-stress-server/configs/tcp.toml
+```
+
+Then run:
+
+```bash
+./examples/run-stress-test.sh --config examples/nacelle-stress-server/configs/tcp.toml --connections 256 --pipeline 8 --duration-secs 30 --payload-bytes 256
+```
+
+More background:
+
+The current `main` branch has been observed around 1.9M RPS on Linux for the TCP benchmark path. This branch should be compared against that baseline on the same host, kernel, CPU governor, allocator settings, and command line.
+
+Suggested local benchmark:
+
+```bash
+cargo bench -p nacelle --features bench,reference_protocol
+```
+
+The `runtime_limits` benchmark group covers connection/request permit
+acquire/drop and memory reservation overhead. Watch it closely after changes to
+`NacelleRuntimeState`.
+
+Suggested RPS comparison:
+
+```bash
+./examples/run-stress-test.sh --config examples/nacelle-stress-server/configs/tcp.toml --server-threads 48 --connections 256 --pipeline 8 --duration-secs 30 --payload-bytes 256
+```
+
+The default stress server build also prints a compact OTel console snapshot every
+5 seconds. TCP request metrics are grouped under the telemetry
+`request_metrics` config; request started/completed counters and wire-byte
+counters are on by default, while in-flight and duration metrics remain opt-in.
+Core request duration metrics are opt-in as well, which avoids request `Instant`
+work on core/HTTP paths unless duration metrics or HTTP access logs are enabled.
+Use `--no-wire-byte-metrics` when comparing the cost of wire-byte accounting,
+and use `--no-default-features` with the plain TCP config for a metrics-free
+baseline.
+
+The checked-in root `config.toml` enables self-signed TCP TLS for local
+stress runs. For the plain TCP throughput baseline, use
+`examples/nacelle-stress-server/configs/tcp.toml`. Compare TLS and non-TLS runs
+separately:
+
+```bash
+./examples/run-stress-test.sh --config examples/nacelle-stress-server/configs/tcp.toml
+./examples/run-stress-test.sh --config examples/nacelle-stress-server/configs/tcp-low-memory.toml
+./examples/run-stress-test.sh --config examples/nacelle-stress-server/configs/tcp-tls.toml
+```
+
+The `examples/run-stress-test.sh` and `examples/run-stress-test.ps1` helpers
+apply root `config.toml` first, then the selected profile, and choose the
+matching client mode automatically.
+
+Guardrails:
+
+- keep shutdown task tracking at the connection/listener boundary
+- avoid per-request locks in the TCP hot path
+- keep telemetry sinks optional; default operation should not push into in-memory sinks
+- preserve single-chunk body fast paths
+- tune TCP buffer sizes for the connection count instead of relying on large defaults

@@ -1,0 +1,32 @@
+[package]
+name = "nacelle-tcp"
+version = "0.1.0"
+edition = "2024"
+description = "TCP transport and protocol runtime for Nacelle streaming handlers."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../README.md"
+keywords = ["networking", "tokio", "tcp"]
+categories = ["asynchronous", "network-programming"]
+
+[features]
+default = []
+tls = []
+rustls = ["tls", "dep:rustls", "dep:tokio-rustls", "nacelle-core/rustls"]
+openssl = ["tls", "dep:openssl", "dep:tokio-openssl", "nacelle-core/openssl"]
+openssl-vendored = ["openssl", "openssl/vendored", "nacelle-core/openssl-vendored"]
+tls-self-signed = ["rustls", "nacelle-core/tls-self-signed"]
+otel = ["dep:opentelemetry", "nacelle-core/otel"]
+
+[dependencies]
+bytes = "1.10.1"
+nacelle-core = { path = "../nacelle-core" }
+opentelemetry = { version = "0.32", optional = true }
+openssl = { version = "0.10.79", optional = true }
+rustls = { version = "0.23.40", optional = true }
+socket2 = "0.6.1"
+tokio = { version = "1.47.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-openssl = { version = "0.6.5", optional = true }
+tokio-rustls = { version = "0.26.4", optional = true }
+tracing = "0.1.44"

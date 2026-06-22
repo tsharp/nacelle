@@ -1,0 +1,30 @@
+[package]
+name = "nacelle-stress-server"
+version = "0.1.0"
+edition = "2024"
+description = "Stress server binary for exercising Nacelle TCP throughput and runtime limits."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["networking", "tokio", "benchmark"]
+categories = ["asynchronous", "network-programming"]
+
+[features]
+default = ["tls-self-signed", "otel"]
+tls = ["nacelle/tls", "dep:tokio-rustls"]
+tls-self-signed = ["tls", "nacelle/tls-self-signed"]
+otel = ["nacelle/otel", "dep:opentelemetry", "dep:opentelemetry_sdk"]
+
+[dependencies]
+nacelle = { path = "../../nacelle", features = ["reference_protocol"], default-features = false }
+nacelle-stress-common = { path = "../nacelle-stress-common" }
+bytes = "1.10.1"
+mimalloc = { version = "0.1", default-features = false }
+libmimalloc-sys = { version = "0.1", features = ["extended"], default-features = false }
+serde = { version = "1.0.219", features = ["derive"] }
+toml = "0.8.23"
+tokio = { version = "1.47.1", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "0.26.4", optional = true }
+opentelemetry_sdk = { version = "0.32", optional = true }
+opentelemetry = { version = "0.32", optional = true }
