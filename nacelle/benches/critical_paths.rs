@@ -1,13 +1,16 @@
 use bytes::{Bytes, BytesMut};
-use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use nacelle::{
     FrameRequest, LengthDelimitedProtocol, NacelleInMemoryTelemetrySink, NacelleLimits,
     NacelleRuntimeState, NacelleTelemetry, NacelleTransport, Protocol,
 };
 use std::hint::black_box;
 use std::net::IpAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Barrier};
+use std::thread;
+use std::time::{Duration, Instant};
+
+const MEMORY_CONTENTION_CONNECTIONS: usize = 5_000;
 
 fn protocol_frame_benches(c: &mut Criterion) {
     let protocol = LengthDelimitedProtocol;
@@ -172,6 +175,89 @@ fn runtime_limit_benches(c: &mut Criterion) {
     group.finish();
 }
 
+fn memory_contention_benches(c: &mut Criterion) {
+    let bounded = Arc::new(NacelleRuntimeState::new(
+        NacelleLimits::default().with_max_memory_bytes(8 * 1024 * 1024 * 1024),
+    ));
+    let unbounded = Arc::new(NacelleRuntimeState::new(
+        NacelleLimits::default().with_max_memory_bytes(usize::MAX),
+    ));
+
+    let mut group = c.benchmark_group("memory_contention");
+    group.throughput(Throughput::Elements(MEMORY_CONTENTION_CONNECTIONS as u64));
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+    group.sample_size(20);
+
+    group.bench_function("bounded_1k_5000_connection_wave", |b| {
+        let state = bounded.clone();
+        b.iter_custom(|waves| contended_memory_allocation_waves(state.clone(), 1024, waves))
+    });
+    group.bench_function("bounded_64k_5000_connection_wave", |b| {
+        let state = bounded.clone();
+        b.iter_custom(|waves| contended_memory_allocation_waves(state.clone(), 64 * 1024, waves))
+    });
+    group.bench_function("unbounded_1k_5000_connection_wave", |b| {
+        let state = unbounded.clone();
+        b.iter_custom(|waves| contended_memory_allocation_waves(state.clone(), 1024, waves))
+    });
+
+    group.finish();
+}
+
+fn contended_memory_allocation_waves(
+    state: Arc<NacelleRuntimeState>,
+    bytes: usize,
+    waves: u64,
+) -> Duration {
+    let workers = thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(MEMORY_CONTENTION_CONNECTIONS)
+        .max(1);
+    let base_allocations = MEMORY_CONTENTION_CONNECTIONS / workers;
+    let extra_allocations = MEMORY_CONTENTION_CONNECTIONS % workers;
+    let ready = Arc::new(Barrier::new(workers + 1));
+    let start = Arc::new(Barrier::new(workers + 1));
+
+    let handles: Vec<_> = (0..workers)
+        .map(|worker| {
+            let state = state.clone();
+            let ready = ready.clone();
+            let start = start.clone();
+            let allocations_per_wave = base_allocations + usize::from(worker < extra_allocations);
+
+            thread::spawn(move || {
+                ready.wait();
+                start.wait();
+
+                for _ in 0..waves {
+                    let mut allocations = Vec::with_capacity(allocations_per_wave);
+                    for _ in 0..allocations_per_wave {
+                        allocations.push(
+                            state
+                                .allocate_memory(bytes)
+                                .expect("contended memory allocation"),
+                        );
+                    }
+                    black_box(allocations.len());
+                    drop(allocations);
+                }
+            })
+        })
+        .collect();
+
+    ready.wait();
+    let elapsed = Instant::now();
+    start.wait();
+
+    for handle in handles {
+        handle.join().expect("memory contention worker panicked");
+    }
+
+    elapsed.elapsed()
+}
+
 fn telemetry_benches(c: &mut Criterion) {
     let disabled = NacelleTelemetry::default();
     let sink = Arc::new(NacelleInMemoryTelemetrySink::new());
@@ -214,6 +300,7 @@ criterion_group!(
     critical_paths,
     protocol_frame_benches,
     runtime_limit_benches,
+    memory_contention_benches,
     telemetry_benches
 );
 criterion_main!(critical_paths);
