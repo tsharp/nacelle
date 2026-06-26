@@ -39,22 +39,22 @@ Invoke-Step "stress client no-default tests" { cargo test -p nacelle-stress-test
 Invoke-Step "stress server tests" { cargo test -p nacelle-stress-server --all-targets }
 Invoke-Step "stress server no-default tests" { cargo test -p nacelle-stress-server --no-default-features --all-targets }
 
-cargo tree -i serde_yaml
+cargo tree -i serde_yaml *> $null
 if ($LASTEXITCODE -eq 0) {
     throw "serde_yaml is still present"
 }
 
-cargo tree -i unsafe-libyaml
+cargo tree -i unsafe-libyaml *> $null
 if ($LASTEXITCODE -eq 0) {
     throw "unsafe-libyaml is still present"
 }
 
-cargo tree -p nacelle --no-default-features --features tcp,openssl -i rustls
+cargo tree -p nacelle --no-default-features --features tcp,openssl -i rustls *> $null
 if ($LASTEXITCODE -eq 0) {
     throw "rustls is selected by the tcp,openssl feature set"
 }
 
-cargo tree --workspace --no-default-features -i rustls
+cargo tree --workspace --no-default-features -i rustls *> $null
 if ($LASTEXITCODE -eq 0) {
     throw "rustls is selected by the workspace no-default feature set"
 }
