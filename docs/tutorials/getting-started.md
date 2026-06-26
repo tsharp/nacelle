@@ -43,6 +43,8 @@ NacelleApp::new(handler)
 
 ## Next steps
 
+- Run `cargo run --features reference_protocol --example app_core` to see one
+  app core served through multiple protocol adapters.
 - Read the [architecture guide](../topics/architecture.md) to understand the request path.
 - Read [runtime limits and backpressure](../topics/runtime-limits.md) before raising connection counts.
 - Use [Run the stress harness](stress-harness.md) to validate a local build.

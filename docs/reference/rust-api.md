@@ -23,6 +23,8 @@ Start with these public entry points:
 - `nacelle::prelude::*` for common application imports.
 - `NacelleApp`, `NacelleProtocols`, and `NacelleApp::serve(...)` for the
   app-first serving path.
+- `Handler` for the app-core boundary.
+- `Protocol` for TCP wire-format adapters.
 - `NacelleTelemetry` and `NacelleTelemetryConfig` for metrics and telemetry.
 - `TcpServer`, `NacelleHost`, and transport runtime helpers when a service
   needs lower-level listener control.

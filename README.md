@@ -69,6 +69,9 @@ Run the checked-in examples from a local checkout:
 # TCP echo with the reference protocol
 cargo run --features reference_protocol --example echo -- 127.0.0.1:8080
 
+# One app core served through two TCP protocol adapters
+cargo run --features reference_protocol --example app_core -- 127.0.0.1:8080 127.0.0.1:8081
+
 # HTTP echo
 cargo run --no-default-features --features http --example http_echo -- 127.0.0.1:8080
 
@@ -85,6 +88,7 @@ cargo run --features reference_protocol,http --example dual_echo -- 127.0.0.1:80
 ## What Nacelle Provides
 
 - One app-facing handler model for multiple transports.
+- App-core serving with swappable protocol adapters.
 - Streaming request and response bodies.
 - Custom TCP protocol support over TCP and Unix domain sockets.
 - HTTP/1 serving through Hyper.
