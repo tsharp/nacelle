@@ -26,5 +26,8 @@ Start with these public entry points:
 - `Handler` for the app-core boundary.
 - `Protocol` for TCP wire-format adapters.
 - `NacelleTelemetry` and `NacelleTelemetryConfig` for metrics and telemetry.
+- `NacelleMemoryBudget`, `NacelleMemoryAllocation`, and
+  `NacelleRuntimeState::memory_budget()` for shared application/transport
+  memory budget allocations.
 - `TcpServer`, `NacelleHost`, and transport runtime helpers when a service
   needs lower-level listener control.

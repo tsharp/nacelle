@@ -176,7 +176,7 @@ raising `max_connections`.
 
 Nacelle does not enforce a runtime memory cap by default. Set
 `NacelleLimits::with_max_memory_bytes(...)` only when you want to opt into
-Nacelle's memory reservation limiter for a measured deployment or test profile.
+Nacelle's memory allocation budget for a measured deployment or test profile.
 
 Self-signed certificates are intended for local tests and auto-deploy flows, not
 as a public-edge certificate strategy.

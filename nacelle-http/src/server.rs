@@ -736,9 +736,15 @@ fn incoming_to_body(
                 .await;
             return;
         }
-        let _body_reservation = match body_len_hint {
-            Some(bytes) => match runtime_state.reserve_memory(bytes) {
-                Ok(reservation) => Some(reservation),
+        let _body_allocation = match body_len_hint {
+            Some(bytes) => match runtime_state
+                .allocate_memory_with_timeout(
+                    bytes,
+                    runtime_state.limits().memory_allocation_timeout,
+                )
+                .await
+            {
+                Ok(allocation) => Some(allocation),
                 Err(error) => {
                     let _ = tx.send(Err(error)).await;
                     return;

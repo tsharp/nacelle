@@ -94,5 +94,5 @@ TCP request handling is sequential per connection. Pipelined frames can sit
 in the socket/read buffer, but Nacelle does not run multiple handlers
 concurrently for one TCP connection. Streaming request bodies use
 `request_body_channel_capacity` for backpressure between socket reads and the
-handler, and declared streaming body bytes are reserved against the memory
+handler, and declared streaming body bytes are allocated against the memory
 budget until the streaming request finishes.

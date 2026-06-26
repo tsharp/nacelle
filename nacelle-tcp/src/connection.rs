@@ -21,7 +21,7 @@ mod response;
 #[cfg(test)]
 mod tests;
 
-use framing::{decode_next_request, reserve_connection_buffers};
+use framing::{allocate_connection_buffers, decode_next_request};
 use io::{read_buf_with_timeout, write_all_with_timeout};
 use metrics::{finish_tcp_phase, start_tcp_phase, tcp_close_reason, tcp_metrics_context};
 use request::run_request;
@@ -110,7 +110,7 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let _connection_permit = runtime_state.acquire_connection_tracked()?;
-    let _buffer_reservation = reserve_connection_buffers(&config, &runtime_state)?;
+    let _buffer_allocation = allocate_connection_buffers(&config, &runtime_state)?;
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     let mut write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
     let transport = connection.transport;
@@ -414,7 +414,7 @@ where
     H: Handler,
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let _buffer_reservation = reserve_connection_buffers(&config, &runtime_state)?;
+    let _buffer_allocation = allocate_connection_buffers(&config, &runtime_state)?;
     let mut read_buf = BytesMut::with_capacity(config.read_buffer_capacity);
     let mut write_buf = BytesMut::with_capacity(config.response_buffer_capacity);
     let transport = connection.transport;
