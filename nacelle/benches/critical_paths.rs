@@ -153,20 +153,20 @@ fn runtime_limit_benches(c: &mut Criterion) {
             drop(permit);
         })
     });
-    group.bench_function("memory_reserve_drop_1k", |b| {
+    group.bench_function("memory_allocate_drop_1k", |b| {
         b.iter(|| {
-            let reservation = black_box(&state).reserve_memory(1024).expect("memory");
-            black_box(&reservation);
-            drop(reservation);
+            let allocation = black_box(&state).allocate_memory(1024).expect("memory");
+            black_box(&allocation);
+            drop(allocation);
         })
     });
-    group.bench_function("memory_reserve_drop_unbounded_1k", |b| {
+    group.bench_function("memory_allocate_drop_unbounded_1k", |b| {
         b.iter(|| {
-            let reservation = black_box(&unbounded_memory_state)
-                .reserve_memory(1024)
+            let allocation = black_box(&unbounded_memory_state)
+                .allocate_memory(1024)
                 .expect("unbounded memory");
-            black_box(&reservation);
-            drop(reservation);
+            black_box(&allocation);
+            drop(allocation);
         })
     });
     group.finish();

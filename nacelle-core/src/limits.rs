@@ -109,6 +109,7 @@ struct NacelleRuntimeStateInner {
     peer_connections: Mutex<HashMap<IpAddr, usize>>,
     peer_connection_rates: Mutex<HashMap<IpAddr, PeerConnectionRateWindow>>,
     memory_used: AtomicUsize,
+    memory_waiters: AtomicUsize,
     memory: Mutex<MemoryBudgetState>,
 }
 
@@ -120,7 +121,6 @@ struct PeerConnectionRateWindow {
 
 #[derive(Debug)]
 struct MemoryBudgetState {
-    used: usize,
     waiters: VecDeque<MemoryWaiter>,
     next_waiter_id: usize,
 }
@@ -155,8 +155,8 @@ impl NacelleRuntimeState {
                 peer_connections: Mutex::new(HashMap::new()),
                 peer_connection_rates: Mutex::new(HashMap::new()),
                 memory_used: AtomicUsize::new(0),
+                memory_waiters: AtomicUsize::new(0),
                 memory: Mutex::new(MemoryBudgetState {
-                    used: 0,
                     waiters: VecDeque::new(),
                     next_waiter_id: 1,
                 }),
@@ -262,11 +262,10 @@ impl NacelleRuntimeState {
             return Ok(NacelleMemoryAllocation::empty());
         }
 
-        let mut memory = self.inner.memory.lock().expect("memory budget poisoned");
-        if !memory.waiters.is_empty() {
+        if self.inner.memory_waiters.load(Ordering::Acquire) != 0 {
             return Err(NacelleError::ResourceLimit("memory_bytes"));
         }
-        self.allocate_memory_locked(&mut memory, bytes)
+        self.try_allocate_memory_counter(bytes)
     }
 
     pub async fn allocate_memory_wait(
@@ -299,14 +298,30 @@ impl NacelleRuntimeState {
             return Err(NacelleError::ResourceLimit("memory_bytes"));
         }
 
+        if self.inner.memory_waiters.load(Ordering::Acquire) == 0
+            && let Ok(allocation) = self.try_allocate_memory_counter(bytes)
+        {
+            return Ok(allocation);
+        }
+
+        self.inner.memory_waiters.fetch_add(1, Ordering::AcqRel);
+
         let notify = Arc::new(tokio::sync::Notify::new());
         let granted = Arc::new(AtomicBool::new(false));
         let id = {
             let mut memory = self.inner.memory.lock().expect("memory budget poisoned");
-            if memory.waiters.is_empty()
-                && let Ok(allocation) = self.allocate_memory_locked(&mut memory, bytes)
-            {
-                return Ok(allocation);
+            if memory.waiters.is_empty() {
+                match self.try_allocate_memory_counter(bytes) {
+                    Ok(allocation) => {
+                        self.inner.memory_waiters.fetch_sub(1, Ordering::AcqRel);
+                        return Ok(allocation);
+                    }
+                    Err(NacelleError::ResourceLimit("memory_bytes")) => {}
+                    Err(error) => {
+                        self.inner.memory_waiters.fetch_sub(1, Ordering::AcqRel);
+                        return Err(error);
+                    }
+                }
             }
 
             let id = memory.next_waiter_id;
@@ -326,36 +341,48 @@ impl NacelleRuntimeState {
 
     fn release_memory(&self, bytes: usize) {
         if bytes != 0 && self.inner.limits.max_memory_bytes != usize::MAX {
-            let mut to_notify = Vec::new();
-            {
-                let mut memory = self.inner.memory.lock().expect("memory budget poisoned");
-                memory.used = memory.used.saturating_sub(bytes);
-                self.grant_waiters_locked(&mut memory, &mut to_notify);
-                self.inner.memory_used.store(memory.used, Ordering::Release);
-            }
-            for notify in to_notify {
-                notify.notify_one();
+            self.inner.memory_used.fetch_sub(bytes, Ordering::AcqRel);
+            if self.inner.memory_waiters.load(Ordering::Acquire) != 0 {
+                let mut to_notify = Vec::new();
+                {
+                    let mut memory = self.inner.memory.lock().expect("memory budget poisoned");
+                    self.grant_waiters_locked(&mut memory, &mut to_notify);
+                }
+                for notify in to_notify {
+                    notify.notify_one();
+                }
             }
         }
     }
 
-    fn allocate_memory_locked(
+    fn try_allocate_memory_counter(
         &self,
-        memory: &mut MemoryBudgetState,
         bytes: usize,
     ) -> Result<NacelleMemoryAllocation, NacelleError> {
-        let Some(next) = memory.used.checked_add(bytes) else {
-            return Err(NacelleError::ResourceLimit("memory_bytes"));
-        };
-        if next > self.inner.limits.max_memory_bytes {
-            return Err(NacelleError::ResourceLimit("memory_bytes"));
+        let limit = self.inner.limits.max_memory_bytes;
+        let mut current = self.inner.memory_used.load(Ordering::Relaxed);
+        loop {
+            let Some(next) = current.checked_add(bytes) else {
+                return Err(NacelleError::ResourceLimit("memory_bytes"));
+            };
+            if next > limit {
+                return Err(NacelleError::ResourceLimit("memory_bytes"));
+            }
+            match self.inner.memory_used.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Ok(NacelleMemoryAllocation {
+                        state: Some(self.clone()),
+                        bytes,
+                    });
+                }
+                Err(observed) => current = observed,
+            }
         }
-        memory.used = next;
-        self.inner.memory_used.store(memory.used, Ordering::Release);
-        Ok(NacelleMemoryAllocation {
-            state: Some(self.clone()),
-            bytes,
-        })
     }
 
     fn grant_waiters_locked(
@@ -363,15 +390,18 @@ impl NacelleRuntimeState {
         memory: &mut MemoryBudgetState,
         to_notify: &mut Vec<Arc<tokio::sync::Notify>>,
     ) {
+        let mut used = self.inner.memory_used.load(Ordering::Acquire);
         while let Some(waiter) = memory.waiters.front() {
-            let Some(next) = memory.used.checked_add(waiter.bytes) else {
+            let Some(next) = used.checked_add(waiter.bytes) else {
                 break;
             };
             if next > self.inner.limits.max_memory_bytes {
                 break;
             }
             let waiter = memory.waiters.pop_front().expect("waiter checked");
-            memory.used = next;
+            used = next;
+            self.inner.memory_used.store(used, Ordering::Release);
+            self.inner.memory_waiters.fetch_sub(1, Ordering::AcqRel);
             waiter.granted.store(true, Ordering::Release);
             to_notify.push(waiter.notify);
         }
@@ -389,8 +419,8 @@ impl NacelleRuntimeState {
             }
             if let Some(index) = memory.waiters.iter().position(|waiter| waiter.id == id) {
                 memory.waiters.remove(index);
+                self.inner.memory_waiters.fetch_sub(1, Ordering::AcqRel);
                 self.grant_waiters_locked(&mut memory, &mut to_notify);
-                self.inner.memory_used.store(memory.used, Ordering::Release);
             }
         }
         for notify in to_notify {
@@ -741,6 +771,21 @@ mod tests {
     }
 
     #[test]
+    fn disabled_memory_budget_returns_empty_allocation_without_accounting() {
+        let state = NacelleRuntimeState::default();
+
+        let allocation = state
+            .memory_budget()
+            .try_allocate(usize::MAX)
+            .expect("disabled memory budget should allow empty allocation");
+
+        assert_eq!(allocation.bytes(), 0);
+        assert_eq!(state.memory_used_bytes(), 0);
+        drop(allocation);
+        assert_eq!(state.memory_used_bytes(), 0);
+    }
+
+    #[test]
     fn bounded_counters_reject_at_limit_and_recover_after_drop() {
         let state =
             NacelleRuntimeState::new(NacelleLimits::default().with_max_in_flight_requests(1));
@@ -854,6 +899,37 @@ mod tests {
 
         drop(larger);
         drop(smaller);
+        assert_eq!(state.memory_used_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn memory_budget_try_allocate_does_not_bypass_queued_waiter() {
+        let state = NacelleRuntimeState::new(NacelleLimits::default().with_max_memory_bytes(10));
+        let first_half = state.allocate_memory(5).expect("first allocation");
+        let second_half = state.allocate_memory(5).expect("second allocation");
+
+        let waiter_state = state.clone();
+        let waiter = tokio::spawn(async move {
+            waiter_state
+                .allocate_memory_wait(6)
+                .await
+                .expect("queued waiter should allocate")
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        drop(first_half);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert!(matches!(
+            state.memory_budget().try_allocate(1),
+            Err(NacelleError::ResourceLimit("memory_bytes"))
+        ));
+
+        drop(second_half);
+        let allocation = waiter.await.expect("waiter should join");
+        assert_eq!(allocation.bytes(), 6);
+        assert_eq!(state.memory_used_bytes(), 6);
+        drop(allocation);
         assert_eq!(state.memory_used_bytes(), 0);
     }
 
