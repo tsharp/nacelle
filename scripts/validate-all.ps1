@@ -28,7 +28,7 @@ Invoke-Step "nacelle full tests" { cargo test -p nacelle --features reference_pr
 Invoke-Step "nacelle full clippy" { cargo clippy -p nacelle --features reference_protocol,http,tower,otel --all-targets -- -D warnings }
 Invoke-Step "nacelle http tests" { cargo test -p nacelle --no-default-features --features http --all-targets }
 Invoke-Step "nacelle tls tests" { cargo test -p nacelle --no-default-features --features tls --all-targets }
-Invoke-Step "nacelle tcp compatibility clippy" { cargo clippy -p nacelle --no-default-features --features tcp --all-targets -- -D warnings }
+Invoke-Step "nacelle tcp-only clippy" { cargo clippy -p nacelle --no-default-features --features tcp --all-targets -- -D warnings }
 Invoke-Step "nacelle self-signed tls tests" { cargo test -p nacelle --no-default-features --features tls-self-signed --all-targets }
 Invoke-Step "nacelle https self-signed tests" { cargo test -p nacelle --no-default-features --features http,tls-self-signed --all-targets }
 Invoke-Step "nacelle TCP self-signed tests" { cargo test -p nacelle --features reference_protocol,tls-self-signed --all-targets }

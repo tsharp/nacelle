@@ -44,6 +44,7 @@ impl<H> NacelleApp<H>
 where
     H: Handler,
 {
+    /// Create an app from the handler used by every configured transport.
     pub fn new(handler: H) -> Self {
         Self {
             handler,
@@ -69,11 +70,6 @@ where
         self
     }
 
-    #[cfg(feature = "tcp")]
-    pub fn with_tcp_telemetry(self, telemetry: NacelleTelemetry) -> Self {
-        self.with_telemetry(telemetry)
-    }
-
     pub fn with_limits(mut self, limits: NacelleLimits) -> Self {
         self.runtime_state = NacelleRuntimeState::new(limits);
         self
@@ -95,6 +91,10 @@ where
         self
     }
 
+    /// Request graceful shutdown when the process receives Ctrl-C.
+    ///
+    /// This is a convenience for binaries that want the common local/production
+    /// signal path without manually wiring a [`NacelleShutdown`] handle.
     pub fn with_ctrl_c_shutdown(mut self) -> Self {
         self.ctrl_c_shutdown = true;
         self
@@ -136,6 +136,7 @@ where
         &self.handler
     }
 
+    /// Install the configured protocols and run the app until shutdown.
     pub async fn serve(self, protocols: NacelleProtocols<H>) -> Result<(), NacelleError> {
         serve(protocols, self).await
     }

@@ -12,6 +12,7 @@ categories = ["asynchronous", "network-programming"]
 
 [features]
 default = []
+error-hints = []
 http-types = ["dep:http"]
 tls = []
 rustls = ["tls", "dep:pem", "dep:rustls"]

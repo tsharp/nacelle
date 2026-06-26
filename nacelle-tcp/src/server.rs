@@ -128,14 +128,6 @@ where
         self
     }
 
-    pub fn with_tcp_telemetry(self, telemetry: NacelleTelemetry) -> Self {
-        self.with_telemetry(telemetry)
-    }
-
-    pub fn tcp_telemetry(&self) -> &NacelleTelemetry {
-        &self.telemetry
-    }
-
     fn attach_connection_extension(
         &self,
         connection: NacelleConnectionMeta,
@@ -279,11 +271,6 @@ impl<Req, ProtocolState, HandlerState, P, H>
     }
 
     pub fn telemetry(mut self, telemetry: NacelleTelemetry) -> Self {
-        self.telemetry = telemetry;
-        self
-    }
-
-    pub fn tcp_telemetry(mut self, telemetry: NacelleTelemetry) -> Self {
         self.telemetry = telemetry;
         self
     }

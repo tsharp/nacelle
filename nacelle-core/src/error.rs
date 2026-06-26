@@ -28,6 +28,7 @@ impl NacelleError {
         Self::Handler(error.into())
     }
 
+    #[cfg(feature = "error-hints")]
     pub fn hint(&self) -> Option<&'static str> {
         match self {
             Self::MissingProtocol => {
@@ -116,8 +117,11 @@ impl Display for NacelleError {
             Self::Handler(error) => write!(f, "handler error: {error}"),
             Self::Join(error) => write!(f, "task join error: {error}"),
         }?;
-        if let Some(hint) = self.hint() {
-            write!(f, "; hint: {hint}")?;
+        #[cfg(feature = "error-hints")]
+        {
+            if let Some(hint) = self.hint() {
+                write!(f, "; hint: {hint}")?;
+            }
         }
         Ok(())
     }
@@ -147,7 +151,7 @@ impl From<crate::runtime::JoinError> for NacelleError {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "error-hints"))]
 mod tests {
     use super::*;
 

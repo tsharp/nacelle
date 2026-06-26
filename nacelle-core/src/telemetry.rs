@@ -272,10 +272,6 @@ impl NacelleTelemetry {
         self
     }
 
-    pub fn with_wire_byte_metrics(self, enabled: bool) -> Self {
-        self.with_byte_count_metrics(enabled)
-    }
-
     pub fn with_phase_duration_metrics(mut self, enabled: bool) -> Self {
         self.config.phase_duration_metrics = enabled;
         self

@@ -18,7 +18,5 @@ pub use options::{
 pub use protocol::{DecodedRequest, Protocol};
 pub use server::{NacelleServer, NacelleServerBuilder, TcpServer};
 pub use telemetry::{
-    NacelleMetricsContext, NacelleRequestMetricsConfig, NacelleTcpMetricsContext,
-    NacelleTcpRequestMetricsConfig, NacelleTcpTelemetry, NacelleTcpTelemetryConfig,
-    NacelleTelemetry, NacelleTelemetryConfig,
+    NacelleMetricsContext, NacelleRequestMetricsConfig, NacelleTelemetry, NacelleTelemetryConfig,
 };

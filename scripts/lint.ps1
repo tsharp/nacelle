@@ -20,7 +20,7 @@ Invoke-Step "nacelle-tcp clippy" { cargo clippy -p nacelle-tcp --all-targets -- 
 Invoke-Step "nacelle-tcp tls clippy" { cargo clippy -p nacelle-tcp --features tls-self-signed --all-targets -- -D warnings }
 Invoke-Step "nacelle-http full clippy" { cargo clippy -p nacelle-http --features tls-self-signed --all-targets -- -D warnings }
 Invoke-Step "nacelle full clippy" { cargo clippy -p nacelle --features reference_protocol,http,tower,otel --all-targets -- -D warnings }
-Invoke-Step "nacelle tcp compatibility clippy" { cargo clippy -p nacelle --no-default-features --features tcp --all-targets -- -D warnings }
+Invoke-Step "nacelle tcp-only clippy" { cargo clippy -p nacelle --no-default-features --features tcp --all-targets -- -D warnings }
 Invoke-Step "nacelle all-feature clippy" { cargo clippy -p nacelle --features reference_protocol,http,tower,otel,tls-self-signed --all-targets -- -D warnings }
 
 cargo tree -i serde_yaml *> $null

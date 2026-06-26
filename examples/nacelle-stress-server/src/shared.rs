@@ -67,7 +67,6 @@ struct ServerConfigFile {
     request_body_channel_capacity: Option<usize>,
     low_memory: Option<bool>,
     byte_metrics: Option<bool>,
-    wire_byte_metrics: Option<bool>,
     tls_self_signed: Option<bool>,
     limits: Option<LimitsConfigFile>,
     tcp_limits: Option<TcpLimitsConfigFile>,
@@ -133,7 +132,7 @@ impl ServerConfig {
         if let Some(low_memory) = file.low_memory {
             self.low_memory = low_memory;
         }
-        if let Some(byte_metrics) = file.byte_metrics.or(file.wire_byte_metrics) {
+        if let Some(byte_metrics) = file.byte_metrics {
             self.byte_metrics = byte_metrics;
         }
         if let Some(tls_self_signed) = file.tls_self_signed {
@@ -311,10 +310,10 @@ fn parse_args_with_default_config(
             "--low-memory" => {
                 config.low_memory = true;
             }
-            "--byte-metrics" | "--wire-byte-metrics" => {
+            "--byte-metrics" => {
                 config.byte_metrics = true;
             }
-            "--no-byte-metrics" | "--no-wire-byte-metrics" => {
+            "--no-byte-metrics" => {
                 config.byte_metrics = false;
             }
             "--tls-self-signed" => {

@@ -132,9 +132,8 @@ pub use nacelle_tcp::NacelleUnixSocketOptions;
 #[cfg(feature = "tcp")]
 pub use nacelle_tcp::{
     DecodedRequest, NacelleServer, NacelleServerBuilder, NacelleTcpBindOptions,
-    NacelleTcpKeepalive, NacelleTcpLimits, NacelleTcpMetricsContext, NacelleTcpOptions,
-    NacelleTcpRequestMetricsConfig, NacelleTcpTelemetry, NacelleTcpTelemetryConfig,
-    NacelleTlsDetectionOptions, Protocol, TcpServer, serve_connection, serve_stream,
+    NacelleTcpKeepalive, NacelleTcpLimits, NacelleTcpOptions, NacelleTlsDetectionOptions, Protocol,
+    TcpServer, serve_connection, serve_stream,
 };
 #[cfg(feature = "reference_protocol")]
 pub use reference_protocol::{

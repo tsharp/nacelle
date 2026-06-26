@@ -107,6 +107,9 @@ nacelle = { version = "0.1", default-features = false, features = ["http"] }
 # TCP + HTTP + OpenTelemetry metrics
 nacelle = { version = "0.1", features = ["reference_protocol", "http", "otel"] }
 
+# Include setup hints in NacelleError Display output
+nacelle = { version = "0.1", features = ["reference_protocol", "error-hints"] }
+
 # Local self-signed TLS for tests
 nacelle = { version = "0.1", features = ["reference_protocol", "tls-self-signed"] }
 
@@ -118,6 +121,7 @@ nacelle = { version = "0.1", default-features = false, features = ["tcp", "opens
 | --- | --- |
 | `tcp` | Custom TCP protocol transport over TCP and Unix sockets. Enabled by default. |
 | `reference_protocol` | Optional length-delimited example protocol. |
+| `error-hints` | Include actionable setup hints in `NacelleError` display output. |
 | `http` | Hyper HTTP/1 server transport. |
 | `tls` | Provider-neutral TLS capability. |
 | `rustls` | Rustls-backed TLS for HTTP and TCP. |
