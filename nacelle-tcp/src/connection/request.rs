@@ -145,8 +145,12 @@ where
                 .inspect_err(|error| {
                     record_tcp_error(telemetry, metrics_context, "streaming_task", error)
                 })?;
-        let _streaming_body_reservation = runtime_state
-            .reserve_memory(decoded.body_len)
+        let _streaming_body_allocation = runtime_state
+            .allocate_memory_with_timeout(
+                decoded.body_len,
+                runtime_state.limits().memory_allocation_timeout,
+            )
+            .await
             .inspect_err(|error| {
                 record_tcp_error(telemetry, metrics_context, "streaming_memory", error)
             })?;

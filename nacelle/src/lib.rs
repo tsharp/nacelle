@@ -84,11 +84,11 @@ pub use host::NacelleHost;
 pub mod prelude {
     pub use crate::{
         BoxError, Handler, HandlerFn, NacelleApp, NacelleBody, NacelleConfig,
-        NacelleConnectionMeta, NacelleError, NacelleLimits, NacelleProtocols, NacelleRequest,
-        NacelleRequestMeta, NacelleRequestMetricsConfig, NacelleResponse, NacelleResponseMeta,
-        NacelleRuntimeState, NacelleShutdown, NacelleShutdownToken, NacelleTelemetry,
-        NacelleTelemetryConfig, NacelleTransport, RequestBodyMode, RequestMetadata, handler_fn,
-        serve,
+        NacelleConnectionMeta, NacelleError, NacelleLimits, NacelleMemoryBudget, NacelleProtocols,
+        NacelleRequest, NacelleRequestMeta, NacelleRequestMetricsConfig, NacelleResponse,
+        NacelleResponseMeta, NacelleRuntimeState, NacelleShutdown, NacelleShutdownToken,
+        NacelleTelemetry, NacelleTelemetryConfig, NacelleTransport, RequestBodyMode,
+        RequestMetadata, handler_fn, serve,
     };
     #[cfg(feature = "tcp")]
     pub use crate::{
@@ -114,14 +114,14 @@ pub use nacelle_core::NacelleTlsProvider;
 #[cfg(feature = "tower")]
 pub use nacelle_core::handler_from_tower_service;
 pub use nacelle_core::{
-    BoxError, Handler, HandlerFn, MemoryReservation, NacelleBody, NacelleConfig,
-    NacelleConnectionExtension, NacelleConnectionExtensionFactory, NacelleConnectionMeta,
-    NacelleConnectionTlsMeta, NacelleError, NacelleInMemoryTelemetrySink, NacelleLimits,
-    NacelleMetricsContext, NacelleRequest, NacelleRequestMeta, NacelleRequestMetricsConfig,
-    NacelleResponse, NacelleResponseMeta, NacelleRuntimeState, NacelleShutdown,
-    NacelleShutdownToken, NacelleTelemetry, NacelleTelemetryConfig, NacelleTelemetryEvent,
-    NacelleTelemetryEventKind, NacelleTelemetrySink, NacelleTransport, RequestBodyMode,
-    RequestMetadata, TcpRequestMeta, TcpResponseMeta, TrackedPermit, handler_fn,
+    BoxError, Handler, HandlerFn, NacelleBody, NacelleConfig, NacelleConnectionExtension,
+    NacelleConnectionExtensionFactory, NacelleConnectionMeta, NacelleConnectionTlsMeta,
+    NacelleError, NacelleInMemoryTelemetrySink, NacelleLimits, NacelleMemoryAllocation,
+    NacelleMemoryBudget, NacelleMetricsContext, NacelleRequest, NacelleRequestMeta,
+    NacelleRequestMetricsConfig, NacelleResponse, NacelleResponseMeta, NacelleRuntimeState,
+    NacelleShutdown, NacelleShutdownToken, NacelleTelemetry, NacelleTelemetryConfig,
+    NacelleTelemetryEvent, NacelleTelemetryEventKind, NacelleTelemetrySink, NacelleTransport,
+    RequestBodyMode, RequestMetadata, TcpRequestMeta, TcpResponseMeta, TrackedPermit, handler_fn,
 };
 #[cfg(feature = "http")]
 pub use nacelle_core::{HttpRequestMeta, HttpResponseMeta};

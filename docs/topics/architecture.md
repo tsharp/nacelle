@@ -65,7 +65,7 @@ shared lifecycle/limit enforcement in core.
 
 `NacelleRuntimeState` owns shared budgets and counters. Connection, request, and
 streaming-task limits are non-blocking atomic bounded counters. Memory uses a
-checked reservation object that releases on drop.
+checked allocation guard that releases on drop.
 
 This keeps the common request path allocation-light while still enforcing
 bounded defaults.

@@ -18,7 +18,9 @@ pub use config::{NacelleConfig, RequestBodyMode};
 pub use error::{BoxError, NacelleError};
 pub use handler::{Handler, HandlerFn, handler_fn};
 pub use lifecycle::{NacelleShutdown, NacelleShutdownToken};
-pub use limits::{MemoryReservation, NacelleLimits, NacelleRuntimeState, TrackedPermit};
+pub use limits::{
+    NacelleLimits, NacelleMemoryAllocation, NacelleMemoryBudget, NacelleRuntimeState, TrackedPermit,
+};
 #[cfg(feature = "http-types")]
 pub use request::HttpRequestMeta;
 pub use request::{

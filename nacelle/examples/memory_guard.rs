@@ -21,7 +21,8 @@ async fn main() -> Result<(), NacelleError> {
     let runtime_state = NacelleRuntimeState::new(
         NacelleLimits::default()
             .with_max_memory_bytes(MEMORY_LIMIT)
-            .with_max_request_body_bytes(MEMORY_LIMIT),
+            .with_max_request_body_bytes(MEMORY_LIMIT)
+            .with_memory_allocation_timeout(Duration::from_millis(100)),
     );
     let server_state = runtime_state.clone();
     let (shutdown, token) = NacelleShutdown::pair();
@@ -47,14 +48,14 @@ async fn main() -> Result<(), NacelleError> {
     write_post_headers(&mut held, MEMORY_LIMIT).await?;
     wait_for_memory(&runtime_state, MEMORY_LIMIT).await?;
     println!(
-        "first upload reserved the full budget: {} bytes in use",
+        "first upload allocated the full budget: {} bytes in use",
         runtime_state.memory_used_bytes()
     );
 
     let rejected = one_shot_post(addr, 1).await?;
     expect(
         rejected.starts_with("HTTP/1.1 500 Internal Server Error")
-            && rejected.contains("memory_bytes"),
+            && rejected.contains("memory_allocation"),
         "second request should be rejected while memory is exhausted",
     )?;
     println!(

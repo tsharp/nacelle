@@ -27,7 +27,8 @@ async fn main() -> Result<(), NacelleError> {
     let runtime_state = NacelleRuntimeState::new(
         NacelleLimits::default()
             .with_max_memory_bytes(MEMORY_LIMIT)
-            .with_max_request_body_bytes(HELD_BODY_BYTES),
+            .with_max_request_body_bytes(HELD_BODY_BYTES)
+            .with_memory_allocation_timeout(Duration::from_millis(100)),
     );
     let config = NacelleConfig::default()
         .with_read_buffer_capacity(BUFFER_BYTES)
@@ -67,7 +68,7 @@ async fn main() -> Result<(), NacelleError> {
     let held_expected = CONNECTION_BUFFER_BYTES + HELD_BODY_BYTES;
     wait_for_memory(&runtime_state, held_expected).await?;
     println!(
-        "first TCP request reserved {HELD_BODY_BYTES} body bytes; {} bytes total in use",
+        "first TCP request allocated {HELD_BODY_BYTES} body bytes; {} bytes total in use",
         runtime_state.memory_used_bytes()
     );
 
