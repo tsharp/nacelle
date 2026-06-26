@@ -75,6 +75,12 @@ cargo run --features reference_protocol --example app_core -- 127.0.0.1:8080 127
 # HTTP echo
 cargo run --no-default-features --features http --example http_echo -- 127.0.0.1:8080
 
+# HTTP memory budget guard demo
+cargo run --no-default-features --features http --example memory_guard
+
+# TCP memory budget guard demo with the reference protocol
+cargo run --features reference_protocol --example tcp_memory_guard
+
 # HTTPS echo with an ephemeral self-signed certificate
 cargo run --no-default-features --features http,tls-self-signed --example tls_http_echo -- 127.0.0.1:8443
 
