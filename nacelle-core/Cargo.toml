@@ -1,6 +1,6 @@
 [package]
 name = "nacelle-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Shared request, response, body, limits, lifecycle, telemetry, and TLS primitives for Nacelle."
 license.workspace = true
@@ -12,6 +12,7 @@ categories = ["asynchronous", "network-programming"]
 
 [features]
 default = []
+error-hints = []
 http-types = ["dep:http"]
 tls = []
 rustls = ["tls", "dep:pem", "dep:rustls"]

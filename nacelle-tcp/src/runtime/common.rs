@@ -4,11 +4,12 @@ use std::time::Duration;
 use crate::options::NacelleTcpBindOptions;
 use crate::protocol::Protocol;
 use crate::server::NacelleServer;
-use crate::telemetry::NacelleTcpMetricsContext;
 use nacelle_core::error::NacelleError;
 use nacelle_core::handler::Handler;
 use nacelle_core::request::RequestMetadata;
-use nacelle_core::telemetry::{NacelleTelemetry, NacelleTelemetryEventKind, NacelleTransport};
+use nacelle_core::telemetry::{
+    NacelleMetricsContext, NacelleTelemetry, NacelleTelemetryEventKind, NacelleTransport,
+};
 
 pub(super) fn bind_tcp_listener(
     addr: SocketAddr,
@@ -65,13 +66,15 @@ pub(super) fn record_connection_rejection<Req, P, H>(
     P: Protocol<Req> + Send + Sync + 'static,
     H: Handler,
 {
-    let context = NacelleTcpMetricsContext::new(
+    let context = NacelleMetricsContext::new(
         transport,
         server.listener_label(),
         server.protocol().name(),
         tls,
     );
-    server.tcp_telemetry().error(&context, "accept", error);
+    server
+        .telemetry()
+        .operation_error(&context, "accept", error);
 }
 
 pub(super) async fn drain_connection_tasks(

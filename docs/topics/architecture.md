@@ -89,17 +89,16 @@ Task tracking is at the connection boundary, not the per-request hot path.
 Telemetry is deliberately low-cardinality. Reasons are static strings such as
 `connections`, `request_body_bytes`, or `http_body_read`.
 
-With `otel`, active gauges are observable instruments backed by runtime-state
+With `otel`, runtime gauges are observable instruments backed by runtime-state
 atomics, so collection reads current values without per-request metric writes.
-Core telemetry owns shared lifecycle and request events. Core request duration
-metrics are disabled by default through `NacelleTelemetryConfig`, so core/HTTP
-request paths do not start a request timer unless duration metrics or HTTP
-access logging are enabled. The TCP transport owns its TCP-specific metrics in
-`nacelle-tcp`: listener/protocol/TLS-labeled lifecycle counters, grouped request
-counters, request/response wire-byte counters, request duration histograms, and
-error/rejection counters. Request metric switches live under
-`NacelleTcpTelemetryConfig::request_metrics`. Started/completed counters and
-wire-byte counters are on by default; in-flight gauges and duration histograms
-are disabled by default. Enable them deliberately with
-`NacelleTcpTelemetry::default()` builder methods on the TCP server or app when
-you need diagnostic detail and can afford the extra per-request metric writes.
+`NacelleTelemetry` owns lifecycle, request, phase, error, and byte metrics for
+all transports. Transports that can provide extra low-cardinality detail attach
+a `NacelleMetricsContext` with listener, protocol, transport, and TLS labels.
+
+Request metric switches live under `NacelleTelemetryConfig::request_metrics`.
+Started/completed counters and byte counters are on by default; in-flight
+counters, duration histograms, and phase histograms are disabled by default.
+Enable them deliberately with `NacelleTelemetry::default()` builder methods on
+the server or app when you need diagnostic detail and can afford the extra
+per-request metric writes. Core/HTTP request paths do not start a request timer
+unless duration metrics or HTTP access logging are enabled.

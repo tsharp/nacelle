@@ -1,6 +1,6 @@
 [package]
 name = "nacelle-http"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Hyper HTTP/1 transport and HTTP edge policy runtime for Nacelle streaming handlers."
 license.workspace = true
@@ -23,7 +23,7 @@ http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["server", "tokio"] }
-nacelle-core = { version = "0.1.0", path = "../nacelle-core", features = ["http-types"] }
+nacelle-core = { version = "0.2.0", path = "../nacelle-core", features = ["http-types"] }
 rustls = { version = "0.23.40", optional = true }
 tokio = { version = "1.47.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-rustls = { version = "0.26.4", optional = true }
