@@ -102,7 +102,7 @@ impl NacelleConnectionMeta {
     pub fn tcp(peer_addr: Option<SocketAddr>, local_addr: Option<SocketAddr>) -> Self {
         Self {
             connection_id: next_connection_id(),
-            transport: NacelleTransport::Tcp,
+            transport: NacelleTransport::new("tcp"),
             listener: default_listener(),
             peer_ip: peer_addr.map(|addr| addr.ip()),
             peer_addr,
@@ -116,7 +116,7 @@ impl NacelleConnectionMeta {
     pub fn unix_socket(local_path: Option<PathBuf>) -> Self {
         Self {
             connection_id: next_connection_id(),
-            transport: NacelleTransport::UnixSocket,
+            transport: NacelleTransport::new("unix_socket"),
             listener: default_listener(),
             peer_addr: None,
             peer_ip: None,
@@ -130,7 +130,7 @@ impl NacelleConnectionMeta {
     pub fn http(peer_ip: Option<IpAddr>) -> Self {
         Self {
             connection_id: next_connection_id(),
-            transport: NacelleTransport::Http,
+            transport: NacelleTransport::new("http"),
             listener: default_listener(),
             peer_addr: None,
             peer_ip,
@@ -444,7 +444,7 @@ mod tests {
         let meta = NacelleConnectionMeta::unix_socket(Some(path.clone()));
 
         assert_ne!(meta.connection_id, 0);
-        assert_eq!(meta.transport, NacelleTransport::UnixSocket);
+        assert_eq!(meta.transport, NacelleTransport::new("unix_socket"));
         assert_eq!(meta.local_path, Some(path));
         assert_eq!(meta.peer_addr, None);
         assert_eq!(meta.peer_ip, None);

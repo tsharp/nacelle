@@ -112,7 +112,7 @@ where
             biased;
             _ = shutdown.changed() => break,
             joined = connections.join_next(), if !connections.is_empty() => {
-                log_connection_result(joined, NacelleTransport::Tcp);
+                log_connection_result(joined, NacelleTransport::new("tcp"));
                 continue;
             }
             accepted = listener.accept() => {
@@ -122,10 +122,10 @@ where
                 let connection_permit = match server.runtime_state().acquire_connection_for_peer(peer_addr.ip()) {
                     Ok(permit) => permit,
                     Err(error) => {
-                        record_connection_rejection(server.as_ref(), NacelleTransport::Tcp, "rustls", &error);
+                        record_connection_rejection(server.as_ref(), NacelleTransport::new("tcp"), "rustls", &error);
                         server
                             .telemetry()
-                            .connection_rejected(NacelleTransport::Tcp, connection_rejection_reason(&error));
+                            .connection_rejected(NacelleTransport::new("tcp"), connection_rejection_reason(&error));
                         continue;
                     }
                 };
@@ -139,7 +139,7 @@ where
                         Err(_) => {
                             server
                                 .telemetry()
-                                .timeout(NacelleTransport::Tcp, "tls_handshake");
+                                .timeout(NacelleTransport::new("tcp"), "tls_handshake");
                             return Err(NacelleError::Timeout("tls_handshake"));
                         }
                     };
@@ -151,12 +151,12 @@ where
     }
     server.telemetry().shutdown_event(
         NacelleTelemetryEventKind::ListenerStoppedAccepting,
-        NacelleTransport::Tcp,
+        NacelleTransport::new("tcp"),
     );
     drain_connection_tasks(
         connections,
         drain_deadline.get(),
-        NacelleTransport::Tcp,
+        NacelleTransport::new("tcp"),
         server.telemetry().clone(),
     )
     .await;

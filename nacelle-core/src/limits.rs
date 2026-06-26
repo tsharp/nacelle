@@ -405,6 +405,9 @@ impl Drop for MemoryReservation {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier, mpsc};
+    use std::thread;
+
     use super::*;
 
     #[test]
@@ -470,6 +473,60 @@ mod tests {
             .acquire_request_tracked()
             .expect("request permit should recover after drop");
         assert_eq!(state.active_requests(), 1);
+    }
+
+    #[test]
+    fn memory_budget_rejects_concurrent_reservations_without_oversubscription() {
+        const MEMORY_LIMIT: usize = 1024;
+        const RESERVATION_BYTES: usize = 128;
+        const WORKERS: usize = 16;
+
+        let state =
+            NacelleRuntimeState::new(NacelleLimits::default().with_max_memory_bytes(MEMORY_LIMIT));
+        let start = Arc::new(Barrier::new(WORKERS + 1));
+        let release = Arc::new(Barrier::new(WORKERS + 1));
+        let (tx, rx) = mpsc::channel();
+
+        thread::scope(|scope| {
+            for _ in 0..WORKERS {
+                let state = state.clone();
+                let start = start.clone();
+                let release = release.clone();
+                let tx = tx.clone();
+                scope.spawn(move || {
+                    start.wait();
+                    let reservation = state.reserve_memory(RESERVATION_BYTES);
+                    tx.send(reservation.is_ok())
+                        .expect("test receiver should be open");
+                    let _reservation = reservation.ok();
+                    release.wait();
+                });
+            }
+            drop(tx);
+
+            start.wait();
+            let accepted = (0..WORKERS)
+                .map(|_| rx.recv().expect("worker should report reservation result"))
+                .filter(|accepted| *accepted)
+                .count();
+
+            assert_eq!(accepted, MEMORY_LIMIT / RESERVATION_BYTES);
+            assert_eq!(state.memory_used_bytes(), MEMORY_LIMIT);
+            assert!(matches!(
+                state.reserve_memory(1),
+                Err(NacelleError::ResourceLimit("memory_bytes"))
+            ));
+
+            release.wait();
+        });
+
+        assert_eq!(state.memory_used_bytes(), 0);
+        let reservation = state
+            .reserve_memory(MEMORY_LIMIT)
+            .expect("full memory budget should be reusable after release");
+        assert_eq!(state.memory_used_bytes(), MEMORY_LIMIT);
+        drop(reservation);
+        assert_eq!(state.memory_used_bytes(), 0);
     }
 
     #[test]

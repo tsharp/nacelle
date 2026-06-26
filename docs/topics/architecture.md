@@ -13,6 +13,19 @@ The reference protocol intentionally stays out of `nacelle-core` and
 `nacelle-tcp`; it is a batteries-included implementation exported by the
 umbrella `nacelle` crate.
 
+## App Core And Protocol Adapters
+
+Nacelle is organized so application behavior lives behind the `Handler`
+boundary. A handler receives a transport-neutral `NacelleRequest` and returns a
+`NacelleResponse`.
+
+TCP `Protocol` implementations are adapters: they decode a wire format into
+request metadata and encode responses back into frames. Swapping protocols
+should not require rewriting the app core. The app-first serving path wires
+those pieces together with `NacelleApp`, `NacelleProtocols`, and
+`NacelleApp::serve(...)`; lower-level `TcpServer` and `NacelleHost` APIs remain
+available for services that need direct listener control.
+
 TLS lives in `nacelle-core` because the configuration and provider metadata are
 shared. `tls` is provider-neutral. `rustls` enables the Rustls provider used by
 HTTP and TCP. `openssl` enables the OpenSSL provider for TCP without
