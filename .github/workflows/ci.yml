@@ -61,8 +61,8 @@ jobs:
         run: cargo test -p nacelle-stress-server --no-default-features --all-targets
       - name: Ensure deprecated YAML stack is absent
         run: |
-          ! cargo tree -i serde_yaml
-          ! cargo tree -i unsafe-libyaml
+          ! cargo tree -i serde_yaml >/dev/null 2>&1
+          ! cargo tree -i unsafe-libyaml >/dev/null 2>&1
       - name: Install cargo-audit
         uses: taiki-e/install-action@v2
         with:

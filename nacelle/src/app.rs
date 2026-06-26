@@ -24,16 +24,13 @@ use nacelle_tcp::NacelleTlsDetectionOptions;
 use nacelle_tcp::NacelleUnixSocketOptions;
 #[cfg(feature = "tcp")]
 use nacelle_tcp::{
-    NacelleTcpBindOptions, NacelleTcpLimits, NacelleTcpOptions, NacelleTcpTelemetry, Protocol,
-    TcpServer,
+    NacelleTcpBindOptions, NacelleTcpLimits, NacelleTcpOptions, Protocol, TcpServer,
 };
 
 pub struct NacelleApp<H> {
     handler: H,
     config: NacelleConfig,
     telemetry: NacelleTelemetry,
-    #[cfg(feature = "tcp")]
-    tcp_telemetry: NacelleTcpTelemetry,
     runtime_state: NacelleRuntimeState,
     #[cfg(feature = "tcp")]
     tcp_limits: NacelleTcpLimits,
@@ -51,8 +48,6 @@ where
             handler,
             config: NacelleConfig::default(),
             telemetry: NacelleTelemetry::default(),
-            #[cfg(feature = "tcp")]
-            tcp_telemetry: NacelleTcpTelemetry::default(),
             runtime_state: NacelleRuntimeState::default(),
             #[cfg(feature = "tcp")]
             tcp_limits: NacelleTcpLimits::default(),
@@ -73,9 +68,8 @@ where
     }
 
     #[cfg(feature = "tcp")]
-    pub fn with_tcp_telemetry(mut self, tcp_telemetry: NacelleTcpTelemetry) -> Self {
-        self.tcp_telemetry = tcp_telemetry;
-        self
+    pub fn with_tcp_telemetry(self, telemetry: NacelleTelemetry) -> Self {
+        self.with_telemetry(telemetry)
     }
 
     pub fn with_limits(mut self, limits: NacelleLimits) -> Self {
@@ -571,7 +565,6 @@ where
         .protocol(protocol)
         .config(app.config.clone())
         .telemetry(app.telemetry.clone())
-        .tcp_telemetry(app.tcp_telemetry.clone())
         .runtime_state(app.runtime_state.clone());
     let builder = builder.tcp_limits(app.tcp_limits);
     let builder = if let Some(factory) = app.connection_extension_factory.clone() {
