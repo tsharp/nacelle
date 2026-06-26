@@ -13,7 +13,7 @@ response chunks without forcing full buffering.
 
 ## Status
 
-Nacelle is currently `0.1.x`. It is ready for experiments and prototype
+Nacelle is currently `0.2.x`. It is ready for experiments and prototype
 integrations, but the public API is still allowed to change before `1.0`.
 
 The core request/response model, handler adapter, runtime limits, host/app
@@ -99,22 +99,22 @@ Choose the smallest feature set that matches the transports you actually run:
 
 ```toml
 # TCP with the built-in reference protocol
-nacelle = { version = "0.1", features = ["reference_protocol"] }
+nacelle = { version = "0.2", features = ["reference_protocol"] }
 
 # HTTP only
-nacelle = { version = "0.1", default-features = false, features = ["http"] }
+nacelle = { version = "0.2", default-features = false, features = ["http"] }
 
 # TCP + HTTP + OpenTelemetry metrics
-nacelle = { version = "0.1", features = ["reference_protocol", "http", "otel"] }
+nacelle = { version = "0.2", features = ["reference_protocol", "http", "otel"] }
 
 # Include setup hints in NacelleError Display output
-nacelle = { version = "0.1", features = ["reference_protocol", "error-hints"] }
+nacelle = { version = "0.2", features = ["reference_protocol", "error-hints"] }
 
 # Local self-signed TLS for tests
-nacelle = { version = "0.1", features = ["reference_protocol", "tls-self-signed"] }
+nacelle = { version = "0.2", features = ["reference_protocol", "tls-self-signed"] }
 
 # TCP with OpenSSL, without Rustls
-nacelle = { version = "0.1", default-features = false, features = ["tcp", "openssl"] }
+nacelle = { version = "0.2", default-features = false, features = ["tcp", "openssl"] }
 ```
 
 | Feature | Purpose |
