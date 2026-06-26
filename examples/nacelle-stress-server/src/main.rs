@@ -310,19 +310,19 @@ impl StressOtelSnapshot {
         for scope in metrics.scope_metrics() {
             for metric in scope.metrics() {
                 match metric.name() {
-                    "nacelle.runtime.connections.active" => {
+                    "nacelle.connections.active" => {
                         snapshot.active_connections += gauge_u64(metric.data());
                     }
-                    "nacelle.runtime.requests.active" => {
+                    "nacelle.requests.active" => {
                         snapshot.active_requests += gauge_u64(metric.data());
                     }
-                    "nacelle.runtime.streaming_tasks.active" => {
+                    "nacelle.streaming_tasks.active" => {
                         snapshot.active_streaming_tasks += gauge_u64(metric.data());
                     }
-                    "nacelle.runtime.memory.used_bytes" => {
+                    "nacelle.memory.used_bytes" => {
                         snapshot.memory_used_bytes += gauge_u64(metric.data());
                     }
-                    "nacelle.connections.active" => {
+                    "nacelle.connections.in_flight" => {
                         snapshot.active_connection_delta += sum_i64(metric.data());
                     }
                     "nacelle.connections.accepted" => {

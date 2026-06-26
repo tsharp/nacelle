@@ -304,11 +304,11 @@ where
                         Err(error) => {
                             server
                                 .telemetry
-                                .connection_rejected(NacelleTransport::Http, connection_rejection_reason(&error));
+                                .connection_rejected(NacelleTransport::new("http"), connection_rejection_reason(&error));
                             continue;
                         }
                     };
-                    server.telemetry.connection_opened(NacelleTransport::Http);
+                    server.telemetry.connection_opened(NacelleTransport::new("http"));
                     connections.spawn(run_http_connection(
                         server,
                         stream,
@@ -320,7 +320,7 @@ where
         }
         server.telemetry.shutdown_event(
             NacelleTelemetryEventKind::ListenerStoppedAccepting,
-            NacelleTransport::Http,
+            NacelleTransport::new("http"),
         );
         drain_http_connection_tasks(connections, drain_deadline.get(), server.telemetry.clone())
             .await;
@@ -424,11 +424,11 @@ where
                         Err(error) => {
                             server
                                 .telemetry
-                                .connection_rejected(NacelleTransport::Http, connection_rejection_reason(&error));
+                                .connection_rejected(NacelleTransport::new("http"), connection_rejection_reason(&error));
                             continue;
                         }
                     };
-                    server.telemetry.connection_opened(NacelleTransport::Http);
+                    server.telemetry.connection_opened(NacelleTransport::new("http"));
                     let acceptor = tokio_rustls::TlsAcceptor::from(tls_config.server_config());
                     connections.spawn(async move {
                         let tls_stream = match tokio::time::timeout(
@@ -442,7 +442,7 @@ where
                             Err(_) => {
                                 server
                                     .telemetry
-                                    .timeout(NacelleTransport::Http, "tls_handshake");
+                                    .timeout(NacelleTransport::new("http"), "tls_handshake");
                                 return Err(NacelleError::Timeout("tls_handshake"));
                             }
                         };
@@ -459,7 +459,7 @@ where
         }
         server.telemetry.shutdown_event(
             NacelleTelemetryEventKind::ListenerStoppedAccepting,
-            NacelleTransport::Http,
+            NacelleTransport::new("http"),
         );
         drain_http_connection_tasks(connections, drain_deadline.get(), server.telemetry.clone())
             .await;
@@ -477,7 +477,7 @@ where
         let effective_peer_ip = self.effective_peer_ip(peer_ip, &request);
         if let Some(rejection) = validate_http_policy(&self.http_policy, &request) {
             self.telemetry
-                .request_rejected(NacelleTransport::Http, rejection.reason);
+                .request_rejected(NacelleTransport::new("http"), rejection.reason);
             self.access_log(HttpAccessLog {
                 method: &method,
                 uri: &uri,
@@ -498,7 +498,7 @@ where
             && !self.allow_peer_request(peer_ip)
         {
             self.telemetry
-                .request_rejected(NacelleTransport::Http, "peer_rate");
+                .request_rejected(NacelleTransport::new("http"), "peer_rate");
             self.access_log(HttpAccessLog {
                 method: &method,
                 uri: &uri,
@@ -519,7 +519,7 @@ where
             Ok(permit) => permit,
             Err(error) => {
                 self.telemetry.request_failed(
-                    NacelleTransport::Http,
+                    NacelleTransport::new("http"),
                     elapsed_since(request_started),
                     &error,
                 );
@@ -594,7 +594,7 @@ where
                     });
                 }
                 self.telemetry.request_completed(
-                    NacelleTransport::Http,
+                    NacelleTransport::new("http"),
                     request_bytes,
                     0,
                     elapsed_since(request_started),
@@ -603,7 +603,7 @@ where
             }
             Err(error) => {
                 self.telemetry.request_failed(
-                    NacelleTransport::Http,
+                    NacelleTransport::new("http"),
                     elapsed_since(request_started),
                     &error,
                 );
@@ -629,7 +629,7 @@ where
                     });
                 }
                 self.telemetry.request_completed(
-                    NacelleTransport::Http,
+                    NacelleTransport::new("http"),
                     request_bytes,
                     0,
                     elapsed_since(request_started),
@@ -761,7 +761,7 @@ fn incoming_to_body(
                     match tokio::time::timeout(timeout, next).await {
                         Ok(frame) => frame,
                         Err(_) => {
-                            telemetry.timeout(NacelleTransport::Http, "http_body_read");
+                            telemetry.timeout(NacelleTransport::new("http"), "http_body_read");
                             let _ = tx.send(Err(NacelleError::Timeout("http_body_read"))).await;
                             break;
                         }
@@ -1022,7 +1022,7 @@ where
             Err(_) => {
                 server
                     .telemetry
-                    .timeout(NacelleTransport::Http, "http_max_connection_age");
+                    .timeout(NacelleTransport::new("http"), "http_max_connection_age");
                 Err(NacelleError::Timeout("http_max_connection_age"))
             }
         }
@@ -1164,7 +1164,7 @@ async fn drain_http_connection_tasks(
 ) {
     telemetry.shutdown_event(
         NacelleTelemetryEventKind::DrainStarted,
-        NacelleTransport::Http,
+        NacelleTransport::new("http"),
     );
     let drain = async {
         while let Some(result) = connections.join_next().await {
@@ -1176,7 +1176,7 @@ async fn drain_http_connection_tasks(
         tracing::info!(target: "nacelle", transport = "http", "connection drain completed");
         telemetry.shutdown_event(
             NacelleTelemetryEventKind::DrainCompleted,
-            NacelleTransport::Http,
+            NacelleTransport::new("http"),
         );
         return;
     }
@@ -1185,9 +1185,9 @@ async fn drain_http_connection_tasks(
     tracing::warn!(target: "nacelle", transport = "http", aborted, "connection drain timed out; aborting active tasks");
     telemetry.shutdown_event(
         NacelleTelemetryEventKind::DrainTimedOut,
-        NacelleTransport::Http,
+        NacelleTransport::new("http"),
     );
-    telemetry.connections_aborted(NacelleTransport::Http, aborted);
+    telemetry.connections_aborted(NacelleTransport::new("http"), aborted);
     connections.abort_all();
     while let Some(result) = connections.join_next().await {
         log_http_connection_result(Some(result));
@@ -1231,7 +1231,7 @@ impl Stream for HttpBodyStream {
 impl Drop for HttpBodyStream {
     fn drop(&mut self) {
         self.telemetry
-            .response_body_bytes(NacelleTransport::Http, self.response_body_bytes);
+            .response_body_bytes(NacelleTransport::new("http"), self.response_body_bytes);
     }
 }
 
@@ -1333,7 +1333,7 @@ mod tests {
 
         assert!(sink.events().iter().any(|event| {
             event.kind == nacelle_core::NacelleTelemetryEventKind::ResponseBodyBytes
-                && event.transport == Some(NacelleTransport::Http)
+                && event.transport == Some(NacelleTransport::new("http"))
                 && event.count == "hello bytes".len() as u64
         }));
         server_task.abort();

@@ -4,20 +4,28 @@ use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NacelleTransport {
-    Tcp,
-    UnixSocket,
-    Http,
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NacelleTransport(&'static str);
 
 impl NacelleTransport {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Tcp => "tcp",
-            Self::UnixSocket => "unix_socket",
-            Self::Http => "http",
-        }
+    pub const fn new(name: &'static str) -> Self {
+        Self(name)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
+impl From<&'static str> for NacelleTransport {
+    fn from(name: &'static str) -> Self {
+        Self::new(name)
+    }
+}
+
+impl std::fmt::Display for NacelleTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
     }
 }
 
@@ -864,7 +872,7 @@ impl OtelMetrics {
             runtime_state_registered: AtomicBool::new(false),
             runtime_state_gauges: Mutex::new(Vec::new()),
             connection_active: meter
-                .i64_up_down_counter("nacelle.connections.active")
+                .i64_up_down_counter("nacelle.connections.in_flight")
                 .build(),
             connection_accepted: meter.u64_counter("nacelle.connections.accepted").build(),
             connection_count: meter.u64_counter("nacelle.connections.opened").build(),
@@ -902,25 +910,25 @@ impl OtelMetrics {
         let memory = state;
         let gauges = vec![
             meter
-                .u64_observable_gauge("nacelle.runtime.connections.active")
+                .u64_observable_gauge("nacelle.connections.active")
                 .with_callback(move |observer| {
                     observer.observe(connections.active_connections() as u64, &[])
                 })
                 .build(),
             meter
-                .u64_observable_gauge("nacelle.runtime.requests.active")
+                .u64_observable_gauge("nacelle.requests.active")
                 .with_callback(move |observer| {
                     observer.observe(requests.active_requests() as u64, &[])
                 })
                 .build(),
             meter
-                .u64_observable_gauge("nacelle.runtime.streaming_tasks.active")
+                .u64_observable_gauge("nacelle.streaming_tasks.active")
                 .with_callback(move |observer| {
                     observer.observe(streaming.active_streaming_tasks() as u64, &[])
                 })
                 .build(),
             meter
-                .u64_observable_gauge("nacelle.runtime.memory.used_bytes")
+                .u64_observable_gauge("nacelle.memory.used_bytes")
                 .with_callback(move |observer| {
                     observer.observe(memory.memory_used_bytes() as u64, &[])
                 })
@@ -942,13 +950,13 @@ mod tests {
         let sink = Arc::new(NacelleInMemoryTelemetrySink::new());
         let telemetry = NacelleTelemetry::new().with_sink(sink.clone());
 
-        telemetry.connection_rejected(NacelleTransport::Tcp, "connections");
-        telemetry.request_rejected(NacelleTransport::Http, "host");
-        telemetry.timeout(NacelleTransport::Tcp, "request_body_read");
+        telemetry.connection_rejected(NacelleTransport::new("tcp"), "connections");
+        telemetry.request_rejected(NacelleTransport::new("http"), "host");
+        telemetry.timeout(NacelleTransport::new("tcp"), "request_body_read");
         telemetry.shutdown_requested();
         telemetry.shutdown_event(
             NacelleTelemetryEventKind::DrainCompleted,
-            NacelleTransport::Tcp,
+            NacelleTransport::new("tcp"),
         );
 
         let events = sink.events();

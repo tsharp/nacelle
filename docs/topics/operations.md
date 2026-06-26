@@ -39,12 +39,13 @@ Expected shutdown telemetry:
 
 ## Metrics To Watch
 
-- `nacelle.runtime.connections.active`
-- `nacelle.runtime.requests.active`
-- `nacelle.runtime.streaming_tasks.active`
-- `nacelle.runtime.memory.used_bytes`
+- `nacelle.connections.active`
+- `nacelle.requests.active`
+- `nacelle.streaming_tasks.active`
+- `nacelle.memory.used_bytes`
 - `nacelle.connections.accepted`
 - `nacelle.connections.closed`
+- `nacelle.connections.in_flight`
 - `nacelle.requests.started`
 - `nacelle.requests.completed`
 - `nacelle.rejections`
@@ -68,9 +69,28 @@ Request duration metrics remain opt-in through `NacelleTelemetryConfig`. With
 the default config, core/HTTP request paths avoid request timer work unless HTTP
 access logging is enabled.
 
+Canonical OpenTelemetry metric names are resource-first. Instrument type is
+documented here rather than embedded in the metric name:
+
+| Metric | Type | Notes |
+| --- | --- | --- |
+| `nacelle.connections.active` | Gauge | Current runtime active connections. |
+| `nacelle.requests.active` | Gauge | Current runtime active requests. |
+| `nacelle.streaming_tasks.active` | Gauge | Current runtime streaming body tasks. |
+| `nacelle.memory.used_bytes` | Gauge | Current bytes reserved by runtime memory accounting. |
+| `nacelle.connections.accepted` | Counter | Accepted connections, labeled by listener/transport/TLS where available. |
+| `nacelle.connections.closed` | Counter | Closed connections, labeled with close reason where available. |
+| `nacelle.connections.in_flight` | UpDownCounter | Per-listener connection delta for transport-level detail. |
+| `nacelle.requests.started` | Counter | Requests started. |
+| `nacelle.requests.completed` | Counter | Requests completed, labeled by status where available. |
+| `nacelle.requests.failed` | Counter | Requests failed before normal completion. |
+| `nacelle.request.bytes` | Counter | Request bytes accounted by the transport/protocol path. |
+| `nacelle.response.bytes` | Counter | Response bytes accounted by the transport/protocol path. |
+| `nacelle.request.duration_ms` | Histogram | Request duration, opt-in. |
+| `nacelle.phase.duration_ms` | Histogram | Internal phase duration, opt-in. |
+
 Run microbenchmarks before and after hot-path changes:
 
 ```bash
 cargo bench -p nacelle --features bench,reference_protocol
 ```
-
