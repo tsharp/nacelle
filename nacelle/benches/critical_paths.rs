@@ -110,7 +110,7 @@ fn runtime_limit_benches(c: &mut Criterion) {
     let peer_rate_state = NacelleRuntimeState::new(
         NacelleLimits::default()
             .with_max_connections(128_000)
-            .with_max_connection_opens_per_peer_per_second(128_000),
+            .with_max_connection_opens_per_peer_per_second(usize::MAX),
     );
     let unbounded_memory_state =
         NacelleRuntimeState::new(NacelleLimits::default().with_max_memory_bytes(usize::MAX));
