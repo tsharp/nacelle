@@ -80,6 +80,29 @@ pub mod util;
 
 pub use app::{NacelleApp, NacelleProtocols, serve};
 pub use host::NacelleHost;
+
+pub mod prelude {
+    pub use crate::{
+        BoxError, Handler, HandlerFn, NacelleApp, NacelleBody, NacelleConfig,
+        NacelleConnectionMeta, NacelleError, NacelleLimits, NacelleProtocols, NacelleRequest,
+        NacelleRequestMeta, NacelleRequestMetricsConfig, NacelleResponse, NacelleResponseMeta,
+        NacelleRuntimeState, NacelleShutdown, NacelleShutdownToken, NacelleTelemetry,
+        NacelleTelemetryConfig, NacelleTransport, RequestBodyMode, RequestMetadata, handler_fn,
+        serve,
+    };
+    #[cfg(feature = "tcp")]
+    pub use crate::{
+        DecodedRequest, NacelleTcpBindOptions, NacelleTcpLimits, NacelleTcpOptions,
+        NacelleTlsDetectionOptions, Protocol, TcpRequestMeta, TcpResponseMeta, TcpServer,
+    };
+    #[cfg(feature = "reference_protocol")]
+    pub use crate::{FrameRequest, LengthDelimitedProtocol};
+    #[cfg(feature = "http")]
+    pub use crate::{
+        HttpRequestMeta, HttpResponseMeta, HyperServer, NacelleHttpLimits, NacelleHttpPolicy,
+    };
+}
+
 #[cfg(feature = "tls-self-signed")]
 pub use nacelle_core::NacelleGeneratedTlsConfig;
 #[cfg(feature = "openssl")]

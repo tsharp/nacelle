@@ -37,10 +37,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 Minimal TCP service using the reference length-delimited protocol:
 
 ```rust
-use nacelle::{
-    FrameRequest, LengthDelimitedProtocol, NacelleError, NacelleRequest,
-    NacelleResponse, TcpServer, handler_fn,
-};
+use nacelle::prelude::*;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), NacelleError> {
@@ -52,13 +49,15 @@ async fn main() -> Result<(), NacelleError> {
         Ok(NacelleResponse::tcp_bytes("ok"))
     });
 
-    let server = TcpServer::<FrameRequest, ()>::builder()
-        .protocol(LengthDelimitedProtocol)
-        .handler(handler)
-        .build()?;
-
     let addr = "127.0.0.1:8080".parse().map_err(NacelleError::protocol)?;
-    server.serve_tcp(addr).await
+    let protocols = NacelleProtocols::new()
+        .tcp::<FrameRequest, _>("echo", addr, LengthDelimitedProtocol);
+
+    NacelleApp::new(handler)
+        .with_telemetry(NacelleTelemetry::default())
+        .with_ctrl_c_shutdown()
+        .serve(protocols)
+        .await
 }
 ```
 
@@ -96,6 +95,25 @@ cargo run --features reference_protocol,http --example dual_echo -- 127.0.0.1:80
 
 ## Feature Flags
 
+Choose the smallest feature set that matches the transports you actually run:
+
+```toml
+# TCP with the built-in reference protocol
+nacelle = { version = "0.1", features = ["reference_protocol"] }
+
+# HTTP only
+nacelle = { version = "0.1", default-features = false, features = ["http"] }
+
+# TCP + HTTP + OpenTelemetry metrics
+nacelle = { version = "0.1", features = ["reference_protocol", "http", "otel"] }
+
+# Local self-signed TLS for tests
+nacelle = { version = "0.1", features = ["reference_protocol", "tls-self-signed"] }
+
+# TCP with OpenSSL, without Rustls
+nacelle = { version = "0.1", default-features = false, features = ["tcp", "openssl"] }
+```
+
 | Feature | Purpose |
 | --- | --- |
 | `tcp` | Custom TCP protocol transport over TCP and Unix sockets. Enabled by default. |
@@ -106,7 +124,7 @@ cargo run --features reference_protocol,http --example dual_echo -- 127.0.0.1:80
 | `openssl` | OpenSSL-backed TLS for TCP. |
 | `openssl-vendored` | Build OpenSSL from source when native OpenSSL is unavailable. |
 | `tls-self-signed` | Generate ephemeral Rustls self-signed certificates for local tests. |
-| `otel` | OpenTelemetry metrics API integration, with low-overhead TCP lifecycle/request metrics by default. |
+| `otel` | OpenTelemetry metrics API integration through `NacelleTelemetry`. |
 | `tokio-util` | Bridge `tokio_util::sync::CancellationToken` into Nacelle shutdown. |
 | `tower` | Adapt `tower::Service<NacelleRequest>` into a Nacelle handler. |
 
@@ -117,8 +135,7 @@ OpenSSL builds need native OpenSSL development files unless you enable
 
 - `nacelle-core` contains shared request, response, body, resource limits,
     lifecycle, core telemetry, and TLS primitives.
-- `nacelle-tcp` contains the TCP transport, protocol runtime, TCP limits, and
-    TCP telemetry.
+- `nacelle-tcp` contains the TCP transport, protocol runtime, and TCP limits.
 - `nacelle-http` contains the Hyper HTTP/1 transport, HTTP limits, and HTTP edge
     policy.
 - `nacelle` is the convenience crate with re-exports and the reference protocol.
