@@ -29,9 +29,9 @@ fuzzing = []
 [dependencies]
 bytes = "1.10.1"
 http = { version = "1", optional = true }
-nacelle-core = { path = "../nacelle-core" }
-nacelle-http = { path = "../nacelle-http", optional = true }
-nacelle-tcp = { path = "../nacelle-tcp", optional = true }
+nacelle-core = { version = "0.1.0", path = "../nacelle-core" }
+nacelle-http = { version = "0.1.0", path = "../nacelle-http", optional = true }
+nacelle-tcp = { version = "0.1.0", path = "../nacelle-tcp", optional = true }
 tokio = { version = "1.47.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]

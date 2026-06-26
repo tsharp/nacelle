@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "../../README.md"
+publish = false
 keywords = ["networking", "tokio", "benchmark"]
 categories = ["asynchronous", "network-programming"]
 
