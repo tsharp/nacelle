@@ -9,6 +9,15 @@ on:
   push:
     branches: [main]
 
+env:
+  RUSTFLAGS: -Dwarnings
+  RUST_BACKTRACE: 1
+  nightly: nightly-2024-09-15
+
+defaults:
+  run:
+    shell: bash
+
 jobs:
   rust:
     name: Rust
@@ -70,6 +79,72 @@ jobs:
           tool: cargo-audit
       - name: Audit
         run: cargo audit
+
+  # Check formatting
+  rustfmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install Rust
+      run: rustup update stable
+    - name: Check formatting
+      run: cargo fmt --all --check
+
+  # TODO
+  # # Apply clippy lints
+  # clippy:
+  #   name: clippy
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #   - uses: actions/checkout@v4
+  #   - name: Apply clippy lints
+  #     run: cargo clippy --all-features
+
+  # This represents the minimum supported Rust version
+  minrust:
+    name: minrust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@cargo-hack
+      - name: Check
+        run: cargo hack check --feature-powerset --optional-deps --rust-version
+
+  # Stable
+  stable:
+    name: stable
+    strategy:
+      matrix:
+        os:
+          - ubuntu-latest
+          - ubuntu-22.04-arm # TODO: update to 24.04 when https://github.com/rust-lang/rust/issues/135867 solved
+          - macos-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
+        run: rustup update stable --no-self-update
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@cargo-hack
+      - name: Test
+        run: .github/scripts/test-stable.sh test
+
+  # Nightly
+  nightly:
+    name: nightly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup update $nightly && rustup default $nightly
+      - name: Install cargo-hack
+        uses: taiki-e/install-action@cargo-hack
+      - name: Test
+        run: .github/scripts/test-stable.sh test
 
   # Sanitizers
   tsan:
