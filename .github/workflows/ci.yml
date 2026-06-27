@@ -70,3 +70,47 @@ jobs:
           tool: cargo-audit
       - name: Audit
         run: cargo audit
+
+  # Sanitizers
+  tsan:
+    name: tsan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup update $nightly && rustup default $nightly
+      - name: Install rust-src
+        run: rustup component add rust-src
+      - name: ASAN / TSAN
+        run: .github/scripts/tsan.sh
+
+  miri:
+    name: miri
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup update $nightly && rustup default $nightly
+      - name: Miri
+        run: .github/scripts/miri.sh
+
+  # Loom
+  loom:
+    name: loom
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup update $nightly && rustup default $nightly
+      - name: Loom tests
+        run: .github/scripts/loom.sh
+
+  panic-abort:
+    name: panic=abort tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup update $nightly && rustup default $nightly
+      - name: Run tests with -Cpanic=abort
+        run: .github/scripts/panic-abort.sh
