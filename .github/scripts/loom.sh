@@ -1,4 +1,4 @@
 #!/bin/bash
-set -e
+set -ex
 
-RUSTFLAGS="--cfg loom -Dwarnings" cargo test --lib
+RUSTFLAGS="--cfg loom -Dwarnings" cargo test -p nacelle-core --lib
