@@ -20,10 +20,10 @@ name = "nacelle-stress-test"
 path = "src/main.rs"
 
 [dependencies]
-nacelle = { path = "../../nacelle", features = ["reference_protocol", "otel"] }
-nacelle-stress-common = { path = "../nacelle-stress-common" }
-bytes = "1.12.0"
-mimalloc = { version = "0.1", default-features = false }
-rustls = { version = "0.23.40", optional = true }
-tokio = { version = "1.47.1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
-tokio-rustls = { version = "0.26.4", optional = true }
+nacelle = { workspace = true, features = ["reference_protocol", "otel"] }
+nacelle-stress-common = { workspace = true }
+bytes = { workspace = true }
+mimalloc = { workspace = true }
+rustls = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-rustls = { workspace = true, optional = true }
