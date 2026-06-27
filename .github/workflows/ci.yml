@@ -13,7 +13,7 @@ env:
   RUSTFLAGS: -Dwarnings
   RUST_BACKTRACE: 1
   nightly: nightly-2026-04-16
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 defaults:
   run:
@@ -131,6 +131,23 @@ jobs:
       - name: Install Rust
         # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
         run: rustup update stable --no-self-update
+      - name: Install OpenSSL build dependencies (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - name: Install OpenSSL build dependencies (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: |
+          brew update
+          brew install pkg-config openssl@3
+          echo "OPENSSL_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> "$GITHUB_ENV"
+      - name: Install OpenSSL build dependencies (Windows)
+        if: startsWith(matrix.os, 'windows')
+        shell: pwsh
+        run: |
+          vcpkg install openssl:x64-windows
+          "VCPKG_ROOT=C:\vcpkg" >> $env:GITHUB_ENV
+          "VCPKGRS_DYNAMIC=1" >> $env:GITHUB_ENV
       - name: Install cargo-hack
         uses: taiki-e/install-action@cargo-hack
       - name: Test
