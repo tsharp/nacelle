@@ -2,6 +2,7 @@
 name = "nacelle-core"
 version = "0.2.0"
 edition = "2024"
+rust-version.workspace = true
 description = "Shared request, response, body, limits, lifecycle, telemetry, and TLS primitives for Nacelle."
 license.workspace = true
 repository.workspace = true
@@ -24,15 +25,15 @@ tokio-util = ["dep:tokio-util"]
 tower = ["dep:tower"]
 
 [dependencies]
-bytes = "1.10.1"
-futures-core = "0.3.31"
-http = { version = "1", optional = true }
-opentelemetry = { version = "0.32", optional = true }
-openssl = { version = "0.10.79", optional = true }
-pem = { version = "3.0.6", optional = true }
-rcgen = { version = "0.14.8", optional = true }
-rustls = { version = "0.23.40", optional = true }
-tokio = { version = "1.47.1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
-tokio-util = { version = "0.7.17", optional = true }
-tower = { version = "0.5", features = ["util"], optional = true }
-tracing = "0.1.44"
+bytes = { workspace = true }
+futures-core = { workspace = true }
+http = { workspace = true, optional = true }
+opentelemetry = { workspace = true, optional = true }
+openssl = { workspace = true, optional = true }
+pem = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-util = { workspace = true, optional = true }
+tower = { workspace = true, features = ["util"], optional = true }
+tracing = { workspace = true }
