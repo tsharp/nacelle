@@ -1,88 +1,24 @@
 use std::time::Duration;
 
+use std::sync::Arc;
+#[cfg(feature = "otel")]
+use std::sync::Mutex;
 #[cfg(feature = "otel")]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct NacelleTransport(&'static str);
+mod sink;
+pub use sink::{
+    NacelleInMemoryTelemetrySink, NacelleTelemetryEvent, NacelleTelemetryEventKind,
+    NacelleTelemetrySink, NacelleTransport,
+};
 
-impl NacelleTransport {
-    pub const fn new(name: &'static str) -> Self {
-        Self(name)
-    }
-
-    pub const fn as_str(self) -> &'static str {
-        self.0
-    }
-}
-
-impl From<&'static str> for NacelleTransport {
-    fn from(name: &'static str) -> Self {
-        Self::new(name)
-    }
-}
-
-impl std::fmt::Display for NacelleTransport {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NacelleTelemetryEventKind {
-    ListenerConfigured,
-    ListenerFailed,
-    ConnectionOpened,
-    ConnectionRejected,
-    RequestRejected,
-    RequestCompleted,
-    RequestFailed,
-    ResponseBodyBytes,
-    Timeout,
-    ShutdownRequested,
-    ListenerStoppedAccepting,
-    DrainStarted,
-    DrainCompleted,
-    DrainTimedOut,
-    ConnectionsAborted,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NacelleTelemetryEvent {
-    pub kind: NacelleTelemetryEventKind,
-    pub transport: Option<NacelleTransport>,
-    pub reason: Option<&'static str>,
-    pub count: u64,
-}
-
-pub trait NacelleTelemetrySink: Send + Sync + 'static {
-    fn record(&self, event: NacelleTelemetryEvent);
-}
-
-#[derive(Debug, Default)]
-pub struct NacelleInMemoryTelemetrySink {
-    events: Mutex<Vec<NacelleTelemetryEvent>>,
-}
-
-impl NacelleInMemoryTelemetrySink {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn events(&self) -> Vec<NacelleTelemetryEvent> {
-        self.events.lock().expect("telemetry sink poisoned").clone()
-    }
-}
-
-impl NacelleTelemetrySink for NacelleInMemoryTelemetrySink {
-    fn record(&self, event: NacelleTelemetryEvent) {
-        self.events
-            .lock()
-            .expect("telemetry sink poisoned")
-            .push(event);
-    }
-}
+#[cfg(feature = "otel")]
+mod attributes;
+#[cfg(feature = "otel")]
+use attributes::{
+    attributes_with_key_value, connection_attributes, error_attributes, phase_attributes,
+    request_attributes, shutdown_stage,
+};
 
 #[derive(Clone)]
 pub struct NacelleTelemetry {
@@ -745,97 +681,6 @@ fn error_reason(error: &crate::error::NacelleError) -> Option<&'static str> {
         crate::error::NacelleError::Protocol(_) => Some("protocol"),
         crate::error::NacelleError::Handler(_) => Some("handler"),
         crate::error::NacelleError::Join(_) => Some("join"),
-    }
-}
-
-#[cfg(feature = "otel")]
-fn connection_attributes(
-    transport: NacelleTransport,
-    listener: &Arc<str>,
-    tls: &'static str,
-) -> Arc<[opentelemetry::KeyValue]> {
-    Arc::from(
-        vec![
-            opentelemetry::KeyValue::new("listener", listener.as_ref().to_owned()),
-            opentelemetry::KeyValue::new("transport", transport.as_str()),
-            opentelemetry::KeyValue::new("tls", tls),
-        ]
-        .into_boxed_slice(),
-    )
-}
-
-#[cfg(feature = "otel")]
-fn request_attributes(
-    connection_attributes: &[opentelemetry::KeyValue],
-    protocol: &'static str,
-) -> Arc<[opentelemetry::KeyValue]> {
-    let mut attributes = connection_attributes.to_vec();
-    attributes.push(opentelemetry::KeyValue::new("protocol", protocol));
-    Arc::from(attributes.into_boxed_slice())
-}
-
-#[cfg(feature = "otel")]
-fn attributes_with_key_value(
-    attributes: &[opentelemetry::KeyValue],
-    key_value: opentelemetry::KeyValue,
-) -> Arc<[opentelemetry::KeyValue]> {
-    let mut attributes = attributes.to_vec();
-    attributes.push(key_value);
-    Arc::from(attributes.into_boxed_slice())
-}
-
-#[cfg(feature = "otel")]
-fn phase_attributes(
-    context: &NacelleMetricsContext,
-    phase: &'static str,
-) -> Vec<opentelemetry::KeyValue> {
-    let mut attributes =
-        request_attributes(context.connection_attributes(), context.protocol).to_vec();
-    attributes.push(opentelemetry::KeyValue::new("phase", phase));
-    attributes
-}
-
-#[cfg(feature = "otel")]
-fn error_attributes(
-    context: &NacelleMetricsContext,
-    phase: &'static str,
-    error: &crate::error::NacelleError,
-) -> Vec<opentelemetry::KeyValue> {
-    let mut attributes = phase_attributes(context, phase);
-    attributes.push(opentelemetry::KeyValue::new(
-        "error_kind",
-        error_kind(error),
-    ));
-    attributes
-}
-
-#[cfg(feature = "otel")]
-fn error_kind(error: &crate::error::NacelleError) -> &'static str {
-    match error {
-        crate::error::NacelleError::ResourceLimit(_) => "resource_limit",
-        crate::error::NacelleError::Timeout(_) => "timeout",
-        crate::error::NacelleError::InvalidFrame(_) => "invalid_frame",
-        crate::error::NacelleError::FrameTooLarge { .. } => "frame_too_large",
-        crate::error::NacelleError::UnexpectedEof => "unexpected_eof",
-        crate::error::NacelleError::ConnectionClosed => "connection_closed",
-        crate::error::NacelleError::MissingProtocol => "missing_protocol",
-        crate::error::NacelleError::Io(_) => "io",
-        crate::error::NacelleError::Protocol(_) => "protocol",
-        crate::error::NacelleError::Handler(_) => "handler",
-        crate::error::NacelleError::Join(_) => "join",
-    }
-}
-
-#[cfg(feature = "otel")]
-fn shutdown_stage(kind: NacelleTelemetryEventKind) -> &'static str {
-    match kind {
-        NacelleTelemetryEventKind::ShutdownRequested => "requested",
-        NacelleTelemetryEventKind::ListenerStoppedAccepting => "listener_stopped_accepting",
-        NacelleTelemetryEventKind::DrainStarted => "drain_started",
-        NacelleTelemetryEventKind::DrainCompleted => "drain_completed",
-        NacelleTelemetryEventKind::DrainTimedOut => "drain_timed_out",
-        NacelleTelemetryEventKind::ConnectionsAborted => "connections_aborted",
-        _ => "other",
     }
 }
 
