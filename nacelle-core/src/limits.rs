@@ -438,75 +438,47 @@ impl NacelleRuntimeState {
         timeout: Option<Duration>,
         shutdown: Option<NacelleShutdownToken>,
     ) -> Result<NacelleMemoryAllocation, NacelleError> {
-        match (timeout, shutdown) {
-            (Some(timeout), Some(mut shutdown)) => {
-                let timer = tokio::time::sleep(timeout);
-                tokio::pin!(timer);
-                loop {
-                    tokio::select! {
-                        _ = notify.notified() => {
-                            if granted.load(Ordering::Acquire) {
-                                return Ok(NacelleMemoryAllocation { state: Some(self.clone()), bytes });
-                            }
-                        }
-                        _ = &mut timer => {
-                            if self.cancel_memory_waiter(id, &granted) {
-                                return Ok(NacelleMemoryAllocation { state: Some(self.clone()), bytes });
-                            }
-                            return Err(NacelleError::Timeout("memory_allocation"));
-                        }
-                        _ = shutdown.changed() => {
-                            if self.cancel_memory_waiter(id, &granted) {
-                                return Ok(NacelleMemoryAllocation { state: Some(self.clone()), bytes });
-                            }
-                            return Err(NacelleError::ConnectionClosed);
-                        }
+        // Normalize the optional timeout/shutdown branches to always-present
+        // futures so a single `select!` covers every combination. A `None`
+        // branch resolves to `pending()`, i.e. it never fires.
+        async fn wait_optional_timer(timer: &mut Option<std::pin::Pin<Box<tokio::time::Sleep>>>) {
+            match timer {
+                Some(timer) => timer.as_mut().await,
+                None => std::future::pending().await,
+            }
+        }
+
+        async fn wait_optional_shutdown(shutdown: &mut Option<NacelleShutdownToken>) {
+            match shutdown {
+                Some(shutdown) => {
+                    shutdown.changed().await;
+                }
+                None => std::future::pending().await,
+            }
+        }
+
+        let mut timer = timeout.map(|timeout| Box::pin(tokio::time::sleep(timeout)));
+        let mut shutdown = shutdown;
+        loop {
+            tokio::select! {
+                _ = notify.notified() => {
+                    if granted.load(Ordering::Acquire) {
+                        return Ok(NacelleMemoryAllocation { state: Some(self.clone()), bytes });
                     }
+                }
+                _ = wait_optional_timer(&mut timer) => {
+                    if self.cancel_memory_waiter(id, &granted) {
+                        return Ok(NacelleMemoryAllocation { state: Some(self.clone()), bytes });
+                    }
+                    return Err(NacelleError::Timeout("memory_allocation"));
+                }
+                _ = wait_optional_shutdown(&mut shutdown) => {
+                    if self.cancel_memory_waiter(id, &granted) {
+                        return Ok(NacelleMemoryAllocation { state: Some(self.clone()), bytes });
+                    }
+                    return Err(NacelleError::ConnectionClosed);
                 }
             }
-            (Some(timeout), None) => {
-                let timer = tokio::time::sleep(timeout);
-                tokio::pin!(timer);
-                loop {
-                    tokio::select! {
-                        _ = notify.notified() => {
-                            if granted.load(Ordering::Acquire) {
-                                return Ok(NacelleMemoryAllocation { state: Some(self.clone()), bytes });
-                            }
-                        }
-                        _ = &mut timer => {
-                            if self.cancel_memory_waiter(id, &granted) {
-                                return Ok(NacelleMemoryAllocation { state: Some(self.clone()), bytes });
-                            }
-                            return Err(NacelleError::Timeout("memory_allocation"));
-                        }
-                    }
-                }
-            }
-            (None, Some(mut shutdown)) => loop {
-                tokio::select! {
-                    _ = notify.notified() => {
-                        if granted.load(Ordering::Acquire) {
-                            return Ok(NacelleMemoryAllocation { state: Some(self.clone()), bytes });
-                        }
-                    }
-                    _ = shutdown.changed() => {
-                        if self.cancel_memory_waiter(id, &granted) {
-                            return Ok(NacelleMemoryAllocation { state: Some(self.clone()), bytes });
-                        }
-                        return Err(NacelleError::ConnectionClosed);
-                    }
-                }
-            },
-            (None, None) => loop {
-                notify.notified().await;
-                if granted.load(Ordering::Acquire) {
-                    return Ok(NacelleMemoryAllocation {
-                        state: Some(self.clone()),
-                        bytes,
-                    });
-                }
-            },
         }
     }
 
