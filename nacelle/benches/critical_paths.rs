@@ -213,8 +213,7 @@ fn contended_memory_allocation_waves(
     let workers = thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1)
-        .min(MEMORY_CONTENTION_CONNECTIONS)
-        .max(1);
+        .clamp(1, MEMORY_CONTENTION_CONNECTIONS);
     let base_allocations = MEMORY_CONTENTION_CONNECTIONS / workers;
     let extra_allocations = MEMORY_CONTENTION_CONNECTIONS % workers;
     let ready = Arc::new(Barrier::new(workers + 1));
