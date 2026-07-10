@@ -70,7 +70,8 @@ function Test-CrateVersion {
             -Headers @{ "User-Agent" = "nacelle-publish-script" } `
             -TimeoutSec 20 | Out-Null
         return $true
-    } catch {
+    }
+    catch {
         if ($_.Exception.Response -and [int]$_.Exception.Response.StatusCode -eq 404) {
             return $false
         }
@@ -134,10 +135,11 @@ if (-not $SkipValidation) {
 }
 
 $release = [ordered]@{
-    "nacelle-core" = Get-PackageVersion -Name "nacelle-core"
-    "nacelle-tcp" = Get-PackageVersion -Name "nacelle-tcp"
-    "nacelle-http" = Get-PackageVersion -Name "nacelle-http"
-    "nacelle" = Get-PackageVersion -Name "nacelle"
+    "nacelle-codec" = Get-PackageVersion -Name "nacelle-codec"
+    "nacelle-core"  = Get-PackageVersion -Name "nacelle-core"
+    "nacelle-tcp"   = Get-PackageVersion -Name "nacelle-tcp"
+    "nacelle-http"  = Get-PackageVersion -Name "nacelle-http"
+    "nacelle"       = Get-PackageVersion -Name "nacelle"
 }
 
 if (-not $Publish) {
@@ -147,6 +149,9 @@ if (-not $Publish) {
     Write-Host "==> Run with -Publish to publish in dependency order."
     return
 }
+
+Invoke-CargoPublish -Name "nacelle-codec" -Version $release["nacelle-codec"]
+Wait-CrateVersion -Name "nacelle-codec" -Version $release["nacelle-codec"]
 
 Invoke-CargoPublish -Name "nacelle-core" -Version $release["nacelle-core"]
 Wait-CrateVersion -Name "nacelle-core" -Version $release["nacelle-core"]
