@@ -1,8 +1,16 @@
-use bytes::{Bytes, BytesMut};
+use std::convert::Infallible;
+use std::marker::PhantomData;
+use std::sync::Arc;
+
+use bytes::{BufMut, Bytes, BytesMut};
+use nacelle_codec::MessageDecoder;
 
 use nacelle_core::error::NacelleError;
-use nacelle_core::request::RequestMetadata;
-use nacelle_core::response::TcpResponseMeta;
+use nacelle_core::pipeline::{
+    Completed, ConnectionContext, ConnectionInfo, Handler, LocalHandler, NoResponse,
+    RequestContext, RequiredCompletion, RequiredResponder, Respond,
+};
+use nacelle_core::request::NacelleBody;
 
 #[derive(Debug)]
 pub struct DecodedRequest<Req> {
@@ -10,16 +18,387 @@ pub struct DecodedRequest<Req> {
     pub body_len: usize,
 }
 
-/// Translates one TCP wire protocol into Nacelle's app-facing request/response model.
-///
-/// Implementations decode request heads from bytes, expose low-cardinality
-/// request metadata to the app core, and encode [`nacelle_core::response::NacelleResponse`]
-/// bodies back into protocol frames. Protocols should stay focused on wire
-/// translation; application behavior belongs in the [`nacelle_core::handler::Handler`].
-pub trait Protocol<Req>: Send + Sync + 'static
+/// One decoded protocol message classified before application dispatch.
+#[derive(Debug)]
+pub enum DecodedMessage<Request, OneWayRequest> {
+    /// Message whose handler must produce a typed response completion.
+    Request(DecodedRequest<Request>),
+    /// Message whose handler cannot produce transport output.
+    OneWay(DecodedRequest<OneWayRequest>),
+}
+
+/// Bounded response-frame encoder backed by runtime-accounted storage.
+pub struct FrameBuffer<'buffer> {
+    inner: &'buffer mut BytesMut,
+    start_len: usize,
+    max_len: usize,
+}
+
+impl<'buffer> FrameBuffer<'buffer> {
+    /// Wrap response-frame storage with its maximum encoded length.
+    pub const fn new(inner: &'buffer mut BytesMut, max_len: usize) -> Self {
+        Self {
+            inner,
+            start_len: 0,
+            max_len,
+        }
+    }
+
+    pub(crate) fn append_to(inner: &'buffer mut BytesMut, max_len: usize) -> Self {
+        let start_len = inner.len();
+        Self {
+            inner,
+            start_len,
+            max_len,
+        }
+    }
+
+    /// Current encoded frame length.
+    pub fn len(&self) -> usize {
+        self.inner.len().saturating_sub(self.start_len)
+    }
+
+    /// Return whether the encoded frame is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Append bytes if they fit inside the declared frame bound.
+    pub fn extend_from_slice(&mut self, bytes: &[u8]) -> Result<(), NacelleError> {
+        self.ensure_capacity(bytes.len())?;
+        self.inner.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    /// Append one little-endian `u32`.
+    pub fn put_u32_le(&mut self, value: u32) -> Result<(), NacelleError> {
+        self.ensure_capacity(std::mem::size_of::<u32>())?;
+        self.inner.put_u32_le(value);
+        Ok(())
+    }
+
+    /// Append one little-endian `u64`.
+    pub fn put_u64_le(&mut self, value: u64) -> Result<(), NacelleError> {
+        self.ensure_capacity(std::mem::size_of::<u64>())?;
+        self.inner.put_u64_le(value);
+        Ok(())
+    }
+
+    fn ensure_capacity(&self, additional: usize) -> Result<(), NacelleError> {
+        let next = self
+            .len()
+            .checked_add(additional)
+            .ok_or(NacelleError::ResourceLimit("response_frame_bytes"))?;
+        if next > self.max_len {
+            return Err(NacelleError::ResourceLimit("response_frame_bytes"));
+        }
+        Ok(())
+    }
+}
+
+/// Application-facing TCP request containing a protocol head and body stream.
+pub struct TcpRequest<Request> {
+    /// Protocol-specific decoded request head.
+    pub head: Request,
+    /// Bounded request body supplied by the TCP runtime.
+    pub body: NacelleBody,
+}
+
+/// Default application-facing TCP response.
+pub struct TcpResponse {
+    /// Response body encoded by the originating protocol.
+    pub body: NacelleBody,
+}
+
+impl TcpResponse {
+    /// Construct a response body with inherited protocol metadata.
+    pub fn new(body: NacelleBody) -> Self {
+        Self { body }
+    }
+
+    /// Construct a byte response with inherited protocol metadata.
+    pub fn bytes(bytes: impl Into<Bytes>) -> Self {
+        Self::new(NacelleBody::bytes(bytes))
+    }
+
+    /// Construct an empty response.
+    pub fn empty() -> Self {
+        Self::new(NacelleBody::empty())
+    }
+}
+
+/// Zero-allocation response capability for one decoded TCP request.
+#[derive(Debug)]
+pub struct TcpResponder<Response, ResponseContext> {
+    response_context: ResponseContext,
+    _response: PhantomData<fn(Response)>,
+}
+
+impl<Response, ResponseContext> TcpResponder<Response, ResponseContext> {
+    pub(crate) const fn new(response_context: ResponseContext) -> Self {
+        Self {
+            response_context,
+            _response: PhantomData,
+        }
+    }
+}
+
+/// Typed response and protocol context returned to the connection loop.
+#[must_use = "TCP completion must be encoded by the connection loop"]
+#[derive(Debug)]
+pub struct TcpCompletion<Response, ResponseContext> {
+    pub(crate) response: Response,
+    pub(crate) response_context: ResponseContext,
+}
+
+/// Concrete application context for one required-response TCP request.
+pub type TcpRequestContext<P> = RequestContext<
+    TcpRequest<<P as Protocol>::Request>,
+    RequiredResponder<TcpResponder<<P as Protocol>::Response, <P as Protocol>::ResponseContext>>,
+    (),
+    ConnectionContext<Arc<<P as Protocol>::ConnectionState>>,
+>;
+
+/// Successful completion required from a typed TCP handler.
+pub type TcpHandlerCompletion<P> =
+    RequiredCompletion<TcpCompletion<<P as Protocol>::Response, <P as Protocol>::ResponseContext>>;
+
+/// Statically dispatched application handler for one TCP protocol.
+pub trait TcpHandler<P>:
+    Handler<TcpRequestContext<P>, Completion = TcpHandlerCompletion<P>, Error = NacelleError>
 where
-    Req: RequestMetadata,
+    P: SharedProtocol,
 {
+}
+
+impl<P, H> TcpHandler<P> for H
+where
+    P: SharedProtocol,
+    H: Handler<TcpRequestContext<P>, Completion = TcpHandlerCompletion<P>, Error = NacelleError>,
+{
+}
+
+/// Worker-local application handler for one TCP protocol.
+///
+/// Unlike [`TcpHandler`], this contract permits `!Send` futures and handler
+/// state. It is accepted only by the explicit thread-per-core runtime.
+pub trait LocalTcpHandler<P>:
+    LocalHandler<TcpRequestContext<P>, Completion = TcpHandlerCompletion<P>, Error = NacelleError>
+where
+    P: Protocol,
+{
+}
+
+/// Exclusive connection-state context for one serial required-response request.
+pub type SerialTcpRequestContext<'connection, P> = RequestContext<
+    TcpRequest<<P as Protocol>::Request>,
+    RequiredResponder<TcpResponder<<P as Protocol>::Response, <P as Protocol>::ResponseContext>>,
+    (),
+    &'connection mut ConnectionContext<<P as Protocol>::ConnectionState>,
+>;
+
+/// Shared-runtime handler with exclusive access to one connection's state.
+///
+/// The connection loop awaits each call before decoding the next request, so
+/// safe implementations cannot overlap mutable access for one connection.
+pub trait SerialTcpHandler<P>: Send + Sync + 'static
+where
+    P: Protocol,
+    P::ConnectionState: Send,
+{
+    fn call<'connection>(
+        &'connection self,
+        context: SerialTcpRequestContext<'connection, P>,
+    ) -> impl Future<Output = Result<TcpHandlerCompletion<P>, NacelleError>> + Send + 'connection;
+}
+
+/// Worker-local serial handler with exclusive mutable connection state.
+#[allow(clippy::future_not_send)]
+pub trait LocalSerialTcpHandler<P>
+where
+    P: Protocol,
+{
+    fn call<'connection>(
+        &'connection self,
+        context: SerialTcpRequestContext<'connection, P>,
+    ) -> impl Future<Output = Result<TcpHandlerCompletion<P>, NacelleError>> + 'connection;
+}
+
+impl<P, H> LocalTcpHandler<P> for H
+where
+    P: Protocol,
+    H: LocalHandler<
+            TcpRequestContext<P>,
+            Completion = TcpHandlerCompletion<P>,
+            Error = NacelleError,
+        >,
+{
+}
+
+/// Concrete application context for one one-way TCP message.
+pub type TcpOneWayContext<P> = RequestContext<
+    TcpRequest<<P as Protocol>::OneWayRequest>,
+    NoResponse,
+    (),
+    ConnectionContext<Arc<<P as Protocol>::ConnectionState>>,
+>;
+
+/// Statically dispatched one-way handler for one TCP protocol.
+pub trait TcpOneWayHandler<P>:
+    Handler<TcpOneWayContext<P>, Completion = Completed, Error = NacelleError>
+where
+    P: SharedProtocol,
+{
+}
+
+impl<P, H> TcpOneWayHandler<P> for H
+where
+    P: SharedProtocol,
+    H: Handler<TcpOneWayContext<P>, Completion = Completed, Error = NacelleError>,
+{
+}
+
+/// Worker-local one-way handler for one TCP protocol.
+pub trait LocalTcpOneWayHandler<P>:
+    LocalHandler<TcpOneWayContext<P>, Completion = Completed, Error = NacelleError>
+where
+    P: Protocol,
+{
+}
+
+/// Exclusive connection-state context for one serial one-way message.
+pub type SerialTcpOneWayContext<'connection, P> = RequestContext<
+    TcpRequest<<P as Protocol>::OneWayRequest>,
+    NoResponse,
+    (),
+    &'connection mut ConnectionContext<<P as Protocol>::ConnectionState>,
+>;
+
+/// Shared-runtime serial one-way handler.
+pub trait SerialTcpOneWayHandler<P>: Send + Sync + 'static
+where
+    P: Protocol,
+    P::ConnectionState: Send,
+{
+    fn call<'connection>(
+        &'connection self,
+        context: SerialTcpOneWayContext<'connection, P>,
+    ) -> impl Future<Output = Result<Completed, NacelleError>> + Send + 'connection;
+}
+
+/// Worker-local serial one-way handler.
+#[allow(clippy::future_not_send)]
+pub trait LocalSerialTcpOneWayHandler<P>
+where
+    P: Protocol,
+{
+    fn call<'connection>(
+        &'connection self,
+        context: SerialTcpOneWayContext<'connection, P>,
+    ) -> impl Future<Output = Result<Completed, NacelleError>> + 'connection;
+}
+
+impl<P, H> LocalTcpOneWayHandler<P> for H
+where
+    P: Protocol,
+    H: LocalHandler<TcpOneWayContext<P>, Completion = Completed, Error = NacelleError>,
+{
+}
+
+/// Zero-sized handler for protocols that cannot decode one-way messages.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoOneWayHandler<P>(PhantomData<fn() -> P>);
+
+impl<P> NoOneWayHandler<P> {
+    pub(crate) const fn new() -> Self {
+        Self(PhantomData)
+    }
+}
+
+impl<P> Handler<TcpOneWayContext<P>> for NoOneWayHandler<P>
+where
+    P: SharedProtocol<OneWayRequest = Infallible>,
+{
+    type Completion = Completed;
+    type Error = NacelleError;
+
+    async fn call(&self, _context: TcpOneWayContext<P>) -> Result<Self::Completion, Self::Error> {
+        unreachable!("an Infallible one-way request cannot be decoded")
+    }
+}
+
+#[allow(clippy::future_not_send)]
+impl<P> LocalHandler<TcpOneWayContext<P>> for NoOneWayHandler<P>
+where
+    P: Protocol<OneWayRequest = Infallible>,
+{
+    type Completion = Completed;
+    type Error = NacelleError;
+
+    async fn call(&self, _context: TcpOneWayContext<P>) -> Result<Self::Completion, Self::Error> {
+        unreachable!("an Infallible one-way request cannot be decoded")
+    }
+}
+
+impl<P> SerialTcpOneWayHandler<P> for NoOneWayHandler<P>
+where
+    P: Protocol<OneWayRequest = Infallible>,
+    P::ConnectionState: Send,
+{
+    async fn call<'connection>(
+        &'connection self,
+        _context: SerialTcpOneWayContext<'connection, P>,
+    ) -> Result<Completed, NacelleError> {
+        unreachable!("an Infallible one-way request cannot be decoded")
+    }
+}
+
+#[allow(clippy::future_not_send)]
+impl<P> LocalSerialTcpOneWayHandler<P> for NoOneWayHandler<P>
+where
+    P: Protocol<OneWayRequest = Infallible>,
+{
+    async fn call<'connection>(
+        &'connection self,
+        _context: SerialTcpOneWayContext<'connection, P>,
+    ) -> Result<Completed, NacelleError> {
+        unreachable!("an Infallible one-way request cannot be decoded")
+    }
+}
+
+impl<Response, ResponseContext> Respond for TcpResponder<Response, ResponseContext> {
+    type Response = Response;
+    type Completion = TcpCompletion<Response, ResponseContext>;
+    type Error = NacelleError;
+
+    async fn respond(self, response: Self::Response) -> Result<Self::Completion, Self::Error> {
+        Ok(TcpCompletion {
+            response,
+            response_context: self.response_context,
+        })
+    }
+}
+
+/// Translates one TCP wire protocol into typed application requests and responses.
+///
+/// Implementations decode request heads, select request limits, and encode only
+/// their associated [`Protocol::Response`] type. Application behavior runs
+/// through a statically dispatched [`TcpHandler`] and cannot return an HTTP or
+/// other transport response by mistake.
+pub trait Protocol: Send + Sync + 'static {
+    /// Decoded request head for this wire protocol.
+    type Request: Send + 'static;
+    /// Decoded one-way request head, or [`Infallible`] when unsupported.
+    type OneWayRequest: Send + 'static;
+    /// Application response accepted by this protocol.
+    type Response: Send + 'static;
+    /// Concrete state shared by requests on one accepted connection.
+    type ConnectionState: 'static;
+    type Decoder: MessageDecoder<
+            Message = DecodedMessage<Self::Request, Self::OneWayRequest>,
+            Error = NacelleError,
+        > + Send
+        + 'static;
     type ResponseContext: Send + 'static;
     type ErrorContext: Send + 'static;
 
@@ -27,50 +406,115 @@ where
         std::any::type_name::<Self>()
     }
 
-    fn decode_head(
+    /// Create a decoder for one connection.
+    fn decoder(&self, max_frame_len: usize) -> Self::Decoder;
+
+    /// Construct connection state once after accept/TLS handshake.
+    fn connection_state(&self, connection: &ConnectionInfo) -> Self::ConnectionState;
+
+    /// Return total wire bytes for this request, including protocol framing.
+    fn request_wire_bytes(&self, request: &Self::Request, body_len: usize) -> usize;
+
+    /// Return total wire bytes for one one-way message.
+    fn one_way_wire_bytes(&self, request: &Self::OneWayRequest, body_len: usize) -> usize;
+
+    /// Select the body limit after decoding the request head.
+    ///
+    /// `state` is the same connection-local value exposed to handlers. The
+    /// runtime calls this hook before body-specific allocation or additional
+    /// body reads.
+    fn max_request_body_bytes(
         &self,
-        src: &mut BytesMut,
-        max_frame_len: usize,
-    ) -> Result<Option<DecodedRequest<Req>>, NacelleError>;
-
-    fn response_context(&self, req: &Req) -> Self::ResponseContext;
-
-    fn error_context(&self, req: &Req) -> Self::ErrorContext;
-
-    fn apply_tcp_response_meta(
-        &self,
-        _context: &mut Self::ResponseContext,
-        _meta: &TcpResponseMeta,
-    ) {
+        _request: &Self::Request,
+        _connection: &ConnectionInfo,
+        _state: &Self::ConnectionState,
+        default_limit: usize,
+    ) -> usize {
+        default_limit
     }
+
+    /// Select the body limit after decoding a one-way message head.
+    ///
+    /// Required-response and one-way messages observe identical connection
+    /// metadata and state semantics.
+    fn max_one_way_body_bytes(
+        &self,
+        _request: &Self::OneWayRequest,
+        _connection: &ConnectionInfo,
+        _state: &Self::ConnectionState,
+        default_limit: usize,
+    ) -> usize {
+        default_limit
+    }
+
+    fn response_context(&self, req: &Self::Request) -> Self::ResponseContext;
+
+    fn error_context(&self, req: &Self::Request) -> Self::ErrorContext;
+
+    /// Apply protocol-specific response values before body encoding.
+    fn apply_response(&self, context: &mut Self::ResponseContext, response: &Self::Response);
+
+    /// Maximum framing bytes added around one encoded response chunk.
+    fn max_response_frame_overhead(&self) -> usize;
+
+    /// Extract the streaming body from a typed protocol response.
+    fn response_body(&self, response: Self::Response) -> NacelleBody;
 
     fn encode_response_chunk(
         &self,
         context: &mut Self::ResponseContext,
         chunk: Bytes,
-        dst: &mut BytesMut,
+        dst: &mut FrameBuffer<'_>,
     ) -> Result<(), NacelleError>;
 
     fn encode_response_terminal_chunk(
         &self,
         context: &mut Self::ResponseContext,
         chunk: Bytes,
-        dst: &mut BytesMut,
-    ) -> Result<(), NacelleError> {
-        self.encode_response_chunk(context, chunk, dst)?;
-        self.encode_response_end(context, dst)
-    }
+        dst: &mut FrameBuffer<'_>,
+    ) -> Result<(), NacelleError>;
 
     fn encode_response_end(
         &self,
         context: &mut Self::ResponseContext,
-        dst: &mut BytesMut,
+        dst: &mut FrameBuffer<'_>,
     ) -> Result<(), NacelleError>;
 
     fn encode_error(
         &self,
         context: Option<&Self::ErrorContext>,
         error: &NacelleError,
-        dst: &mut BytesMut,
+        dst: &mut FrameBuffer<'_>,
     ) -> Result<(), NacelleError>;
+}
+
+/// Protocol whose connection state may be shared across runtime threads.
+pub trait SharedProtocol: Protocol<ConnectionState: Send + Sync> {}
+
+impl<P> SharedProtocol for P
+where
+    P: Protocol,
+    P::ConnectionState: Send + Sync,
+{
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_buffer_new_keeps_cumulative_buffer_semantics() {
+        let mut bytes = BytesMut::from(&b"prior"[..]);
+        let mut frame = FrameBuffer::new(&mut bytes, 6);
+
+        assert_eq!(frame.len(), 5);
+        frame
+            .extend_from_slice(b"!")
+            .expect("remaining cumulative capacity should be available");
+        assert!(matches!(
+            frame.extend_from_slice(b"x"),
+            Err(NacelleError::ResourceLimit("response_frame_bytes"))
+        ));
+        assert_eq!(&bytes[..], b"prior!");
+    }
 }

@@ -14,10 +14,10 @@ Recommended presets:
 - Internet-facing behind proxy: cap connections and requests to the container budget, keep 30 second transport timeouts, and let the proxy own coarse traffic filtering or certificate automation when desired.
 - Proxy-aware HTTP: configure `NacelleHttpPolicy::with_trusted_proxy_ips(...)` only with known proxy addresses before allowing `Forwarded` or `X-Forwarded-For` to affect per-peer request limits or request metadata.
 - Direct HTTPS listener: enable `http,tls`, load certificate/key material through `NacelleTlsConfig`, configure an SNI allowlist with `from_pem_with_allowed_server_names` or `from_der_with_allowed_server_names`, set a short TLS handshake timeout, configure `max_connections_per_peer` and `max_connection_opens_per_peer_per_second`, enable HTTP access logs, and attach `NacelleHttpPolicy` with Host, method, URI, header, security-header, and per-peer request-rate limits.
-- Direct TCP Rustls listener: enable `tcp,tls`, load certificate/key material through `NacelleTlsConfig`, use `serve_tcp_tls` or `enable_tcp_tls`, and keep protocol-level authentication/authorization in the application protocol.
-- Direct TCP OpenSSL listener: enable `tcp,openssl`, load certificate/key material through `NacelleOpenSslConfig`, use `serve_tcp_openssl`, `enable_tcp_openssl`, or `NacelleProtocols::tcp_openssl`, and configure the `SslAcceptor` yourself when you need OpenSSL-specific policy.
+- Direct TCP Rustls listener: enable `tcp,tls`, load certificate/key material through `NacelleTlsConfig`, register it with `NacelleApp::tcp_tls(...)`, and keep protocol-level authentication/authorization in the application protocol.
+- Direct TCP OpenSSL listener: enable `tcp,openssl`, load certificate/key material through `NacelleOpenSslConfig`, register it with `NacelleApp::tcp_openssl(...)`, and configure the `SslAcceptor` yourself when you need OpenSSL-specific policy.
 - Optional TCP OpenSSL listener: enable `tcp,openssl`, use `serve_tcp_optional_openssl` or the matching host/app builder method, and keep `NacelleTlsDetectionOptions::timeout` short enough for your accepted-connection budget.
-- IPv4 plus IPv6 TCP bind: use the `NacelleProtocols::*_dual_stack(...)` helpers when a serve-based app should bind both wildcard families for one protocol. The helpers register separate IPv4 and IPv6 listeners and force the IPv6 listener to v6-only mode.
+- IPv4 plus IPv6 TCP bind: use the `NacelleApp::*_dual_stack(...)` helpers to register separate IPv4 and IPv6 listeners while forcing the IPv6 listener to v6-only mode.
 - Unix socket listener: enable `tcp` on Unix and use `NacelleUnixSocketOptions` only when this process owns stale-path cleanup or socket-file permissions.
 - Local load-test/autodeploy HTTPS: enable `tls-self-signed` and call `NacelleTlsConfig::self_signed(...)`; do not treat generated certificates as a public trust or rotation strategy.
 - High concurrency: reduce TCP buffer capacities before raising `max_connections`, and tune `NacelleTcpLimits` separately from shared resource budgets.
@@ -46,14 +46,27 @@ the same budget as the transports.
 TCP processes requests sequentially per connection. `request_body_channel_capacity` controls the queued streaming chunks between the socket reader and handler. HTTP uses Hyper's internal buffers plus Nacelle's body queue, so leave extra headroom when enabling large request bodies.
 
 For TCP protocols, `NacelleLimits::max_request_body_bytes` is the default body
-limit. Override `RequestMetadata::max_body_bytes(connection, default_limit)`
-when the decoded request head and connection extension state should choose a
-stricter phase-specific cap before Nacelle buffers or streams the body.
+limit. Override
+`Protocol::max_request_body_bytes(request, connection, state, default_limit)`
+when the decoded request head, immutable connection metadata, or concrete
+`Protocol::ConnectionState` should choose a stricter phase-specific cap. The
+hook runs before body-specific allocation or additional body reads; normal
+decoder read-ahead may already have placed bytes in the connection buffer.
 
 `NacelleTcpOptions` controls accepted TCP stream behavior. Defaults preserve the
 existing behavior: `TCP_NODELAY` enabled and TCP keepalive disabled.
 `NacelleTcpBindOptions` adds listener bind controls such as IPv6-only mode for
 APIs that need explicit family behavior.
+
+TCP response delivery defaults to `ResponseWritePolicy::Immediate`.
+`CoalesceBuffered` uses `response_buffer_capacity` as its threshold, while
+`FlushAtBytes(n)` uses `max(n, 1)`. Only complete frames enter the pending batch;
+the runtime flushes before another socket read, before awaiting another
+streaming body chunk, and when the threshold is reached. Pending capacity above
+the connection's base response buffer remains charged to runtime memory until
+flush or failure cleanup. Geometric growth is transactional and requires memory
+headroom for both the old buffer and its complete replacement; a growth attempt
+is rejected before encoding when that temporary allocation cannot be charged.
 
 `NacelleTcpLimits` controls TCP socket read, socket write, and idle timeouts.
 `NacelleHttpLimits` controls HTTP header read, request body read, response

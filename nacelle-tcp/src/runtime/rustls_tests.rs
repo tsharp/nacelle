@@ -1,15 +1,17 @@
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
+use nacelle_codec::MessageDecoder;
 use nacelle_core::error::NacelleError;
-use nacelle_core::handler::handler_fn;
 use nacelle_core::lifecycle::NacelleDrainDeadline;
-use nacelle_core::request::{NacelleRequest, RequestMetadata, TcpRequestMeta};
-use nacelle_core::response::NacelleResponse;
+use nacelle_core::pipeline::{ConnectionInfo, handler_fn};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::protocol::{DecodedRequest, Protocol};
+use crate::protocol::{
+    DecodedMessage, DecodedRequest, FrameBuffer, Protocol, TcpRequestContext, TcpResponse,
+};
 use crate::server::TcpServer;
 
 use super::rustls::serve_tcp_tls_listener_with_shutdown_deadline;
@@ -17,59 +19,86 @@ use super::rustls::serve_tcp_tls_listener_with_shutdown_deadline;
 #[derive(Debug)]
 struct TestRequest;
 
-impl RequestMetadata for TestRequest {
-    fn opcode(&self) -> u64 {
-        1
-    }
-
-    fn tcp_meta(&self, body_len: usize) -> TcpRequestMeta {
-        TcpRequestMeta {
-            request_id: None,
-            opcode: 1,
-            flags: 0,
-            body_len,
-        }
-    }
-}
-
 struct TestProtocol;
 
-impl Protocol<TestRequest> for TestProtocol {
-    type ResponseContext = ();
-    type ErrorContext = ();
+struct TestDecoder;
 
-    fn decode_head(
-        &self,
-        src: &mut BytesMut,
-        _max_frame_len: usize,
-    ) -> Result<Option<DecodedRequest<TestRequest>>, NacelleError> {
+impl MessageDecoder for TestDecoder {
+    type Message = DecodedMessage<TestRequest, Infallible>;
+    type Error = NacelleError;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Message>, Self::Error> {
         if src.is_empty() {
             return Ok(None);
         }
-        Ok(Some(DecodedRequest {
+        drop(src.split_to(1));
+        Ok(Some(DecodedMessage::Request(DecodedRequest {
             request: TestRequest,
-            body_len: 1,
-        }))
+            body_len: 0,
+        })))
+    }
+}
+
+impl Protocol for TestProtocol {
+    type Request = TestRequest;
+    type OneWayRequest = Infallible;
+    type Response = TcpResponse;
+    type ConnectionState = ();
+    type Decoder = TestDecoder;
+    type ResponseContext = ();
+    type ErrorContext = ();
+
+    fn decoder(&self, _max_frame_len: usize) -> Self::Decoder {
+        TestDecoder
+    }
+
+    fn connection_state(&self, _: &ConnectionInfo) {}
+
+    fn request_wire_bytes(&self, _request: &Self::Request, body_len: usize) -> usize {
+        1 + body_len
+    }
+
+    fn one_way_wire_bytes(&self, request: &Self::OneWayRequest, _body_len: usize) -> usize {
+        match *request {}
     }
 
     fn response_context(&self, _req: &TestRequest) -> Self::ResponseContext {}
 
     fn error_context(&self, _req: &TestRequest) -> Self::ErrorContext {}
 
+    fn apply_response(&self, _context: &mut Self::ResponseContext, _response: &Self::Response) {}
+
+    fn max_response_frame_overhead(&self) -> usize {
+        0
+    }
+
+    fn response_body(&self, response: Self::Response) -> nacelle_core::request::NacelleBody {
+        response.body
+    }
+
     fn encode_response_chunk(
         &self,
         _context: &mut Self::ResponseContext,
         chunk: Bytes,
-        dst: &mut BytesMut,
+        dst: &mut FrameBuffer<'_>,
     ) -> Result<(), NacelleError> {
-        dst.extend_from_slice(&chunk);
+        dst.extend_from_slice(&chunk)?;
         Ok(())
+    }
+
+    fn encode_response_terminal_chunk(
+        &self,
+        context: &mut Self::ResponseContext,
+        chunk: Bytes,
+        dst: &mut FrameBuffer<'_>,
+    ) -> Result<(), NacelleError> {
+        self.encode_response_chunk(context, chunk, dst)
     }
 
     fn encode_response_end(
         &self,
         _context: &mut Self::ResponseContext,
-        _dst: &mut BytesMut,
+        _dst: &mut FrameBuffer<'_>,
     ) -> Result<(), NacelleError> {
         Ok(())
     }
@@ -78,7 +107,7 @@ impl Protocol<TestRequest> for TestProtocol {
         &self,
         _context: Option<&Self::ErrorContext>,
         _error: &NacelleError,
-        _dst: &mut BytesMut,
+        _dst: &mut FrameBuffer<'_>,
     ) -> Result<(), NacelleError> {
         Ok(())
     }
@@ -104,11 +133,13 @@ async fn tcp_tls_self_signed_server_accepts_request() {
         .expect("listener should bind");
     let addr = listener.local_addr().expect("listener should have addr");
     let (shutdown, token) = nacelle_core::lifecycle::NacelleShutdown::pair();
-    let server = TcpServer::<TestRequest, ()>::builder()
+    let server = TcpServer::<TestProtocol>::builder()
         .protocol(TestProtocol)
-        .handler(handler_fn(|_request: NacelleRequest| async move {
-            Ok(NacelleResponse::tcp_bytes("ok"))
-        }))
+        .handler(handler_fn(
+            |context: TcpRequestContext<TestProtocol>| async move {
+                context.respond(TcpResponse::bytes("ok")).await
+            },
+        ))
         .build()
         .expect("server should build");
     let server_task = tokio::spawn(serve_tcp_tls_listener_with_shutdown_deadline(

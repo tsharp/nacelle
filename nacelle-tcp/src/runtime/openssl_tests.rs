@@ -1,70 +1,113 @@
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
+use nacelle_codec::MessageDecoder;
 use nacelle_core::error::NacelleError;
-use nacelle_core::handler::handler_fn;
 use nacelle_core::lifecycle::NacelleDrainDeadline;
-use nacelle_core::request::{NacelleRequest, RequestMetadata};
-use nacelle_core::response::NacelleResponse;
+use nacelle_core::pipeline::local_handler_fn;
+use nacelle_core::pipeline::{ConnectionInfo, handler_fn};
 use nacelle_core::tls::NacelleOpenSslConfig;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::protocol::{DecodedRequest, Protocol};
+use crate::protocol::{
+    DecodedMessage, DecodedRequest, FrameBuffer, Protocol, TcpRequestContext, TcpResponse,
+};
+use crate::server::LocalTcpServer;
 use crate::server::TcpServer;
 
+use super::local::serve_local_tcp_openssl_listener;
 use super::openssl::serve_tcp_openssl_listener_with_shutdown_deadline;
 use super::openssl_optional::peeked_bytes_can_be_tls;
 
 #[derive(Debug)]
-struct PlainRequest;
-
-impl RequestMetadata for PlainRequest {
-    fn opcode(&self) -> u64 {
-        1
-    }
+struct PlainRequest {
+    head_len: usize,
 }
 
 struct PlainProtocol;
 
-impl Protocol<PlainRequest> for PlainProtocol {
-    type ResponseContext = ();
-    type ErrorContext = ();
+struct PlainDecoder;
 
-    fn decode_head(
-        &self,
-        src: &mut BytesMut,
-        _max_frame_len: usize,
-    ) -> Result<Option<DecodedRequest<PlainRequest>>, NacelleError> {
+impl MessageDecoder for PlainDecoder {
+    type Message = DecodedMessage<PlainRequest, Infallible>;
+    type Error = NacelleError;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Message>, Self::Error> {
         if src.is_empty() {
             return Ok(None);
         }
+        let head_len = src.len();
         src.clear();
-        Ok(Some(DecodedRequest {
-            request: PlainRequest,
+        Ok(Some(DecodedMessage::Request(DecodedRequest {
+            request: PlainRequest { head_len },
             body_len: 0,
-        }))
+        })))
+    }
+}
+
+impl Protocol for PlainProtocol {
+    type Request = PlainRequest;
+    type OneWayRequest = Infallible;
+    type Response = TcpResponse;
+    type ConnectionState = ();
+    type Decoder = PlainDecoder;
+    type ResponseContext = ();
+    type ErrorContext = ();
+
+    fn decoder(&self, _max_frame_len: usize) -> Self::Decoder {
+        PlainDecoder
+    }
+
+    fn connection_state(&self, _: &ConnectionInfo) {}
+
+    fn request_wire_bytes(&self, request: &Self::Request, body_len: usize) -> usize {
+        request.head_len + body_len
+    }
+
+    fn one_way_wire_bytes(&self, request: &Self::OneWayRequest, _body_len: usize) -> usize {
+        match *request {}
     }
 
     fn response_context(&self, _req: &PlainRequest) -> Self::ResponseContext {}
 
     fn error_context(&self, _req: &PlainRequest) -> Self::ErrorContext {}
 
+    fn apply_response(&self, _context: &mut Self::ResponseContext, _response: &Self::Response) {}
+
+    fn max_response_frame_overhead(&self) -> usize {
+        0
+    }
+
+    fn response_body(&self, response: Self::Response) -> nacelle_core::request::NacelleBody {
+        response.body
+    }
+
     fn encode_response_chunk(
         &self,
         _context: &mut Self::ResponseContext,
         chunk: Bytes,
-        dst: &mut BytesMut,
+        dst: &mut FrameBuffer<'_>,
     ) -> Result<(), NacelleError> {
-        dst.extend_from_slice(&chunk);
+        dst.extend_from_slice(&chunk)?;
         Ok(())
+    }
+
+    fn encode_response_terminal_chunk(
+        &self,
+        context: &mut Self::ResponseContext,
+        chunk: Bytes,
+        dst: &mut FrameBuffer<'_>,
+    ) -> Result<(), NacelleError> {
+        self.encode_response_chunk(context, chunk, dst)
     }
 
     fn encode_response_end(
         &self,
         _context: &mut Self::ResponseContext,
-        _dst: &mut BytesMut,
+        _dst: &mut FrameBuffer<'_>,
     ) -> Result<(), NacelleError> {
         Ok(())
     }
@@ -73,7 +116,7 @@ impl Protocol<PlainRequest> for PlainProtocol {
         &self,
         _context: Option<&Self::ErrorContext>,
         _error: &NacelleError,
-        _dst: &mut BytesMut,
+        _dst: &mut FrameBuffer<'_>,
     ) -> Result<(), NacelleError> {
         Ok(())
     }
@@ -101,13 +144,13 @@ async fn required_openssl_rejects_plaintext_before_handler() {
     let addr = listener.local_addr().expect("listener should have addr");
     let (shutdown, token) = nacelle_core::lifecycle::NacelleShutdown::pair();
     let handler_called = Arc::new(AtomicBool::new(false));
-    let server = TcpServer::<PlainRequest, ()>::builder()
+    let server = TcpServer::<PlainProtocol>::builder()
         .protocol(PlainProtocol)
         .handler(handler_fn({
             let handler_called = handler_called.clone();
-            move |_request: NacelleRequest| {
+            move |context: TcpRequestContext<PlainProtocol>| {
                 handler_called.store(true, Ordering::SeqCst);
-                async move { Ok(NacelleResponse::empty_tcp()) }
+                async move { context.respond(TcpResponse::empty()).await }
             }
         }))
         .build()
@@ -138,6 +181,67 @@ async fn required_openssl_rejects_plaintext_before_handler() {
         .expect("server should stop")
         .expect("server task should join")
         .expect("server should exit");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn local_required_openssl_accepts_tls_request() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("listener should bind");
+            let addr = listener.local_addr().expect("listener should have addr");
+            let config = test_open_ssl_config();
+            let mut connector = openssl::ssl::SslConnector::builder(openssl::ssl::SslMethod::tls())
+                .expect("connector builder");
+            connector.set_verify(openssl::ssl::SslVerifyMode::NONE);
+            let connector = connector.build();
+            let (shutdown, token) = nacelle_core::lifecycle::NacelleShutdown::pair();
+            let server = std::rc::Rc::new(LocalTcpServer::new(
+                PlainProtocol,
+                local_handler_fn(|context: TcpRequestContext<PlainProtocol>| async move {
+                    context.respond(TcpResponse::bytes("ok")).await
+                }),
+            ));
+            let server_task = tokio::task::spawn_local(serve_local_tcp_openssl_listener(
+                server,
+                listener,
+                crate::NacelleTcpOptions::default(),
+                config,
+                token,
+                NacelleDrainDeadline::new(Duration::from_secs(1)),
+            ));
+
+            let stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .expect("client should connect");
+            let ssl = connector
+                .configure()
+                .expect("connector config")
+                .verify_hostname(false)
+                .into_ssl("localhost")
+                .expect("client ssl");
+            let mut client = tokio_openssl::SslStream::new(ssl, stream).expect("ssl stream");
+            std::pin::Pin::new(&mut client)
+                .connect()
+                .await
+                .expect("TLS handshake");
+            client.write_all(b"x").await.expect("request should write");
+            let mut response = [0_u8; 2];
+            client
+                .read_exact(&mut response)
+                .await
+                .expect("response should read");
+            assert_eq!(&response, b"ok");
+            client.shutdown().await.expect("client shutdown");
+            shutdown.shutdown();
+            server_task
+                .await
+                .expect("server task should join")
+                .expect("server should stop");
+        })
+        .await;
 }
 
 fn test_open_ssl_config() -> NacelleOpenSslConfig {

@@ -23,11 +23,19 @@ services. For production services, record:
 - feature flags
 - allocator settings
 
+Thread-per-core mode is experimental and Linux-only. Select workers explicitly,
+record logical CPU ids and affinity settings, and treat any bind, affinity, or
+worker initialization failure as a whole-runtime startup failure. TCP, HTTP,
+Rustls TCP/HTTPS, and required OpenSSL TCP have worker-local stacks. Optional
+plain/OpenSSL detection and performance qualification remain under implementation.
+
 ## Shutdown
 
-Wire OS signals to `NacelleHost::shutdown_and_wait_timeout`. Pick a drain
-deadline that matches service semantics. Short deadlines protect deploy velocity
-but can abort in-flight work.
+Use `NacelleApp::with_ctrl_c_shutdown()` for the standard signal path, or pass a
+shared `NacelleShutdown` through `NacelleApp::with_shutdown(...)`. Configure the
+drain deadline with `with_shutdown_drain_timeout(...)`. Advanced manual hosts
+can use `nacelle::runtime::NacelleHost::shutdown_and_wait_timeout(...)`. Short
+deadlines protect deploy velocity but can abort in-flight work.
 
 Expected shutdown telemetry:
 
@@ -92,5 +100,5 @@ documented here rather than embedded in the metric name:
 Run microbenchmarks before and after hot-path changes:
 
 ```bash
-cargo bench -p nacelle --features bench,reference_protocol
+cargo bench -p nacelle-examples --features "bench tcp"
 ```

@@ -32,13 +32,13 @@ impl NacelleError {
     pub fn hint(&self) -> Option<&'static str> {
         match self {
             Self::MissingProtocol => {
-                Some("call NacelleServer::builder().protocol(...) before build")
+                Some("call TcpServer::<YourProtocol>::builder().protocol(...) before build")
             }
             Self::InvalidFrame(_) => {
                 Some("verify the protocol decoder and the peer's frame format")
             }
             Self::FrameTooLarge { .. } => {
-                Some("raise NacelleConfig::max_frame_len or reject larger client frames")
+                Some("raise NacelleTcpConfig::max_frame_len or reject larger client frames")
             }
             Self::UnexpectedEof => {
                 Some("check client disconnects, frame lengths, and socket timeouts")
@@ -49,8 +49,11 @@ impl NacelleError {
             Self::ResourceLimit("connections") => {
                 Some("raise NacelleLimits::max_connections or reduce concurrent clients")
             }
-            Self::ResourceLimit("connection_opens_per_peer_per_second") => Some(
+            Self::ResourceLimit("peer_connection_rate") => Some(
                 "raise NacelleLimits::max_connection_opens_per_peer_per_second or slow reconnect churn",
+            ),
+            Self::ResourceLimit("peer_connection_rate_table_full") => Some(
+                "raise NacelleLimits::connection_rate_limit_table_capacity or reduce active peer cardinality",
             ),
             Self::ResourceLimit("connections_per_peer") => Some(
                 "raise NacelleLimits::max_connections_per_peer or distribute clients across peers",

@@ -2,15 +2,15 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::options::NacelleTcpBindOptions;
-use crate::protocol::Protocol;
-use crate::server::NacelleServer;
+use crate::protocol::{SharedProtocol, TcpHandler, TcpOneWayHandler};
+use crate::server::TcpServer;
 use nacelle_core::error::NacelleError;
-use nacelle_core::handler::Handler;
 use nacelle_core::lifecycle::{NacelleDrainDeadline, NacelleShutdownToken};
 use nacelle_core::limits::TrackedPermit;
-use nacelle_core::request::{NacelleConnectionMeta, RequestMetadata};
+use nacelle_core::request::NacelleConnectionMeta;
 use nacelle_core::telemetry::{
-    NacelleMetricsContext, NacelleTelemetry, NacelleTelemetryEventKind, NacelleTransport,
+    NacelleMetricsContext, NacelleTelemetry, NacelleTelemetryEventKind, NacelleTelemetryObserver,
+    NacelleTransport,
 };
 use std::future::Future;
 use std::sync::Arc;
@@ -61,15 +61,16 @@ pub(super) fn connection_rejection_reason(error: &NacelleError) -> &'static str 
     }
 }
 
-pub(super) fn record_connection_rejection<Req, P, H>(
-    server: &NacelleServer<Req, P, H>,
+pub(super) fn record_connection_rejection<P, H, OH, Observer>(
+    server: &TcpServer<P, H, OH, Observer>,
     transport: NacelleTransport,
     tls: &'static str,
     error: &NacelleError,
 ) where
-    Req: RequestMetadata + Send + 'static,
-    P: Protocol<Req> + Send + Sync + 'static,
-    H: Handler,
+    P: SharedProtocol,
+    H: TcpHandler<P>,
+    OH: TcpOneWayHandler<P>,
+    Observer: NacelleTelemetryObserver,
 {
     let context = NacelleMetricsContext::new(
         transport,
@@ -82,12 +83,14 @@ pub(super) fn record_connection_rejection<Req, P, H>(
         .operation_error(&context, "accept", error);
 }
 
-pub(super) async fn drain_connection_tasks(
+pub(super) async fn drain_connection_tasks<Observer>(
     mut connections: tokio::task::JoinSet<Result<(), NacelleError>>,
     drain_timeout: Duration,
     transport: NacelleTransport,
-    telemetry: NacelleTelemetry,
-) {
+    telemetry: NacelleTelemetry<Observer>,
+) where
+    Observer: NacelleTelemetryObserver,
+{
     telemetry.shutdown_event(NacelleTelemetryEventKind::DrainStarted, transport);
     let drain = async {
         while let Some(result) = connections.join_next().await {
@@ -121,8 +124,8 @@ pub(super) async fn drain_connection_tasks(
 /// handshake where applicable). `tls_label` is used only for rejection
 /// telemetry.
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn run_accept_loop<Req, P, H, Prepare, Serve, Fut>(
-    server: Arc<NacelleServer<Req, P, H>>,
+pub(super) async fn run_accept_loop<P, H, OH, Observer, Prepare, Serve, Fut>(
+    server: Arc<TcpServer<P, H, OH, Observer>>,
     listener: TcpListener,
     tls_label: &'static str,
     mut shutdown: NacelleShutdownToken,
@@ -131,12 +134,13 @@ pub(super) async fn run_accept_loop<Req, P, H, Prepare, Serve, Fut>(
     mut serve_connection: Serve,
 ) -> Result<(), NacelleError>
 where
-    Req: RequestMetadata + Send + 'static,
-    P: Protocol<Req> + Send + Sync + 'static,
-    H: Handler,
+    P: SharedProtocol,
+    H: TcpHandler<P>,
+    OH: TcpOneWayHandler<P>,
+    Observer: NacelleTelemetryObserver,
     Prepare: Fn(&TcpStream) -> Result<(), NacelleError>,
     Serve: FnMut(
-        Arc<NacelleServer<Req, P, H>>,
+        Arc<TcpServer<P, H, OH, Observer>>,
         TcpStream,
         NacelleConnectionMeta,
         TrackedPermit,

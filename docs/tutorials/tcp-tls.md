@@ -4,23 +4,28 @@ Use `tls-self-signed` for local load tests and auto-deploy flows that need a
 certificate immediately. It implies the `rustls` provider.
 
 ```rust
-use nacelle::{
-    FrameRequest, LengthDelimitedProtocol, NacelleTlsConfig, TcpServer,
-    handler_fn,
-};
+use nacelle::core::pipeline::handler_fn;
+use nacelle::core::{NacelleError, NacelleTlsConfig};
+use nacelle::tcp::{TcpRequestContext, TcpResponse, TcpServer};
+use nacelle_reference_protocol::LengthDelimitedProtocol;
 
 let generated = NacelleTlsConfig::self_signed(["localhost", "127.0.0.1"])?;
-let server = TcpServer::<FrameRequest, ()>::builder()
+let server = TcpServer::<LengthDelimitedProtocol>::builder()
     .protocol(LengthDelimitedProtocol)
-    .handler(handler_fn(|request| async move {
-        Ok(nacelle::NacelleResponse::tcp(request.body))
+    .handler(handler_fn(
+        |mut context: TcpRequestContext<LengthDelimitedProtocol>| async move {
+        let mut response = Vec::new();
+        while let Some(chunk) = context.request_mut().body.next_chunk().await {
+            response.extend_from_slice(&chunk?);
+        }
+        context.respond(TcpResponse::bytes(response)).await
     }))
     .build()?;
 
 server
     .serve_tcp_tls("127.0.0.1:8443".parse()?, generated.tls_config)
     .await?;
-# Ok::<(), nacelle::NacelleError>(())
+# Ok::<(), NacelleError>(())
 ```
 
 Self-signed certificates are for local and automated test flows. Public edge

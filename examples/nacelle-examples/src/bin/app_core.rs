@@ -1,8 +1,16 @@
+use std::convert::Infallible;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use nacelle::core::pipeline::{ConnectionInfo, handler_fn};
 use nacelle::prelude::*;
-use nacelle::reference_protocol::{FrameErrorContext, FrameResponseContext};
+use nacelle::tcp::{
+    FrameBuffer, Protocol, TcpHandlerCompletion, TcpRequestContext, TcpResponse, TcpServer,
+};
+use nacelle_reference_protocol::{
+    FrameErrorContext, FrameRequest, FrameResponseContext, LengthDelimitedProtocol,
+    LengthDelimitedRequestDecoder,
+};
 
 #[derive(Debug)]
 struct AppXCore {
@@ -10,14 +18,17 @@ struct AppXCore {
 }
 
 impl AppXCore {
-    async fn handle(&self, mut request: NacelleRequest) -> Result<NacelleResponse, NacelleError> {
+    async fn handle(
+        &self,
+        mut context: TcpRequestContext<AppXProtocol>,
+    ) -> Result<TcpHandlerCompletion<AppXProtocol>, NacelleError> {
         let mut body = BytesMut::new();
         body.extend_from_slice(self.prefix);
-        while let Some(chunk) = request.body.next_chunk().await {
+        while let Some(chunk) = context.request_mut().body.next_chunk().await {
             body.extend_from_slice(&chunk?);
         }
 
-        Ok(NacelleResponse::tcp_bytes(body.freeze()))
+        context.respond(TcpResponse::bytes(body.freeze())).await
     }
 }
 
@@ -36,7 +47,12 @@ impl AppXProtocol {
     }
 }
 
-impl Protocol<FrameRequest> for AppXProtocol {
+impl Protocol for AppXProtocol {
+    type Request = FrameRequest;
+    type OneWayRequest = Infallible;
+    type Response = TcpResponse;
+    type ConnectionState = ();
+    type Decoder = LengthDelimitedRequestDecoder;
     type ResponseContext = FrameResponseContext;
     type ErrorContext = FrameErrorContext;
 
@@ -44,12 +60,18 @@ impl Protocol<FrameRequest> for AppXProtocol {
         self.name
     }
 
-    fn decode_head(
-        &self,
-        src: &mut BytesMut,
-        max_frame_len: usize,
-    ) -> Result<Option<DecodedRequest<FrameRequest>>, NacelleError> {
-        self.inner.decode_head(src, max_frame_len)
+    fn decoder(&self, max_frame_len: usize) -> Self::Decoder {
+        self.inner.decoder(max_frame_len)
+    }
+
+    fn connection_state(&self, _: &ConnectionInfo) {}
+
+    fn request_wire_bytes(&self, request: &Self::Request, body_len: usize) -> usize {
+        self.inner.request_wire_bytes(request, body_len)
+    }
+
+    fn one_way_wire_bytes(&self, request: &Self::OneWayRequest, body_len: usize) -> usize {
+        self.inner.one_way_wire_bytes(request, body_len)
     }
 
     fn response_context(&self, req: &FrameRequest) -> Self::ResponseContext {
@@ -60,15 +82,23 @@ impl Protocol<FrameRequest> for AppXProtocol {
         self.inner.error_context(req)
     }
 
-    fn apply_tcp_response_meta(&self, context: &mut Self::ResponseContext, meta: &TcpResponseMeta) {
-        self.inner.apply_tcp_response_meta(context, meta);
+    fn apply_response(&self, context: &mut Self::ResponseContext, response: &Self::Response) {
+        self.inner.apply_response(context, response);
+    }
+
+    fn max_response_frame_overhead(&self) -> usize {
+        self.inner.max_response_frame_overhead()
+    }
+
+    fn response_body(&self, response: Self::Response) -> NacelleBody {
+        self.inner.response_body(response)
     }
 
     fn encode_response_chunk(
         &self,
         context: &mut Self::ResponseContext,
         chunk: Bytes,
-        dst: &mut BytesMut,
+        dst: &mut FrameBuffer<'_>,
     ) -> Result<(), NacelleError> {
         self.inner.encode_response_chunk(context, chunk, dst)
     }
@@ -77,7 +107,7 @@ impl Protocol<FrameRequest> for AppXProtocol {
         &self,
         context: &mut Self::ResponseContext,
         chunk: Bytes,
-        dst: &mut BytesMut,
+        dst: &mut FrameBuffer<'_>,
     ) -> Result<(), NacelleError> {
         self.inner
             .encode_response_terminal_chunk(context, chunk, dst)
@@ -86,7 +116,7 @@ impl Protocol<FrameRequest> for AppXProtocol {
     fn encode_response_end(
         &self,
         context: &mut Self::ResponseContext,
-        dst: &mut BytesMut,
+        dst: &mut FrameBuffer<'_>,
     ) -> Result<(), NacelleError> {
         self.inner.encode_response_end(context, dst)
     }
@@ -95,7 +125,7 @@ impl Protocol<FrameRequest> for AppXProtocol {
         &self,
         context: Option<&Self::ErrorContext>,
         error: &NacelleError,
-        dst: &mut BytesMut,
+        dst: &mut FrameBuffer<'_>,
     ) -> Result<(), NacelleError> {
         self.inner.encode_error(context, error, dst)
     }
@@ -123,15 +153,22 @@ async fn main() -> Result<(), NacelleError> {
         }
     });
 
-    let protocols = NacelleProtocols::new()
-        .tcp::<FrameRequest, _>("appx-v1", v1_addr, AppXProtocol::new("appx-v1"))
-        .tcp::<FrameRequest, _>("appx-v2", v2_addr, AppXProtocol::new("appx-v2"));
+    let v1_server = TcpServer::<AppXProtocol>::builder()
+        .protocol(AppXProtocol::new("appx-v1"))
+        .handler(handler.clone())
+        .build()?;
+    let v2_server = TcpServer::<AppXProtocol>::builder()
+        .protocol(AppXProtocol::new("appx-v2"))
+        .handler(handler)
+        .build()?;
 
     println!("AppX v1 listening on {v1_addr}");
     println!("AppX v2 listening on {v2_addr}");
 
-    NacelleApp::new(handler)
+    NacelleApp::new()
         .with_ctrl_c_shutdown()
-        .serve(protocols)
+        .tcp("appx-v1", v1_addr, v1_server)
+        .tcp("appx-v2", v2_addr, v2_server)
+        .run()
         .await
 }

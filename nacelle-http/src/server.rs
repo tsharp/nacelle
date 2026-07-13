@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -19,93 +20,568 @@ use crate::encoder::{HttpBody, incoming_to_body, response_to_http};
 use crate::limits::NacelleHttpLimits;
 pub use crate::policy::NacelleHttpPolicy;
 use crate::policy::validate_http_policy;
-use crate::rate_limit::{PeerRateWindow, allow_peer_request, forwarded_peer_ip};
+use crate::rate_limit::forwarded_peer_ip;
 use nacelle_core::error::NacelleError;
-use nacelle_core::handler::Handler;
 use nacelle_core::lifecycle::{NacelleDrainDeadline, NacelleShutdownToken};
 use nacelle_core::limits::NacelleRuntimeState;
-use nacelle_core::request::{
-    HttpRequestMeta, NacelleConnectionMeta, NacelleRequest, NacelleRequestMeta,
+use nacelle_core::pipeline::{ConnectionContext, ConnectionInfo, RequiredResponder};
+use nacelle_core::request::NacelleConnectionMeta;
+#[cfg(feature = "rustls")]
+use nacelle_core::request::NacelleConnectionTlsMeta;
+use nacelle_core::telemetry::{
+    NacelleTelemetry, NacelleTelemetryEventKind, NacelleTelemetryObserver, NacelleTransport,
+    NoopObserver,
 };
-use nacelle_core::response::NacelleResponse;
-use nacelle_core::telemetry::{NacelleTelemetry, NacelleTelemetryEventKind, NacelleTransport};
 #[cfg(feature = "rustls")]
 use nacelle_core::tls::NacelleTlsConfig;
+use nacelle_core::{NacellePeerRateLimitResult, NacellePeerRateLimiter};
 
-pub struct HyperServer<H = ()> {
-    handler: H,
-    telemetry: NacelleTelemetry,
-    runtime_state: NacelleRuntimeState,
-    http_limits: NacelleHttpLimits,
-    http_policy: NacelleHttpPolicy,
-    access_log_enabled: bool,
-    peer_rate_limits: Arc<Mutex<HashMap<IpAddr, PeerRateWindow>>>,
+use crate::pipeline::{
+    HttpConnectionStateFactory, HttpHandler, HttpHandlerCompletion, HttpRequest,
+    HttpRequestContext, HttpResponder, HttpResponse, LocalHttpConnectionStateFactory,
+    LocalHttpHandler, LocalHttpRequestContext, NoHttpConnectionState,
+};
+
+trait HttpDispatch<State, Observer>
+where
+    Observer: NacelleTelemetryObserver,
+{
+    fn connection_info(&self) -> &ConnectionInfo;
+
+    fn call(
+        &self,
+        request: HttpRequest,
+    ) -> impl Future<Output = Result<HttpHandlerCompletion, NacelleError>>;
 }
 
-impl<H> Clone for HyperServer<H>
-where
-    H: Clone,
-{
+struct SharedHttpDispatch<H, State> {
+    handler: Arc<H>,
+    connection: ConnectionContext<Arc<State>>,
+}
+
+impl<H, State> Clone for SharedHttpDispatch<H, State> {
     fn clone(&self) -> Self {
         Self {
             handler: self.handler.clone(),
-            telemetry: self.telemetry.clone(),
-            runtime_state: self.runtime_state.clone(),
-            http_limits: self.http_limits,
-            http_policy: self.http_policy.clone(),
-            access_log_enabled: self.access_log_enabled,
-            peer_rate_limits: self.peer_rate_limits.clone(),
+            connection: self.connection.clone(),
         }
     }
 }
 
-impl<H> HyperServer<H>
+impl<H, State, Observer> HttpDispatch<State, Observer> for SharedHttpDispatch<H, State>
 where
-    H: Handler,
+    State: Send + Sync + 'static,
+    H: HttpHandler<State>,
+    Observer: NacelleTelemetryObserver,
 {
-    pub fn new(handler: H) -> Self {
-        let telemetry = NacelleTelemetry::default();
-        let runtime_state = NacelleRuntimeState::default();
-        telemetry.register_runtime_state(runtime_state.clone());
+    fn connection_info(&self) -> &ConnectionInfo {
+        &self.connection.info
+    }
+
+    fn call(
+        &self,
+        request: HttpRequest,
+    ) -> impl Future<Output = Result<HttpHandlerCompletion, NacelleError>> {
+        let context = HttpRequestContext::new(
+            request,
+            RequiredResponder::new(HttpResponder),
+            (),
+            self.connection.clone(),
+        );
+        nacelle_core::pipeline::Handler::call(self.handler.as_ref(), context)
+    }
+}
+
+struct LocalHttpDispatch<H, State> {
+    handler: Rc<H>,
+    connection: ConnectionContext<Rc<State>>,
+}
+
+impl<H, State> Clone for LocalHttpDispatch<H, State> {
+    fn clone(&self) -> Self {
         Self {
-            handler,
+            handler: self.handler.clone(),
+            connection: self.connection.clone(),
+        }
+    }
+}
+
+#[allow(clippy::future_not_send)]
+impl<H, State, Observer> HttpDispatch<State, Observer> for LocalHttpDispatch<H, State>
+where
+    State: 'static,
+    H: LocalHttpHandler<State>,
+    Observer: NacelleTelemetryObserver,
+{
+    fn connection_info(&self) -> &ConnectionInfo {
+        &self.connection.info
+    }
+
+    fn call(
+        &self,
+        request: HttpRequest,
+    ) -> impl Future<Output = Result<HttpHandlerCompletion, NacelleError>> {
+        let context = LocalHttpRequestContext::new(
+            request,
+            RequiredResponder::new(HttpResponder),
+            (),
+            self.connection.clone(),
+        );
+        nacelle_core::pipeline::LocalHandler::call(self.handler.as_ref(), context)
+    }
+}
+
+pub struct HyperServer<H = (), F = NoHttpConnectionState, Observer = NoopObserver> {
+    handler: Arc<H>,
+    connection_state_factory: Arc<F>,
+    runtime: HttpRuntime<Observer>,
+}
+
+#[derive(Clone)]
+struct HttpRuntime<Observer> {
+    telemetry: NacelleTelemetry<Observer>,
+    runtime_state: NacelleRuntimeState,
+    http_limits: NacelleHttpLimits,
+    http_policy: NacelleHttpPolicy,
+    access_log_enabled: bool,
+    listener: Arc<str>,
+    peer_rate_limiter: Option<Arc<NacellePeerRateLimiter>>,
+}
+
+impl Default for HttpRuntime<NoopObserver> {
+    fn default() -> Self {
+        Self::new(NacelleTelemetry::default(), NacelleRuntimeState::default())
+    }
+}
+
+impl<Observer> HttpRuntime<Observer>
+where
+    Observer: NacelleTelemetryObserver,
+{
+    fn new(telemetry: NacelleTelemetry<Observer>, runtime_state: NacelleRuntimeState) -> Self {
+        Self {
             telemetry,
             runtime_state,
             http_limits: NacelleHttpLimits::default(),
             http_policy: NacelleHttpPolicy::default(),
             access_log_enabled: false,
-            peer_rate_limits: Arc::new(Mutex::new(HashMap::new())),
+            listener: Arc::from("direct"),
+            peer_rate_limiter: None,
+        }
+    }
+}
+
+/// Worker-local HTTP/1 server for explicit thread-per-core execution.
+pub struct LocalHyperServer<H, F = NoHttpConnectionState, Observer = NoopObserver> {
+    handler: Rc<H>,
+    connection_state_factory: Rc<F>,
+    runtime: HttpRuntime<Observer>,
+}
+
+/// Process-wide HTTP edge state shared by worker-local listeners.
+///
+/// Clones share per-peer request-rate windows so thread-per-core execution
+/// preserves the same process-wide policy semantics as one shared listener.
+#[derive(Clone)]
+pub struct LocalHttpSharedState {
+    peer_rate_limiter: Arc<OnceLock<Arc<NacellePeerRateLimiter>>>,
+}
+
+impl Default for LocalHttpSharedState {
+    fn default() -> Self {
+        Self {
+            peer_rate_limiter: Arc::new(OnceLock::new()),
+        }
+    }
+}
+
+impl LocalHttpSharedState {
+    fn peer_rate_limiter(&self, policy: &NacelleHttpPolicy) -> Option<Arc<NacellePeerRateLimiter>> {
+        policy.max_requests_per_peer_per_second.map(|_| {
+            self.peer_rate_limiter
+                .get_or_init(|| {
+                    Arc::new(NacellePeerRateLimiter::new(
+                        policy.peer_rate_limit_table_capacity,
+                    ))
+                })
+                .clone()
+        })
+    }
+}
+
+fn peer_rate_limiter(policy: &NacelleHttpPolicy) -> Option<Arc<NacellePeerRateLimiter>> {
+    policy.max_requests_per_peer_per_second.map(|_| {
+        Arc::new(NacellePeerRateLimiter::new(
+            policy.peer_rate_limit_table_capacity,
+        ))
+    })
+}
+
+impl<H> LocalHyperServer<H, NoHttpConnectionState, NoopObserver> {
+    /// Construct a worker-local HTTP server without connection state.
+    pub fn new(handler: H) -> Self {
+        Self {
+            handler: Rc::new(handler),
+            connection_state_factory: Rc::new(NoHttpConnectionState),
+            runtime: HttpRuntime::default(),
+        }
+    }
+}
+
+impl<H, F, Observer> LocalHyperServer<H, F, Observer> {
+    /// Replace the worker-local connection state factory.
+    pub fn with_connection_state_factory<F2>(self, factory: F2) -> LocalHyperServer<H, F2, Observer>
+    where
+        F2: LocalHttpConnectionStateFactory,
+    {
+        LocalHyperServer {
+            handler: self.handler,
+            connection_state_factory: Rc::new(factory),
+            runtime: self.runtime,
+        }
+    }
+}
+
+impl<H, F, Observer> LocalHyperServer<H, F, Observer>
+where
+    F: LocalHttpConnectionStateFactory,
+    H: LocalHttpHandler<F::State> + 'static,
+    Observer: NacelleTelemetryObserver,
+{
+    /// Set telemetry for this worker.
+    pub fn with_telemetry<Next>(
+        self,
+        telemetry: NacelleTelemetry<Next>,
+    ) -> LocalHyperServer<H, F, Next>
+    where
+        Next: NacelleTelemetryObserver,
+    {
+        telemetry.register_runtime_state(self.runtime.runtime_state.clone());
+        LocalHyperServer {
+            handler: self.handler,
+            connection_state_factory: self.connection_state_factory,
+            runtime: HttpRuntime {
+                telemetry,
+                runtime_state: self.runtime.runtime_state,
+                http_limits: self.runtime.http_limits,
+                http_policy: self.runtime.http_policy,
+                access_log_enabled: self.runtime.access_log_enabled,
+                listener: self.runtime.listener,
+                peer_rate_limiter: self.runtime.peer_rate_limiter,
+            },
         }
     }
 
-    pub fn with_telemetry(mut self, telemetry: NacelleTelemetry) -> Self {
-        telemetry.register_runtime_state(self.runtime_state.clone());
-        self.telemetry = telemetry;
+    /// Install final worker telemetry and runtime state atomically.
+    pub fn with_runtime_context<Next>(
+        self,
+        telemetry: NacelleTelemetry<Next>,
+        runtime_state: NacelleRuntimeState,
+        shared_state: LocalHttpSharedState,
+    ) -> LocalHyperServer<H, F, Next>
+    where
+        Next: NacelleTelemetryObserver,
+    {
+        telemetry.register_runtime_state(runtime_state.clone());
+        let peer_rate_limiter = shared_state.peer_rate_limiter(&self.runtime.http_policy);
+        LocalHyperServer {
+            handler: self.handler,
+            connection_state_factory: self.connection_state_factory,
+            runtime: HttpRuntime {
+                telemetry,
+                runtime_state,
+                http_limits: self.runtime.http_limits,
+                http_policy: self.runtime.http_policy,
+                access_log_enabled: self.runtime.access_log_enabled,
+                listener: self.runtime.listener,
+                peer_rate_limiter,
+            },
+        }
+    }
+
+    /// Set worker-local HTTP edge limits.
+    pub fn with_http_limits(mut self, limits: NacelleHttpLimits) -> Self {
+        self.runtime.http_limits = limits;
         self
+    }
+
+    /// Set worker-local HTTP edge policy.
+    pub fn with_http_policy(mut self, policy: NacelleHttpPolicy) -> Self {
+        self.runtime.peer_rate_limiter = peer_rate_limiter(&policy);
+        self.runtime.http_policy = policy;
+        self
+    }
+
+    /// Enable or disable HTTP access logging.
+    pub fn with_access_log(mut self, enabled: bool) -> Self {
+        self.runtime.access_log_enabled = enabled;
+        self
+    }
+
+    /// Set the stable listener label recorded in connection metadata.
+    pub fn with_listener_label(mut self, listener: impl Into<Arc<str>>) -> Self {
+        self.runtime.listener = listener.into();
+        self
+    }
+
+    /// Serve one worker-local HTTP listener until shared shutdown.
+    pub async fn serve_listener(
+        self,
+        listener: tokio::net::TcpListener,
+        mut shutdown: NacelleShutdownToken,
+        drain_deadline: NacelleDrainDeadline,
+    ) -> Result<(), NacelleError> {
+        let server = Rc::new(self);
+        let local_addr = listener.local_addr().ok();
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                joined = connections.join_next(), if !connections.is_empty() => {
+                    log_http_connection_result(joined);
+                    continue;
+                }
+                accepted = listener.accept() => {
+                    let (stream, peer_addr) = accepted?;
+                    let connection_permit = match server
+                        .runtime
+                        .runtime_state
+                        .acquire_connection_for_peer(peer_addr.ip())
+                    {
+                        Ok(permit) => permit,
+                        Err(error) => {
+                            server.runtime.telemetry.connection_rejected(
+                                NacelleTransport::new("http"),
+                                connection_rejection_reason(&error),
+                            );
+                            continue;
+                        }
+                    };
+                    server.runtime.telemetry.connection_opened(NacelleTransport::new("http"));
+                    let connection = NacelleConnectionMeta::http_socket(Some(peer_addr), local_addr)
+                        .with_listener(server.runtime.listener.clone());
+                    let server = server.clone();
+                    connections.spawn_local(async move {
+                        run_local_http_connection(server, stream, connection, connection_permit).await
+                    });
+                }
+            }
+        }
+        server.runtime.telemetry.shutdown_event(
+            NacelleTelemetryEventKind::ListenerStoppedAccepting,
+            NacelleTransport::new("http"),
+        );
+        drain_http_connection_tasks(
+            connections,
+            drain_deadline.get(),
+            server.runtime.telemetry.clone(),
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Serve one worker-local Rustls HTTP listener until shared shutdown.
+    #[cfg(feature = "rustls")]
+    pub async fn serve_tls_listener(
+        self,
+        listener: tokio::net::TcpListener,
+        tls_config: NacelleTlsConfig,
+        mut shutdown: NacelleShutdownToken,
+        drain_deadline: NacelleDrainDeadline,
+    ) -> Result<(), NacelleError> {
+        let server = Rc::new(self);
+        let local_addr = listener.local_addr().ok();
+        let handshake_timeout = tls_config.handshake_timeout();
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                joined = connections.join_next(), if !connections.is_empty() => {
+                    log_http_connection_result(joined);
+                    continue;
+                }
+                accepted = listener.accept() => {
+                    let (stream, peer_addr) = accepted?;
+                    let connection_permit = match server
+                        .runtime
+                        .runtime_state
+                        .acquire_connection_for_peer(peer_addr.ip())
+                    {
+                        Ok(permit) => permit,
+                        Err(error) => {
+                            server.runtime.telemetry.connection_rejected(
+                                NacelleTransport::new("http"),
+                                connection_rejection_reason(&error),
+                            );
+                            continue;
+                        }
+                    };
+                    server.runtime.telemetry.connection_opened(NacelleTransport::new("http"));
+                    let connection = NacelleConnectionMeta::http_socket(Some(peer_addr), local_addr)
+                        .with_listener(server.runtime.listener.clone());
+                    let acceptor = tokio_rustls::TlsAcceptor::from(tls_config.server_config());
+                    let server = server.clone();
+                    connections.spawn_local(async move {
+                        let stream = match tokio::time::timeout(
+                            handshake_timeout,
+                            acceptor.accept(stream),
+                        )
+                        .await
+                        {
+                            Ok(Ok(stream)) => stream,
+                            Ok(Err(error)) => return Err(NacelleError::protocol(error)),
+                            Err(_) => {
+                                server.runtime.telemetry.timeout(
+                                    NacelleTransport::new("http"),
+                                    "tls_handshake",
+                                );
+                                return Err(NacelleError::Timeout("tls_handshake"));
+                            }
+                        };
+                        let connection =
+                            connection.with_tls(rustls_tls_meta(stream.get_ref().1));
+                        run_local_http_connection(server, stream, connection, connection_permit)
+                            .await
+                    });
+                }
+            }
+        }
+        server.runtime.telemetry.shutdown_event(
+            NacelleTelemetryEventKind::ListenerStoppedAccepting,
+            NacelleTransport::new("http"),
+        );
+        drain_http_connection_tasks(
+            connections,
+            drain_deadline.get(),
+            server.runtime.telemetry.clone(),
+        )
+        .await;
+        Ok(())
+    }
+}
+
+impl<H, F, Observer> Clone for HyperServer<H, F, Observer>
+where
+    Observer: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            handler: self.handler.clone(),
+            connection_state_factory: self.connection_state_factory.clone(),
+            runtime: self.runtime.clone(),
+        }
+    }
+}
+
+impl<H> HyperServer<H, NoHttpConnectionState, NoopObserver> {
+    pub fn new(handler: H) -> Self {
+        let telemetry = NacelleTelemetry::default();
+        let runtime_state = NacelleRuntimeState::default();
+        telemetry.register_runtime_state(runtime_state.clone());
+        Self {
+            handler: Arc::new(handler),
+            connection_state_factory: Arc::new(NoHttpConnectionState),
+            runtime: HttpRuntime::new(telemetry, runtime_state),
+        }
+    }
+}
+
+impl<H, F, Observer> HyperServer<H, F, Observer> {
+    pub fn with_connection_state_factory<F2>(self, factory: F2) -> HyperServer<H, F2, Observer>
+    where
+        F2: HttpConnectionStateFactory,
+    {
+        HyperServer {
+            handler: self.handler,
+            connection_state_factory: Arc::new(factory),
+            runtime: self.runtime,
+        }
+    }
+}
+
+impl<H, F, Observer> HyperServer<H, F, Observer>
+where
+    F: HttpConnectionStateFactory,
+    H: HttpHandler<F::State>,
+    Observer: NacelleTelemetryObserver,
+{
+    pub fn with_telemetry<Next>(self, telemetry: NacelleTelemetry<Next>) -> HyperServer<H, F, Next>
+    where
+        Next: NacelleTelemetryObserver,
+    {
+        telemetry.register_runtime_state(self.runtime.runtime_state.clone());
+        HyperServer {
+            handler: self.handler,
+            connection_state_factory: self.connection_state_factory,
+            runtime: HttpRuntime {
+                telemetry,
+                runtime_state: self.runtime.runtime_state,
+                http_limits: self.runtime.http_limits,
+                http_policy: self.runtime.http_policy,
+                access_log_enabled: self.runtime.access_log_enabled,
+                listener: self.runtime.listener,
+                peer_rate_limiter: self.runtime.peer_rate_limiter,
+            },
+        }
     }
 
     pub fn with_runtime_state(mut self, runtime_state: NacelleRuntimeState) -> Self {
-        self.telemetry.register_runtime_state(runtime_state.clone());
-        self.runtime_state = runtime_state;
+        self.runtime
+            .telemetry
+            .register_runtime_state(runtime_state.clone());
+        self.runtime.runtime_state = runtime_state;
         self
     }
 
+    #[doc(hidden)]
+    pub fn with_runtime_context<Next>(
+        self,
+        telemetry: NacelleTelemetry<Next>,
+        runtime_state: NacelleRuntimeState,
+    ) -> HyperServer<H, F, Next>
+    where
+        Next: NacelleTelemetryObserver,
+    {
+        telemetry.register_runtime_state(runtime_state.clone());
+        HyperServer {
+            handler: self.handler,
+            connection_state_factory: self.connection_state_factory,
+            runtime: HttpRuntime {
+                telemetry,
+                runtime_state,
+                http_limits: self.runtime.http_limits,
+                http_policy: self.runtime.http_policy,
+                access_log_enabled: self.runtime.access_log_enabled,
+                listener: self.runtime.listener,
+                peer_rate_limiter: self.runtime.peer_rate_limiter,
+            },
+        }
+    }
+
     pub fn with_http_limits(mut self, http_limits: NacelleHttpLimits) -> Self {
-        self.http_limits = http_limits;
+        self.runtime.http_limits = http_limits;
         self
     }
 
     pub fn http_limits(&self) -> &NacelleHttpLimits {
-        &self.http_limits
+        &self.runtime.http_limits
     }
 
     pub fn with_http_policy(mut self, http_policy: NacelleHttpPolicy) -> Self {
-        self.http_policy = http_policy;
+        self.runtime.peer_rate_limiter = peer_rate_limiter(&http_policy);
+        self.runtime.http_policy = http_policy;
         self
     }
 
     pub fn with_access_log(mut self, enabled: bool) -> Self {
-        self.access_log_enabled = enabled;
+        self.runtime.access_log_enabled = enabled;
+        self
+    }
+
+    pub fn with_listener_label(mut self, listener: impl Into<Arc<str>>) -> Self {
+        self.runtime.listener = listener.into();
         self
     }
 
@@ -185,6 +661,7 @@ where
     ) -> Result<(), NacelleError> {
         let server = Arc::new(self);
         let mut connections = tokio::task::JoinSet::new();
+        let local_addr = listener.local_addr().ok();
         loop {
             tokio::select! {
                 biased;
@@ -197,33 +674,42 @@ where
                     let (stream, peer_addr) = accepted?;
                     let server = server.clone();
                     let connection_permit = match server
-                        .runtime_state
+                        .runtime.runtime_state
                         .acquire_connection_for_peer(peer_addr.ip())
                     {
                         Ok(permit) => permit,
                         Err(error) => {
                             server
-                                .telemetry
+                                .runtime.telemetry
                                 .connection_rejected(NacelleTransport::new("http"), connection_rejection_reason(&error));
                             continue;
                         }
                     };
-                    server.telemetry.connection_opened(NacelleTransport::new("http"));
+                    server.runtime.telemetry.connection_opened(NacelleTransport::new("http"));
+                    let connection = NacelleConnectionMeta::http_socket(
+                        Some(peer_addr),
+                        local_addr,
+                    )
+                    .with_listener(server.runtime.listener.clone());
                     connections.spawn(run_http_connection(
                         server,
                         stream,
-                        Some(peer_addr.ip()),
+                        connection,
                         connection_permit,
                     ));
                 }
             }
         }
-        server.telemetry.shutdown_event(
+        server.runtime.telemetry.shutdown_event(
             NacelleTelemetryEventKind::ListenerStoppedAccepting,
             NacelleTransport::new("http"),
         );
-        drain_http_connection_tasks(connections, drain_deadline.get(), server.telemetry.clone())
-            .await;
+        drain_http_connection_tasks(
+            connections,
+            drain_deadline.get(),
+            server.runtime.telemetry.clone(),
+        )
+        .await;
         Ok(())
     }
 
@@ -305,6 +791,7 @@ where
         let server = Arc::new(self);
         let handshake_timeout = tls_config.handshake_timeout();
         let mut connections = tokio::task::JoinSet::new();
+        let local_addr = listener.local_addr().ok();
         loop {
             tokio::select! {
                 biased;
@@ -317,18 +804,23 @@ where
                     let (stream, peer_addr) = accepted?;
                     let server = server.clone();
                     let connection_permit = match server
-                        .runtime_state
+                        .runtime.runtime_state
                         .acquire_connection_for_peer(peer_addr.ip())
                     {
                         Ok(permit) => permit,
                         Err(error) => {
                             server
-                                .telemetry
+                                .runtime.telemetry
                                 .connection_rejected(NacelleTransport::new("http"), connection_rejection_reason(&error));
                             continue;
                         }
                     };
-                    server.telemetry.connection_opened(NacelleTransport::new("http"));
+                    server.runtime.telemetry.connection_opened(NacelleTransport::new("http"));
+                    let connection = NacelleConnectionMeta::http_socket(
+                        Some(peer_addr),
+                        local_addr,
+                    )
+                    .with_listener(server.runtime.listener.clone());
                     let acceptor = tokio_rustls::TlsAcceptor::from(tls_config.server_config());
                     connections.spawn(async move {
                         let tls_stream = match tokio::time::timeout(
@@ -341,15 +833,16 @@ where
                             Ok(Err(error)) => return Err(NacelleError::protocol(error)),
                             Err(_) => {
                                 server
-                                    .telemetry
+                                    .runtime.telemetry
                                     .timeout(NacelleTransport::new("http"), "tls_handshake");
                                 return Err(NacelleError::Timeout("tls_handshake"));
                             }
                         };
+                        let connection = connection.with_tls(rustls_tls_meta(tls_stream.get_ref().1));
                         run_http_connection(
                             server,
                             tls_stream,
-                            Some(peer_addr.ip()),
+                            connection,
                             connection_permit,
                         )
                         .await
@@ -357,24 +850,53 @@ where
                 }
             }
         }
-        server.telemetry.shutdown_event(
+        server.runtime.telemetry.shutdown_event(
             NacelleTelemetryEventKind::ListenerStoppedAccepting,
             NacelleTransport::new("http"),
         );
-        drain_http_connection_tasks(connections, drain_deadline.get(), server.telemetry.clone())
-            .await;
+        drain_http_connection_tasks(
+            connections,
+            drain_deadline.get(),
+            server.runtime.telemetry.clone(),
+        )
+        .await;
         Ok(())
     }
 
     async fn handle(
         &self,
         request: Request<Incoming>,
-        peer_ip: Option<IpAddr>,
-    ) -> Result<Response<HttpBody>, NacelleError> {
+        connection: &ConnectionContext<Arc<F::State>>,
+    ) -> Result<Response<HttpBody<Observer>>, NacelleError> {
+        self.runtime
+            .handle_with_dispatch(
+                request,
+                &SharedHttpDispatch {
+                    handler: self.handler.clone(),
+                    connection: connection.clone(),
+                },
+            )
+            .await
+    }
+}
+
+impl<Observer> HttpRuntime<Observer>
+where
+    Observer: NacelleTelemetryObserver,
+{
+    async fn handle_with_dispatch<State, D>(
+        &self,
+        request: Request<Incoming>,
+        dispatch: &D,
+    ) -> Result<Response<HttpBody<Observer>>, NacelleError>
+    where
+        D: HttpDispatch<State, Observer>,
+    {
         let request_started = self.request_timing_enabled().then(Instant::now);
         let method = request.method().clone();
         let uri = request.uri().clone();
-        let effective_peer_ip = self.effective_peer_ip(peer_ip, &request);
+        let effective_peer_ip =
+            self.effective_peer_ip(dispatch.connection_info().peer_ip, &request);
         if let Some(rejection) = validate_http_policy(&self.http_policy, &request) {
             self.telemetry
                 .request_rejected(NacelleTransport::new("http"), rejection.reason);
@@ -388,32 +910,34 @@ where
                 reason: Some(rejection.reason),
             });
             return response_to_http(
-                NacelleResponse::http_bytes(rejection.status, rejection.reason),
+                HttpResponse::bytes(rejection.status, rejection.reason),
                 self.runtime_state.clone(),
                 self.telemetry.clone(),
                 &self.http_policy,
             );
         }
-        if let Some(peer_ip) = effective_peer_ip
-            && !self.allow_peer_request(peer_ip)
-        {
-            self.telemetry
-                .request_rejected(NacelleTransport::new("http"), "peer_rate");
-            self.access_log(HttpAccessLog {
-                method: &method,
-                uri: &uri,
-                peer_ip: effective_peer_ip,
-                status: StatusCode::TOO_MANY_REQUESTS,
-                request_bytes: 0,
-                elapsed: elapsed_since(request_started),
-                reason: Some("peer_rate"),
-            });
-            return response_to_http(
-                NacelleResponse::http_bytes(StatusCode::TOO_MANY_REQUESTS, "peer_rate"),
-                self.runtime_state.clone(),
-                self.telemetry.clone(),
-                &self.http_policy,
-            );
+        if let Some(peer_ip) = effective_peer_ip {
+            let rate_result = self.allow_peer_request(peer_ip);
+            if !rate_result.is_allowed() {
+                let reason = peer_rate_rejection_reason(rate_result);
+                self.telemetry
+                    .request_rejected(NacelleTransport::new("http"), reason);
+                self.access_log(HttpAccessLog {
+                    method: &method,
+                    uri: &uri,
+                    peer_ip: effective_peer_ip,
+                    status: StatusCode::TOO_MANY_REQUESTS,
+                    request_bytes: 0,
+                    elapsed: elapsed_since(request_started),
+                    reason: Some(reason),
+                });
+                return response_to_http(
+                    HttpResponse::bytes(StatusCode::TOO_MANY_REQUESTS, reason),
+                    self.runtime_state.clone(),
+                    self.telemetry.clone(),
+                    &self.http_policy,
+                );
+            }
         }
         let _request_permit = match self.runtime_state.acquire_request_tracked() {
             Ok(permit) => permit,
@@ -433,7 +957,7 @@ where
                     reason: Some("in_flight_requests"),
                 });
                 return response_to_http(
-                    NacelleResponse::http_bytes(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
+                    HttpResponse::bytes(StatusCode::SERVICE_UNAVAILABLE, error.to_string()),
                     self.runtime_state.clone(),
                     self.telemetry.clone(),
                     &self.http_policy,
@@ -441,43 +965,48 @@ where
             }
         };
         let (parts, body) = request.into_parts();
-        let request_body_bytes = Arc::new(AtomicUsize::new(0));
         let body_len_hint = body
             .size_hint()
             .upper()
             .and_then(|bytes| usize::try_from(bytes).ok());
-        let request = NacelleRequest {
-            connection: NacelleConnectionMeta::http(effective_peer_ip),
-            meta: NacelleRequestMeta::Http(HttpRequestMeta {
-                method: parts.method,
-                uri: parts.uri,
-                headers: parts.headers,
-                peer_ip: effective_peer_ip,
-            }),
-            body: incoming_to_body(
-                body,
-                body_len_hint,
-                request_body_bytes.clone(),
-                self.runtime_state.clone(),
-                self.http_limits,
-                self.telemetry.clone(),
-            ),
+        let request_body_bytes = AtomicUsize::new(0);
+        let (body, body_pump) = incoming_to_body(
+            body,
+            body_len_hint,
+            &request_body_bytes,
+            self.runtime_state.clone(),
+            self.http_limits,
+            self.telemetry.clone(),
+        );
+        let request = HttpRequest::new(
+            parts.method,
+            parts.uri,
+            parts.headers,
+            effective_peer_ip,
+            body,
+        );
+        let handler_future = dispatch.call(request);
+        let handler_with_body = async {
+            tokio::pin!(handler_future);
+            tokio::pin!(body_pump);
+            tokio::select! {
+                result = &mut handler_future => result,
+                () = &mut body_pump => handler_future.await,
+            }
         };
-
-        let handler_future = self.handler.call(request);
         let handler_result = if let Some(timeout) = self.runtime_state.limits().handler_timeout {
-            tokio::time::timeout(timeout, handler_future)
+            tokio::time::timeout(timeout, handler_with_body)
                 .await
                 .map_err(|_| NacelleError::Timeout("handler"))?
         } else {
-            handler_future.await
+            handler_with_body.await
         };
 
         match handler_result {
-            Ok(response) => {
+            Ok(completion) => {
                 let request_bytes = request_body_bytes.load(Ordering::Relaxed);
                 let response = response_to_http(
-                    response,
+                    completion.into_inner().response,
                     self.runtime_state.clone(),
                     self.telemetry.clone(),
                     &self.http_policy,
@@ -509,10 +1038,7 @@ where
                 );
                 let request_bytes = request_body_bytes.load(Ordering::Relaxed);
                 let response = response_to_http(
-                    NacelleResponse::http_bytes(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        error.to_string(),
-                    ),
+                    HttpResponse::bytes(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
                     self.runtime_state.clone(),
                     self.telemetry.clone(),
                     &self.http_policy,
@@ -543,11 +1069,15 @@ where
         self.access_log_enabled || self.telemetry.request_duration_metrics_enabled()
     }
 
-    fn allow_peer_request(&self, peer_ip: IpAddr) -> bool {
+    fn allow_peer_request(&self, peer_ip: IpAddr) -> NacellePeerRateLimitResult {
         let Some(limit) = self.http_policy.max_requests_per_peer_per_second else {
-            return true;
+            return NacellePeerRateLimitResult::Allowed;
         };
-        allow_peer_request(&self.peer_rate_limits, limit, peer_ip)
+        self.peer_rate_limiter
+            .as_ref()
+            .map_or(NacellePeerRateLimitResult::TableFull, |limiter| {
+                limiter.try_acquire(peer_ip, limit)
+            })
     }
 
     fn effective_peer_ip(
@@ -584,6 +1114,29 @@ where
     }
 }
 
+fn peer_rate_rejection_reason(result: NacellePeerRateLimitResult) -> &'static str {
+    match result {
+        NacellePeerRateLimitResult::Allowed => unreachable!("allowed peers are not rejected"),
+        NacellePeerRateLimitResult::RateLimited => "peer_rate",
+        NacellePeerRateLimitResult::TableFull => "peer_rate_table_full",
+    }
+}
+
+#[cfg(feature = "rustls")]
+fn rustls_tls_meta(connection: &rustls::ServerConnection) -> NacelleConnectionTlsMeta {
+    let mut metadata = NacelleConnectionTlsMeta::new("rustls");
+    if let Some(protocol) = connection.protocol_version() {
+        metadata = metadata.with_protocol(format!("{protocol:?}"));
+    }
+    if let Some(cipher_suite) = connection.negotiated_cipher_suite() {
+        metadata = metadata.with_cipher_suite(format!("{:?}", cipher_suite.suite()));
+    }
+    if let Some(server_name) = connection.server_name() {
+        metadata = metadata.with_server_name(server_name);
+    }
+    metadata
+}
+
 struct HttpAccessLog<'a> {
     method: &'a Method,
     uri: &'a http::Uri,
@@ -605,34 +1158,95 @@ fn connection_rejection_reason(error: &NacelleError) -> &'static str {
     }
 }
 
-async fn run_http_connection<H, I>(
-    server: Arc<HyperServer<H>>,
+async fn run_http_connection<H, F, Observer, I>(
+    server: Arc<HyperServer<H, F, Observer>>,
     stream: I,
-    peer_ip: Option<IpAddr>,
+    connection: NacelleConnectionMeta,
     _connection_permit: nacelle_core::limits::TrackedPermit,
 ) -> Result<(), NacelleError>
 where
-    H: Handler,
+    F: HttpConnectionStateFactory,
+    H: HttpHandler<F::State>,
+    Observer: NacelleTelemetryObserver,
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let write_timeout = server.http_limits.response_write_timeout;
+    let connection_info = ConnectionInfo::from(&connection);
+    let connection_state = Arc::new(server.connection_state_factory.create(&connection_info));
+    let connection = ConnectionContext::new(connection_info, connection_state);
+    let write_timeout = server.runtime.http_limits.response_write_timeout;
     let io = TimeoutIo::new(TokioIo::new(stream), write_timeout);
     let service_server = server.clone();
     let service = service_fn(move |request| {
         let server = service_server.clone();
-        async move { server.handle(request, peer_ip).await }
+        let connection = connection.clone();
+        async move { server.handle(request, &connection).await }
     });
     let mut builder = http1::Builder::new();
     builder
         .timer(TokioTimer::new())
-        .header_read_timeout(server.http_limits.header_read_timeout)
-        .keep_alive(server.http_limits.keep_alive);
+        .header_read_timeout(server.runtime.http_limits.header_read_timeout)
+        .keep_alive(server.runtime.http_limits.keep_alive);
     let connection = builder.serve_connection(io, service);
-    if let Some(max_age) = server.http_limits.max_connection_age {
+    if let Some(max_age) = server.runtime.http_limits.max_connection_age {
         match tokio::time::timeout(max_age, connection).await {
             Ok(result) => result.map_err(NacelleError::protocol),
             Err(_) => {
                 server
+                    .runtime
+                    .telemetry
+                    .timeout(NacelleTransport::new("http"), "http_max_connection_age");
+                Err(NacelleError::Timeout("http_max_connection_age"))
+            }
+        }
+    } else {
+        connection.await.map_err(NacelleError::protocol)
+    }
+}
+
+async fn run_local_http_connection<H, F, Observer, I>(
+    server: Rc<LocalHyperServer<H, F, Observer>>,
+    stream: I,
+    connection: NacelleConnectionMeta,
+    _connection_permit: nacelle_core::limits::TrackedPermit,
+) -> Result<(), NacelleError>
+where
+    F: LocalHttpConnectionStateFactory,
+    H: LocalHttpHandler<F::State>,
+    Observer: NacelleTelemetryObserver,
+    I: AsyncRead + AsyncWrite + Unpin + 'static,
+{
+    let connection_info = ConnectionInfo::from(&connection);
+    let connection_state = Rc::new(server.connection_state_factory.create(&connection_info));
+    let dispatch = LocalHttpDispatch {
+        handler: server.handler.clone(),
+        connection: ConnectionContext::new(connection_info, connection_state),
+    };
+    let write_timeout = server.runtime.http_limits.response_write_timeout;
+    let io = TimeoutIo::new(TokioIo::new(stream), write_timeout);
+    let service_server = server.clone();
+    let service_dispatch = dispatch.clone();
+    let service = service_fn(move |request| {
+        let server = service_server.clone();
+        let dispatch = service_dispatch.clone();
+        async move {
+            server
+                .runtime
+                .handle_with_dispatch(request, &dispatch)
+                .await
+        }
+    });
+    let mut builder = http1::Builder::new();
+    builder
+        .timer(TokioTimer::new())
+        .header_read_timeout(server.runtime.http_limits.header_read_timeout)
+        .keep_alive(server.runtime.http_limits.keep_alive);
+    let connection = builder.serve_connection(io, service);
+    if let Some(max_age) = server.runtime.http_limits.max_connection_age {
+        match tokio::time::timeout(max_age, connection).await {
+            Ok(result) => result.map_err(NacelleError::protocol),
+            Err(_) => {
+                server
+                    .runtime
                     .telemetry
                     .timeout(NacelleTransport::new("http"), "http_max_connection_age");
                 Err(NacelleError::Timeout("http_max_connection_age"))
@@ -769,11 +1383,13 @@ fn log_http_connection_result(
     }
 }
 
-async fn drain_http_connection_tasks(
+async fn drain_http_connection_tasks<Observer>(
     mut connections: tokio::task::JoinSet<Result<(), NacelleError>>,
     drain_timeout: Duration,
-    telemetry: NacelleTelemetry,
-) {
+    telemetry: NacelleTelemetry<Observer>,
+) where
+    Observer: NacelleTelemetryObserver,
+{
     telemetry.shutdown_event(
         NacelleTelemetryEventKind::DrainStarted,
         NacelleTransport::new("http"),
@@ -809,12 +1425,256 @@ async fn drain_http_connection_tasks(
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
+    use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use nacelle_core::handler::handler_fn;
-    use nacelle_core::request::{NacelleBody, NacelleRequest};
+    use nacelle_core::pipeline::handler_fn;
+    use nacelle_core::request::NacelleBody;
 
     use super::*;
+
+    #[cfg(feature = "tls-self-signed")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn local_https_self_signed_server_accepts_request() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("listener");
+                let addr = listener.local_addr().expect("address");
+                let generated = NacelleTlsConfig::self_signed(["localhost"]).expect("TLS config");
+                let certificate =
+                    nacelle_core::tls::parse_pem_certificates(generated.certificate_pem.as_bytes())
+                        .expect("certificate")
+                        .remove(0);
+                let mut roots = rustls::RootCertStore::empty();
+                roots.add(certificate).expect("root");
+                let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(
+                    rustls::ClientConfig::builder()
+                        .with_root_certificates(roots)
+                        .with_no_client_auth(),
+                ));
+                let (shutdown, token) = nacelle_core::lifecycle::NacelleShutdown::pair();
+                let handler = nacelle_core::pipeline::local_handler_fn(
+                    |context: crate::LocalHttpRequestContext<()>| async move {
+                        context
+                            .respond(HttpResponse::bytes(StatusCode::OK, "local tls"))
+                            .await
+                    },
+                );
+                let task =
+                    tokio::task::spawn_local(LocalHyperServer::new(handler).serve_tls_listener(
+                        listener,
+                        generated.tls_config,
+                        token,
+                        NacelleDrainDeadline::default(),
+                    ));
+                let stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+                let name = rustls::pki_types::ServerName::try_from("localhost").expect("name");
+                let mut client = connector.connect(name, stream).await.expect("handshake");
+                client
+                    .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                    .await
+                    .expect("write");
+                let mut response = Vec::new();
+                client.read_to_end(&mut response).await.expect("read");
+                let response = String::from_utf8(response).expect("utf8");
+                assert!(response.starts_with("HTTP/1.1 200 OK"));
+                assert!(response.contains("local tls"));
+                shutdown.shutdown();
+                task.await.expect("join").expect("server");
+            })
+            .await;
+    }
+
+    #[test]
+    fn local_http_workers_share_peer_rate_limit_state() {
+        let shared_state = LocalHttpSharedState::default();
+        let policy = NacelleHttpPolicy::new().with_max_requests_per_peer_per_second(1);
+        let first = LocalHyperServer::new(nacelle_core::pipeline::local_handler_fn(
+            |_context: crate::LocalHttpRequestContext<()>| async move {
+                Err(NacelleError::ResourceLimit("unused_test_handler"))
+            },
+        ))
+        .with_http_policy(policy.clone())
+        .with_runtime_context(
+            NacelleTelemetry::default(),
+            NacelleRuntimeState::default(),
+            shared_state.clone(),
+        );
+        let second = LocalHyperServer::new(nacelle_core::pipeline::local_handler_fn(
+            |_context: crate::LocalHttpRequestContext<()>| async move {
+                Err(NacelleError::ResourceLimit("unused_test_handler"))
+            },
+        ))
+        .with_http_policy(policy)
+        .with_runtime_context(
+            NacelleTelemetry::default(),
+            NacelleRuntimeState::default(),
+            shared_state,
+        );
+        let peer = "127.0.0.1".parse().expect("valid peer ip");
+
+        assert_eq!(
+            first.runtime.allow_peer_request(peer),
+            NacellePeerRateLimitResult::Allowed
+        );
+        assert_eq!(
+            second.runtime.allow_peer_request(peer),
+            NacellePeerRateLimitResult::RateLimited
+        );
+    }
+
+    #[test]
+    fn http_peer_rate_table_rejects_new_peers_when_full() {
+        let server = HyperServer::new(nacelle_core::pipeline::handler_fn(
+            |_context: crate::HttpRequestContext<()>| async move {
+                Err(NacelleError::ResourceLimit("unused_test_handler"))
+            },
+        ))
+        .with_http_policy(
+            NacelleHttpPolicy::new()
+                .with_max_requests_per_peer_per_second(1)
+                .with_peer_rate_limit_table_capacity(1),
+        );
+        let first = "127.0.0.1".parse().expect("valid first peer");
+        let second = "127.0.0.2".parse().expect("valid second peer");
+
+        assert_eq!(
+            server.runtime.allow_peer_request(first),
+            NacellePeerRateLimitResult::Allowed
+        );
+        assert_eq!(
+            server.runtime.allow_peer_request(second),
+            NacellePeerRateLimitResult::TableFull
+        );
+        assert_eq!(
+            peer_rate_rejection_reason(NacellePeerRateLimitResult::TableFull),
+            "peer_rate_table_full"
+        );
+    }
+
+    struct CountingConnectionStateFactory {
+        creations: Arc<AtomicUsize>,
+        requests: Arc<AtomicUsize>,
+    }
+
+    struct CountingConnectionState {
+        requests: Arc<AtomicUsize>,
+    }
+
+    impl HttpConnectionStateFactory for CountingConnectionStateFactory {
+        type State = CountingConnectionState;
+
+        fn create(&self, _connection: &ConnectionInfo) -> Self::State {
+            self.creations.fetch_add(1, Ordering::SeqCst);
+            CountingConnectionState {
+                requests: self.requests.clone(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn http_keep_alive_reuses_connection_identity_and_metadata() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let server = HyperServer::new(handler_fn({
+            let observed = observed.clone();
+            move |context: HttpRequestContext<()>| {
+                let observed = observed.clone();
+                async move {
+                    observed
+                        .lock()
+                        .expect("observed metadata lock poisoned")
+                        .push(context.connection().info.clone());
+                    context
+                        .respond(HttpResponse::bytes(StatusCode::OK, "ok"))
+                        .await
+                }
+            }
+        }))
+        .with_listener_label("keep-alive-test");
+        let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        client
+            .write_all(
+                b"GET /one HTTP/1.1\r\nHost: localhost\r\n\r\n\
+                  GET /two HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .expect("requests should write");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("responses should read");
+        assert_eq!(
+            String::from_utf8_lossy(&response)
+                .matches("HTTP/1.1 200 OK")
+                .count(),
+            2
+        );
+
+        let observed = observed.lock().expect("observed metadata lock poisoned");
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[0].connection_id, observed[1].connection_id);
+        assert_eq!(observed[0].listener.as_ref(), "keep-alive-test");
+        assert!(observed[0].peer_addr.is_some());
+        assert_eq!(observed[0].local_addr, Some(addr));
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn http_connection_state_is_created_once_and_reused_for_keep_alive() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let creations = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(AtomicUsize::new(0));
+        let server = HyperServer::new(handler_fn(
+            |context: HttpRequestContext<CountingConnectionState>| async move {
+                context
+                    .connection()
+                    .state
+                    .requests
+                    .fetch_add(1, Ordering::SeqCst);
+                context.respond(HttpResponse::empty(StatusCode::OK)).await
+            },
+        ))
+        .with_connection_state_factory(CountingConnectionStateFactory {
+            creations: creations.clone(),
+            requests: requests.clone(),
+        });
+        let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        client
+            .write_all(
+                b"GET /one HTTP/1.1\r\nHost: localhost\r\n\r\n\
+                  GET /two HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .expect("requests should write");
+        let mut response = Vec::new();
+        client
+            .read_to_end(&mut response)
+            .await
+            .expect("responses should read");
+
+        assert_eq!(creations.load(Ordering::SeqCst), 1);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        server_task.abort();
+    }
 
     #[tokio::test]
     async fn http_server_streams_request_and_response_body() {
@@ -822,24 +1682,25 @@ mod tests {
             .await
             .expect("listener should bind");
         let addr = listener.local_addr().expect("listener should have addr");
-        let server = HyperServer::new(handler_fn(|mut request: NacelleRequest| async move {
-            assert_eq!(
-                request.http_meta().expect("http metadata").uri.path(),
-                "/echo"
-            );
-            let (tx, body) = NacelleBody::channel(2);
-            while let Some(chunk) = request.body.next_chunk().await {
-                tx.send(chunk)
+        let server = HyperServer::new(handler_fn(
+            |mut context: HttpRequestContext<()>| async move {
+                assert_eq!(context.request().uri.path(), "/echo");
+                let (tx, body) = NacelleBody::channel(2);
+                while let Some(chunk) = context.request_mut().next_body_chunk().await {
+                    tx.send(chunk)
+                        .await
+                        .expect("response receiver should be open");
+                }
+                drop(tx);
+                context
+                    .respond(HttpResponse::new(
+                        StatusCode::CREATED,
+                        http::HeaderMap::new(),
+                        body,
+                    ))
                     .await
-                    .expect("response receiver should be open");
-            }
-            drop(tx);
-            Ok(NacelleResponse::http(
-                StatusCode::CREATED,
-                http::HeaderMap::new(),
-                body,
-            ))
-        }));
+            },
+        ));
         let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
 
         let mut client = tokio::net::TcpStream::connect(addr)
@@ -875,10 +1736,12 @@ mod tests {
             .await
             .expect("listener should bind");
         let addr = listener.local_addr().expect("listener should have addr");
-        let sink = Arc::new(nacelle_core::NacelleInMemoryTelemetrySink::new());
-        let telemetry = NacelleTelemetry::new().with_sink(sink.clone());
-        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
-            Ok(NacelleResponse::http_bytes(StatusCode::OK, "hello bytes"))
+        let sink = Arc::new(nacelle_core::NacelleInMemoryObserver::new());
+        let telemetry = NacelleTelemetry::new().with_observer(sink.clone());
+        let server = HyperServer::new(handler_fn(|context: HttpRequestContext<()>| async move {
+            context
+                .respond(HttpResponse::bytes(StatusCode::OK, "hello bytes"))
+                .await
         }))
         .with_telemetry(telemetry);
         let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
@@ -909,8 +1772,10 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
-        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
-            Ok(NacelleResponse::http_bytes(StatusCode::OK, "ok"))
+        let server = HyperServer::new(handler_fn(|context: HttpRequestContext<()>| async move {
+            context
+                .respond(HttpResponse::bytes(StatusCode::OK, "ok"))
+                .await
         }));
         let (shutdown, token) = nacelle_core::lifecycle::NacelleShutdown::pair();
         let server_task =
@@ -932,9 +1797,11 @@ mod tests {
             .expect("listener should bind");
         let addr = listener.local_addr().expect("listener should have addr");
         let runtime_state = nacelle_core::limits::NacelleRuntimeState::default();
-        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
+        let server = HyperServer::new(handler_fn(|context: HttpRequestContext<()>| async move {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            Ok(NacelleResponse::http_bytes(StatusCode::OK, "ok"))
+            context
+                .respond(HttpResponse::bytes(StatusCode::OK, "ok"))
+                .await
         }))
         .with_runtime_state(runtime_state.clone());
         let (shutdown, token) = nacelle_core::lifecycle::NacelleShutdown::pair();
@@ -972,8 +1839,10 @@ mod tests {
         let runtime_state = nacelle_core::limits::NacelleRuntimeState::default();
         let http_limits = NacelleHttpLimits::default()
             .with_header_read_timeout(std::time::Duration::from_millis(25));
-        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
-            Ok(NacelleResponse::http_bytes(StatusCode::OK, "ok"))
+        let server = HyperServer::new(handler_fn(|context: HttpRequestContext<()>| async move {
+            context
+                .respond(HttpResponse::bytes(StatusCode::OK, "ok"))
+                .await
         }))
         .with_runtime_state(runtime_state.clone())
         .with_http_limits(http_limits);
@@ -1005,12 +1874,16 @@ mod tests {
         let runtime_state = nacelle_core::limits::NacelleRuntimeState::new(
             nacelle_core::limits::NacelleLimits::default().with_max_memory_bytes(1024 * 1024),
         );
-        let server = HyperServer::new(handler_fn(move |mut request: NacelleRequest| async move {
-            while let Some(chunk) = request.body.next_chunk().await {
-                let _ = chunk?;
-            }
-            Ok(NacelleResponse::http_bytes(StatusCode::OK, "ok"))
-        }))
+        let server = HyperServer::new(handler_fn(
+            move |mut context: HttpRequestContext<()>| async move {
+                while let Some(chunk) = context.request_mut().next_body_chunk().await {
+                    let _ = chunk?;
+                }
+                context
+                    .respond(HttpResponse::bytes(StatusCode::OK, "ok"))
+                    .await
+            },
+        ))
         .with_runtime_state(runtime_state.clone());
         let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
 
@@ -1044,6 +1917,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_early_response_cancels_body_pump_and_releases_resources() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let runtime_state = nacelle_core::limits::NacelleRuntimeState::new(
+            nacelle_core::limits::NacelleLimits::default().with_max_memory_bytes(1024),
+        );
+        let handler_state = runtime_state.clone();
+        let server = HyperServer::new(handler_fn(move |context: HttpRequestContext<()>| {
+            let handler_state = handler_state.clone();
+            async move {
+                while handler_state.memory_used_bytes() != 11 {
+                    tokio::task::yield_now().await;
+                }
+                context
+                    .respond(HttpResponse::bytes(StatusCode::OK, "ok"))
+                    .await
+            }
+        }))
+        .with_runtime_state(runtime_state.clone());
+        let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        client
+            .write_all(
+                b"POST / HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Content-Length: 11\r\n\
+                  Connection: close\r\n\
+                  \r\n",
+            )
+            .await
+            .expect("headers should write");
+
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.read_to_end(&mut response),
+        )
+        .await
+        .expect("early response should complete before timeout")
+        .expect("response should read");
+
+        assert!(response.starts_with(b"HTTP/1.1 200 OK"));
+        wait_for_memory(&runtime_state, 0).await;
+        assert_eq!(runtime_state.active_streaming_tasks(), 0);
+        assert_eq!(runtime_state.active_requests(), 0);
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    async fn http_early_response_cancels_memory_waiter_without_leaking_budget() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("listener should have addr");
+        let runtime_state = nacelle_core::limits::NacelleRuntimeState::new(
+            nacelle_core::limits::NacelleLimits::default().with_max_memory_bytes(11),
+        );
+        let held = runtime_state
+            .allocate_memory(11)
+            .expect("test should fill the memory budget");
+        let server = HyperServer::new(handler_fn(|context: HttpRequestContext<()>| async move {
+            tokio::task::yield_now().await;
+            context
+                .respond(HttpResponse::bytes(StatusCode::OK, "ok"))
+                .await
+        }))
+        .with_runtime_state(runtime_state.clone());
+        let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
+
+        let mut client = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("client should connect");
+        client
+            .write_all(
+                b"POST / HTTP/1.1\r\n\
+                  Host: localhost\r\n\
+                  Content-Length: 11\r\n\
+                  Connection: close\r\n\
+                  \r\n",
+            )
+            .await
+            .expect("headers should write");
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.read_to_end(&mut response),
+        )
+        .await
+        .expect("early response should complete before timeout")
+        .expect("response should read");
+        assert!(response.starts_with(b"HTTP/1.1 200 OK"));
+
+        drop(held);
+        wait_for_memory(&runtime_state, 0).await;
+        let recovered = runtime_state
+            .allocate_memory(11)
+            .expect("cancelled body waiter should leave the budget reusable");
+        drop(recovered);
+        assert_eq!(runtime_state.memory_used_bytes(), 0);
+        server_task.abort();
+    }
+
+    #[tokio::test]
     async fn http_trickle_request_body_times_out() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -1051,12 +2032,16 @@ mod tests {
         let addr = listener.local_addr().expect("listener should have addr");
         let http_limits = NacelleHttpLimits::default()
             .with_request_body_read_timeout(std::time::Duration::from_millis(20));
-        let server = HyperServer::new(handler_fn(|mut request: NacelleRequest| async move {
-            while let Some(chunk) = request.body.next_chunk().await {
-                let _ = chunk?;
-            }
-            Ok(NacelleResponse::http_bytes(StatusCode::OK, "ok"))
-        }))
+        let server = HyperServer::new(handler_fn(
+            |mut context: HttpRequestContext<()>| async move {
+                while let Some(chunk) = context.request_mut().next_body_chunk().await {
+                    let _ = chunk?;
+                }
+                context
+                    .respond(HttpResponse::bytes(StatusCode::OK, "ok"))
+                    .await
+            },
+        ))
         .with_http_limits(http_limits);
         let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
 
@@ -1097,7 +2082,7 @@ mod tests {
         let http_limits = NacelleHttpLimits::default()
             .with_response_write_timeout(std::time::Duration::from_millis(20));
         let runtime_state = nacelle_core::limits::NacelleRuntimeState::default();
-        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
+        let server = HyperServer::new(handler_fn(|context: HttpRequestContext<()>| async move {
             let (tx, body) = NacelleBody::channel(1);
             tokio::spawn(async move {
                 let chunk = Bytes::from(vec![0x5A; 16 * 1024]);
@@ -1107,11 +2092,13 @@ mod tests {
                     }
                 }
             });
-            Ok(NacelleResponse::http(
-                StatusCode::OK,
-                http::HeaderMap::new(),
-                body,
-            ))
+            context
+                .respond(HttpResponse::new(
+                    StatusCode::OK,
+                    http::HeaderMap::new(),
+                    body,
+                ))
+                .await
         }))
         .with_runtime_state(runtime_state.clone())
         .with_http_limits(http_limits);
@@ -1141,7 +2128,7 @@ mod tests {
             .await
             .expect("listener should bind");
         let addr = listener.local_addr().expect("listener should have addr");
-        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
+        let server = HyperServer::new(handler_fn(|_context: HttpRequestContext<()>| async move {
             Err(NacelleError::handler(std::io::Error::other("boom")))
         }));
         let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
@@ -1190,8 +2177,19 @@ mod tests {
             .with_root_certificates(roots)
             .with_no_client_auth();
         let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
-        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
-            Ok(NacelleResponse::http_bytes(StatusCode::OK, "tls ok"))
+        let observed = Arc::new(Mutex::new(None));
+        let server = HyperServer::new(handler_fn({
+            let observed = observed.clone();
+            move |context: HttpRequestContext<()>| {
+                let observed = observed.clone();
+                async move {
+                    *observed.lock().expect("observed metadata lock poisoned") =
+                        Some(context.connection().info.clone());
+                    context
+                        .respond(HttpResponse::bytes(StatusCode::OK, "tls ok"))
+                        .await
+                }
+            }
         }));
         let server_task = tokio::spawn(async move {
             server
@@ -1221,6 +2219,15 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 200 OK"));
         assert!(response.contains("tls ok"));
+        let observed = observed.lock().expect("observed metadata lock poisoned");
+        let tls = observed
+            .as_ref()
+            .and_then(|connection| connection.tls.as_ref())
+            .expect("TLS metadata should reach the handler context");
+        assert_eq!(tls.provider, "rustls");
+        assert!(tls.protocol.is_some());
+        assert!(tls.cipher_suite.is_some());
+        assert_eq!(tls.server_name.as_deref(), Some("localhost"));
         server_task.abort();
     }
 
@@ -1250,8 +2257,10 @@ mod tests {
             .with_root_certificates(roots)
             .with_no_client_auth();
         let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(client_config));
-        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
-            Ok(NacelleResponse::http_bytes(StatusCode::OK, "tls ok"))
+        let server = HyperServer::new(handler_fn(|context: HttpRequestContext<()>| async move {
+            context
+                .respond(HttpResponse::bytes(StatusCode::OK, "tls ok"))
+                .await
         }));
         let server_task =
             tokio::spawn(async move { server.serve_tls_listener(listener, tls_config).await });
@@ -1273,11 +2282,13 @@ mod tests {
         let called_for_handler = called.clone();
         let (response, events) = http_policy_response(
             NacelleHttpPolicy::new().with_allowed_hosts(["example.com"]),
-            handler_fn(move |_request: NacelleRequest| {
+            handler_fn(move |context: HttpRequestContext<()>| {
                 let called_for_handler = called_for_handler.clone();
                 async move {
                     called_for_handler.store(true, std::sync::atomic::Ordering::SeqCst);
-                    Ok(NacelleResponse::http_bytes(StatusCode::OK, "handler"))
+                    context
+                        .respond(HttpResponse::bytes(StatusCode::OK, "handler"))
+                        .await
                 }
             }),
             b"GET / HTTP/1.1\r\nHost: wrong.example\r\nConnection: close\r\n\r\n",
@@ -1296,8 +2307,10 @@ mod tests {
     async fn http_policy_rejects_disallowed_method_before_handler() {
         let (response, events) = http_policy_response(
             NacelleHttpPolicy::new().with_allowed_methods([Method::GET]),
-            handler_fn(|_request: NacelleRequest| async move {
-                Ok(NacelleResponse::http_bytes(StatusCode::OK, "handler"))
+            handler_fn(|context: HttpRequestContext<()>| async move {
+                context
+                    .respond(HttpResponse::bytes(StatusCode::OK, "handler"))
+                    .await
             }),
             b"POST / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
         )
@@ -1314,8 +2327,10 @@ mod tests {
     async fn http_policy_rejects_long_uri_before_handler() {
         let (response, events) = http_policy_response(
             NacelleHttpPolicy::new().with_max_uri_len(4),
-            handler_fn(|_request: NacelleRequest| async move {
-                Ok(NacelleResponse::http_bytes(StatusCode::OK, "handler"))
+            handler_fn(|context: HttpRequestContext<()>| async move {
+                context
+                    .respond(HttpResponse::bytes(StatusCode::OK, "handler"))
+                    .await
             }),
             b"GET /too-long HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
         )
@@ -1334,8 +2349,8 @@ mod tests {
             NacelleHttpPolicy::new()
                 .with_max_header_count(1)
                 .with_max_header_bytes(16),
-            handler_fn(|_request: NacelleRequest| async move {
-                Ok(NacelleResponse::http_bytes(StatusCode::OK, "handler"))
+            handler_fn(|context: HttpRequestContext<()>| async move {
+                context.respond(HttpResponse::bytes(StatusCode::OK, "handler")).await
             }),
             b"GET / HTTP/1.1\r\nHost: localhost\r\nX-Long: abcdefghijklmnop\r\nConnection: close\r\n\r\n",
         )
@@ -1356,8 +2371,10 @@ mod tests {
 
         let (normal_response, _events) = http_policy_response(
             policy.clone(),
-            handler_fn(|_request: NacelleRequest| async move {
-                Ok(NacelleResponse::http_bytes(StatusCode::OK, "handler"))
+            handler_fn(|context: HttpRequestContext<()>| async move {
+                context
+                    .respond(HttpResponse::bytes(StatusCode::OK, "handler"))
+                    .await
             }),
             b"GET / HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n",
         )
@@ -1368,8 +2385,10 @@ mod tests {
 
         let (rejected_response, _events) = http_policy_response(
             policy,
-            handler_fn(|_request: NacelleRequest| async move {
-                Ok(NacelleResponse::http_bytes(StatusCode::OK, "handler"))
+            handler_fn(|context: HttpRequestContext<()>| async move {
+                context
+                    .respond(HttpResponse::bytes(StatusCode::OK, "handler"))
+                    .await
             }),
             b"GET / HTTP/1.1\r\nHost: wrong.example\r\nConnection: close\r\n\r\n",
         )
@@ -1385,10 +2404,12 @@ mod tests {
             .await
             .expect("listener should bind");
         let addr = listener.local_addr().expect("listener should have addr");
-        let sink = Arc::new(nacelle_core::NacelleInMemoryTelemetrySink::new());
-        let telemetry = NacelleTelemetry::new().with_sink(sink.clone());
-        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
-            Ok(NacelleResponse::http_bytes(StatusCode::OK, "handler"))
+        let sink = Arc::new(nacelle_core::NacelleInMemoryObserver::new());
+        let telemetry = NacelleTelemetry::new().with_observer(sink.clone());
+        let server = HyperServer::new(handler_fn(|context: HttpRequestContext<()>| async move {
+            context
+                .respond(HttpResponse::bytes(StatusCode::OK, "handler"))
+                .await
         }))
         .with_telemetry(telemetry)
         .with_http_policy(NacelleHttpPolicy::new().with_max_requests_per_peer_per_second(1));
@@ -1420,8 +2441,10 @@ mod tests {
             .await
             .expect("listener should bind");
         let addr = listener.local_addr().expect("listener should have addr");
-        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
-            Ok(NacelleResponse::http_bytes(StatusCode::OK, "handler"))
+        let server = HyperServer::new(handler_fn(|context: HttpRequestContext<()>| async move {
+            context
+                .respond(HttpResponse::bytes(StatusCode::OK, "handler"))
+                .await
         }))
         .with_http_policy(NacelleHttpPolicy::new().with_max_requests_per_peer_per_second(1));
         let server_task = tokio::spawn(async move { server.serve_listener(listener).await });
@@ -1448,15 +2471,11 @@ mod tests {
             .await
             .expect("listener should bind");
         let addr = listener.local_addr().expect("listener should have addr");
-        let server = HyperServer::new(handler_fn(|request: NacelleRequest| async move {
-            let peer_ip = request
-                .http_meta()
-                .and_then(|meta| meta.peer_ip)
-                .expect("effective peer ip");
-            Ok(NacelleResponse::http_bytes(
-                StatusCode::OK,
-                peer_ip.to_string(),
-            ))
+        let server = HyperServer::new(handler_fn(|context: HttpRequestContext<()>| async move {
+            let peer_ip = context.request().peer_ip.expect("effective peer ip");
+            context
+                .respond(HttpResponse::bytes(StatusCode::OK, peer_ip.to_string()))
+                .await
         }))
         .with_http_policy(
             NacelleHttpPolicy::new()
@@ -1498,10 +2517,12 @@ mod tests {
         let runtime_state = nacelle_core::limits::NacelleRuntimeState::new(
             nacelle_core::limits::NacelleLimits::default().with_max_connections_per_peer(1),
         );
-        let sink = Arc::new(nacelle_core::NacelleInMemoryTelemetrySink::new());
-        let telemetry = NacelleTelemetry::new().with_sink(sink.clone());
-        let server = HyperServer::new(handler_fn(|_request: NacelleRequest| async move {
-            Ok(NacelleResponse::http_bytes(StatusCode::OK, "ok"))
+        let sink = Arc::new(nacelle_core::NacelleInMemoryObserver::new());
+        let telemetry = NacelleTelemetry::new().with_observer(sink.clone());
+        let server = HyperServer::new(handler_fn(|context: HttpRequestContext<()>| async move {
+            context
+                .respond(HttpResponse::bytes(StatusCode::OK, "ok"))
+                .await
         }))
         .with_runtime_state(runtime_state.clone())
         .with_telemetry(telemetry);
@@ -1570,14 +2591,14 @@ mod tests {
         request: &[u8],
     ) -> (String, Vec<nacelle_core::NacelleTelemetryEvent>)
     where
-        H: Handler,
+        H: HttpHandler<()>,
     {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("listener should bind");
         let addr = listener.local_addr().expect("listener should have addr");
-        let sink = Arc::new(nacelle_core::NacelleInMemoryTelemetrySink::new());
-        let telemetry = NacelleTelemetry::new().with_sink(sink.clone());
+        let sink = Arc::new(nacelle_core::NacelleInMemoryObserver::new());
+        let telemetry = NacelleTelemetry::new().with_observer(sink.clone());
         let server = HyperServer::new(handler)
             .with_telemetry(telemetry)
             .with_http_policy(policy);

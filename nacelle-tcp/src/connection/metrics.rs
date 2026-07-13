@@ -2,16 +2,43 @@ use std::time::{Duration, Instant};
 
 use crate::protocol::Protocol;
 use nacelle_core::error::NacelleError;
-use nacelle_core::request::{NacelleConnectionMeta, RequestMetadata};
-use nacelle_core::telemetry::{NacelleMetricsContext, NacelleTelemetry, NacelleTransport};
+use nacelle_core::request::NacelleConnectionMeta;
+use nacelle_core::telemetry::{
+    NacelleMetricsContext, NacelleTelemetry, NacelleTelemetryObserver, NacelleTransport,
+};
 
-pub(super) fn tcp_metrics_context<Req, P>(
+#[derive(Debug, Clone, Copy)]
+pub(super) struct TcpTelemetryPlan {
+    pub(super) metrics: bool,
+    pub(super) request_metrics: bool,
+    pub(super) request_duration: bool,
+    pub(super) phase_duration: bool,
+    pub(super) observer: bool,
+    pub(super) request_events: bool,
+}
+
+impl TcpTelemetryPlan {
+    pub(super) fn new<Observer>(telemetry: &NacelleTelemetry<Observer>) -> Self
+    where
+        Observer: NacelleTelemetryObserver,
+    {
+        Self {
+            metrics: telemetry.metrics_enabled(),
+            request_metrics: telemetry.request_metrics_enabled(),
+            request_duration: telemetry.request_duration_metrics_enabled(),
+            phase_duration: telemetry.phase_duration_metrics_enabled(),
+            observer: telemetry.observer_enabled(),
+            request_events: telemetry.request_events_enabled(),
+        }
+    }
+}
+
+pub(super) fn tcp_metrics_context<P>(
     protocol: &P,
     connection: &NacelleConnectionMeta,
 ) -> NacelleMetricsContext
 where
-    Req: RequestMetadata,
-    P: Protocol<Req> + Send + Sync + 'static,
+    P: Protocol,
 {
     NacelleMetricsContext::new(
         connection.transport,
@@ -21,61 +48,82 @@ where
     )
 }
 
-pub(super) fn start_tcp_phase(telemetry: &NacelleTelemetry) -> Option<Instant> {
-    telemetry
-        .phase_duration_metrics_enabled()
-        .then(Instant::now)
+pub(super) fn start_tcp_phase(enabled: bool) -> Option<Instant> {
+    enabled.then(Instant::now)
 }
 
-pub(super) fn finish_tcp_phase(
-    telemetry: &NacelleTelemetry,
+pub(super) fn finish_tcp_phase<Observer>(
+    telemetry: &NacelleTelemetry<Observer>,
     metrics_context: Option<&NacelleMetricsContext>,
     phase: &'static str,
     started: Option<Instant>,
-) {
+) where
+    Observer: NacelleTelemetryObserver,
+{
     if let (Some(started), Some(metrics_context)) = (started, metrics_context) {
         telemetry.phase_duration(metrics_context, phase, started.elapsed());
     }
 }
 
-pub(super) fn record_tcp_error(
-    telemetry: &NacelleTelemetry,
+pub(super) fn record_tcp_error<Observer>(
+    telemetry: &NacelleTelemetry<Observer>,
     metrics_context: Option<&NacelleMetricsContext>,
     phase: &'static str,
     error: &NacelleError,
-) {
+) where
+    Observer: NacelleTelemetryObserver,
+{
     if let Some(metrics_context) = metrics_context {
         telemetry.operation_error(metrics_context, phase, error);
     }
 }
 
-pub(super) fn record_core_request_completed(
-    telemetry: &NacelleTelemetry,
+pub(super) fn record_core_request_completed<Observer>(
+    telemetry: &NacelleTelemetry<Observer>,
     enabled: bool,
+    emit_metrics: bool,
     transport: NacelleTransport,
     request_bytes: usize,
     response_bytes: usize,
     started: Option<Instant>,
-) {
+) where
+    Observer: NacelleTelemetryObserver,
+{
     if enabled {
-        telemetry.request_completed(
-            transport,
-            request_bytes,
-            response_bytes,
-            elapsed_since(started),
-        );
+        if emit_metrics {
+            telemetry.request_completed(
+                transport,
+                request_bytes,
+                response_bytes,
+                elapsed_since(started),
+            );
+        } else {
+            telemetry.request_completed_without_metrics(
+                transport,
+                request_bytes,
+                response_bytes,
+                elapsed_since(started),
+            );
+        }
     }
 }
 
-pub(super) fn record_core_request_failed(
-    telemetry: &NacelleTelemetry,
+pub(super) fn record_core_request_failed<Observer>(
+    telemetry: &NacelleTelemetry<Observer>,
     enabled: bool,
+    emit_metrics: bool,
     transport: NacelleTransport,
     started: Option<Instant>,
     error: &NacelleError,
-) {
+) where
+    Observer: NacelleTelemetryObserver,
+{
     if enabled {
-        telemetry.request_failed(transport, elapsed_since(started), error);
+        if emit_metrics {
+            telemetry.request_failed(transport, elapsed_since(started), error);
+        } else {
+            telemetry.request_failed_without_metrics(transport, elapsed_since(started), error);
+        }
     }
 }
 
@@ -101,17 +149,20 @@ fn elapsed_since(started: Option<Instant>) -> Duration {
     started.map_or(Duration::ZERO, |started| started.elapsed())
 }
 
-pub(super) struct TcpRequestMetricsGuard<'a> {
-    telemetry: &'a NacelleTelemetry,
+pub(super) struct TcpRequestMetricsGuard<'a, Observer: NacelleTelemetryObserver> {
+    telemetry: &'a NacelleTelemetry<Observer>,
     context: Option<NacelleMetricsContext>,
     request_bytes: usize,
     started: Option<Instant>,
     completed: bool,
 }
 
-impl<'a> TcpRequestMetricsGuard<'a> {
+impl<'a, Observer> TcpRequestMetricsGuard<'a, Observer>
+where
+    Observer: NacelleTelemetryObserver,
+{
     pub(super) fn new(
-        telemetry: &'a NacelleTelemetry,
+        telemetry: &'a NacelleTelemetry<Observer>,
         context: Option<NacelleMetricsContext>,
         request_bytes: usize,
         started: Option<Instant>,
@@ -142,7 +193,10 @@ impl<'a> TcpRequestMetricsGuard<'a> {
     }
 }
 
-impl Drop for TcpRequestMetricsGuard<'_> {
+impl<Observer> Drop for TcpRequestMetricsGuard<'_, Observer>
+where
+    Observer: NacelleTelemetryObserver,
+{
     fn drop(&mut self) {
         if !self.completed
             && let Some(context) = &self.context
@@ -155,5 +209,51 @@ impl Drop for TcpRequestMetricsGuard<'_> {
                 elapsed_since(self.started),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use nacelle_core::telemetry::{NacelleInMemoryObserver, NoopObserver};
+
+    use super::*;
+
+    #[test]
+    fn disabled_plan_skips_all_optional_telemetry_work() {
+        let telemetry = NacelleTelemetry::default().with_metrics(false);
+        let plan = TcpTelemetryPlan::new(&telemetry);
+
+        assert!(!plan.metrics);
+        assert!(!plan.request_metrics);
+        assert!(!plan.request_duration);
+        assert!(!plan.phase_duration);
+        assert!(!plan.observer);
+        assert!(!plan.request_events);
+        const {
+            assert!(!<Arc<NoopObserver> as NacelleTelemetryObserver>::ENABLED);
+        }
+    }
+
+    #[test]
+    fn observer_plan_preserves_events_without_metrics_context() {
+        let telemetry = NacelleTelemetry::default()
+            .with_metrics(false)
+            .with_observer(NacelleInMemoryObserver::new());
+        let plan = TcpTelemetryPlan::new(&telemetry);
+
+        assert!(!plan.metrics);
+        assert!(!plan.request_metrics);
+        assert!(plan.observer);
+        assert!(plan.request_events);
+    }
+
+    #[test]
+    fn metrics_plan_matches_compiled_otel_feature() {
+        let plan = TcpTelemetryPlan::new(&NacelleTelemetry::default());
+
+        assert_eq!(plan.metrics, cfg!(feature = "otel"));
+        assert_eq!(plan.request_metrics, cfg!(feature = "otel"));
     }
 }

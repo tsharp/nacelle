@@ -7,24 +7,30 @@ Nacelle is organized as a small core plus protocol-specific transport crates.
 - `nacelle-core`: shared handler, request/response body, limits, lifecycle, telemetry, and TLS primitives.
 - `nacelle-tcp`: TCP/Unix socket server, protocol trait, connection loop, and listener runtime.
 - `nacelle-http`: Hyper HTTP/1 server, HTTP request policy, and HTTP TLS listener integration.
-- `nacelle`: convenience crate that re-exports the split crates and owns the reference length-delimited protocol.
+- `nacelle`: convenience crate with `core`, `codec`, `tcp`, `http`, and
+  `runtime` capability namespaces.
+- `examples/nacelle-reference-protocol`: unpublished length-delimited protocol
+  fixture used by examples, tests, benchmarks, and stress tools.
+- `examples/nacelle-examples`: unpublished runnable examples and benchmarks.
 
 The reference protocol intentionally stays out of `nacelle-core` and
-`nacelle-tcp`; it is a batteries-included implementation exported by the
-umbrella `nacelle` crate.
+`nacelle-tcp`. It demonstrates the public protocol and codec contracts without
+becoming part of the published library API.
 
 ## App Core And Protocol Adapters
 
-Nacelle is organized so application behavior lives behind the `Handler`
-boundary. A handler receives a transport-neutral `NacelleRequest` and returns a
-`NacelleResponse`.
+Nacelle is organized so application behavior lives behind statically dispatched
+handler boundaries. TCP handlers receive `TcpRequestContext<P>` and complete
+requests with the response type associated with `P`. HTTP handlers receive
+`HttpRequestContext<State>` and complete through `HttpResponse`.
 
 TCP `Protocol` implementations are adapters: they decode a wire format into
 request metadata and encode responses back into frames. Swapping protocols
 should not require rewriting the app core. The app-first serving path wires
-those pieces together with `NacelleApp`, `NacelleProtocols`, and
-`NacelleApp::serve(...)`; lower-level `TcpServer` and `NacelleHost` APIs remain
-available for services that need direct listener control.
+concrete typed servers together with
+`NacelleApp::new().tcp(...).http(...).run()`. The app owns shared runtime state,
+telemetry, shutdown, and supervision. `nacelle::runtime::NacelleHost` remains
+available for services that need manual listener control.
 
 TLS lives in `nacelle-core` because the configuration and provider metadata are
 shared. `tls` is provider-neutral. `rustls` enables the Rustls provider used by
@@ -44,17 +50,45 @@ listener
   -> response body encode/stream
 ```
 
-TCP and Unix socket listeners use the `nacelle-tcp` `Protocol<Req>` trait to
-decode request heads and encode response frames. HTTP uses `nacelle-http` with
-Hyper HTTP/1 and maps requests into the same `NacelleRequest` /
-`NacelleResponse` shape.
+TCP and Unix socket listeners use the `nacelle-tcp` `Protocol` trait and its
+associated request, response, and connection-state types to decode request
+heads and encode bounded response frames. HTTP uses `nacelle-http` with Hyper
+HTTP/1 and a transport-owned typed request/response pipeline.
 
-`NacelleRequest::connection` carries transport, a stable connection id, peer
-address, local address, local Unix socket path, effective peer IP, TLS metadata,
-and an optional typed extension. Raw protocol servers can populate that
-extension with `connection_extension_factory(...)` for auth/session state
-derived at accept or handshake time. Apps using `serve(protocols, app)` can set
-the same extension factory on `NacelleApp`.
+Connection metadata carries the transport, a stable connection id, listener
+label, peer and local addresses, local Unix socket path, effective peer IP, and
+TLS metadata. The typed TCP pipeline presents this immutable metadata to
+handlers as `ConnectionInfo` through `RequestContext`.
+
+The pipeline model for connection-local application state is
+`ConnectionContext<State>`. TCP protocols construct `Protocol::ConnectionState`
+once per accepted connection. `TcpServer` and `LocalTcpServer` expose shared
+state as `Arc<P::ConnectionState>`. `SerialTcpServer` and
+`LocalSerialTcpServer` instead lend `&mut ConnectionContext<P::ConnectionState>`
+to exactly one awaited handler at a time, avoiding an async mutex for state
+confined to one serial connection loop. No dynamic extension map participates
+in either request path.
+
+The shared multi-thread Tokio runtime remains the default. Experimental
+thread-per-core execution is explicit and currently supports TCP, HTTP, Rustls
+TCP/HTTPS, and required OpenSSL TCP on Linux. Each selected worker owns a
+current-thread Tokio runtime, `LocalSet`, reuse-port listener, protocol, and
+`LocalHandler` pipeline. Accepted streams, handshakes, and connection tasks
+remain on the accepting worker. Unsupported platforms fail configuration;
+Nacelle does not silently switch runtime topology.
+
+Serial mutable-state listeners currently support plain TCP in shared and
+worker-local runtimes. Rustls, OpenSSL, optional TLS detection, and Unix socket
+serial listener variants are not yet exposed; use shared-state servers for
+those transports.
+
+Thread-per-core resource accounting is selected statically at startup. Global
+mode shares all existing counters. Worker mode partitions finite connection,
+request, streaming, and per-peer capacities in configured worker order while
+retaining a single shared FIFO hard memory ceiling for process safety.
+Worker factories execute once per worker. Process-wide client pools, backend
+limits, and other external resource budgets must be shared explicitly when they
+must not scale with worker count.
 
 HTTP-specific edge policy remains in `nacelle-http`: Host, method, URI/header
 shape checks, per-peer request rate limits, access logging, and security header
@@ -80,9 +114,10 @@ bounded defaults.
 
 TCP large request bodies reserve their declared length while streaming. HTTP
 request bodies reserve `Content-Length` when Hyper exposes a bounded size hint.
-TCP protocols can override `RequestMetadata::max_body_bytes(...)` to choose a
-phase-aware body limit immediately after head decoding and before body buffering
-or streaming begins.
+TCP protocols can override `Protocol::max_request_body_bytes(...)` to choose a
+phase-aware body limit from the decoded head, immutable connection metadata,
+and concrete connection state immediately after head decoding and before
+body-specific allocation or additional body reads.
 
 ## Shutdown
 

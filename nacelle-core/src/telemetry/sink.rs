@@ -1,7 +1,7 @@
-//! Telemetry event model and pluggable sink trait. These types are independent
+//! Telemetry event model and statically dispatched observer contract. These types are independent
 //! of any metrics backend and describe the low-cardinality events Nacelle emits.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NacelleTransport(&'static str);
@@ -55,16 +55,72 @@ pub struct NacelleTelemetryEvent {
     pub count: u64,
 }
 
-pub trait NacelleTelemetrySink: Send + Sync + 'static {
+/// Statically dispatched telemetry event observer.
+pub trait NacelleTelemetryObserver: Clone + Send + Sync + Unpin + 'static {
+    /// Whether this observer emits events.
+    const ENABLED: bool = true;
+
+    /// Observe one low-cardinality Nacelle event.
     fn record(&self, event: NacelleTelemetryEvent);
 }
 
-#[derive(Debug, Default)]
-pub struct NacelleInMemoryTelemetrySink {
-    events: Mutex<Vec<NacelleTelemetryEvent>>,
+/// Zero-sized observer used by the default telemetry path.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoopObserver;
+
+impl NacelleTelemetryObserver for NoopObserver {
+    const ENABLED: bool = false;
+
+    #[inline]
+    fn record(&self, _event: NacelleTelemetryEvent) {}
 }
 
-impl NacelleInMemoryTelemetrySink {
+impl<T> NacelleTelemetryObserver for Arc<T>
+where
+    T: NacelleTelemetryObserver,
+{
+    const ENABLED: bool = T::ENABLED;
+
+    #[inline]
+    fn record(&self, event: NacelleTelemetryEvent) {
+        self.as_ref().record(event);
+    }
+}
+
+/// Statically composed pair of telemetry observers.
+#[derive(Debug, Clone)]
+pub struct CompositeObserver<First, Second> {
+    first: First,
+    second: Second,
+}
+
+impl<First, Second> CompositeObserver<First, Second> {
+    /// Compose two concrete observers.
+    pub const fn new(first: First, second: Second) -> Self {
+        Self { first, second }
+    }
+}
+
+impl<First, Second> NacelleTelemetryObserver for CompositeObserver<First, Second>
+where
+    First: NacelleTelemetryObserver,
+    Second: NacelleTelemetryObserver,
+{
+    const ENABLED: bool = First::ENABLED || Second::ENABLED;
+
+    #[inline]
+    fn record(&self, event: NacelleTelemetryEvent) {
+        self.first.record(event);
+        self.second.record(event);
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NacelleInMemoryObserver {
+    events: Arc<Mutex<Vec<NacelleTelemetryEvent>>>,
+}
+
+impl NacelleInMemoryObserver {
     pub fn new() -> Self {
         Self::default()
     }
@@ -74,7 +130,7 @@ impl NacelleInMemoryTelemetrySink {
     }
 }
 
-impl NacelleTelemetrySink for NacelleInMemoryTelemetrySink {
+impl NacelleTelemetryObserver for NacelleInMemoryObserver {
     fn record(&self, event: NacelleTelemetryEvent) {
         self.events
             .lock()

@@ -1,6 +1,6 @@
 [package]
 name = "nacelle-stress-test"
-version = "0.2.1"
+version = "0.3.0-beta.1"
 edition = "2024"
 rust-version.workspace = true
 description = "Stress client binary for measuring Nacelle TCP throughput and latency."
@@ -21,7 +21,7 @@ name = "nacelle-stress-test"
 path = "src/main.rs"
 
 [dependencies]
-nacelle = { workspace = true, features = ["reference_protocol", "otel"] }
+nacelle = { workspace = true, features = ["otel"] }
 nacelle-stress-common = { workspace = true }
 bytes = { workspace = true }
 mimalloc = { workspace = true }

@@ -4,8 +4,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{BufMut, BytesMut};
+use nacelle::core::pipeline::handler_fn;
+use nacelle::core::{NacelleLimits, NacelleRuntimeState, NacelleShutdown};
 use nacelle::prelude::*;
-use nacelle::{FRAME_FLAG_END, FRAME_FLAG_ERROR};
+use nacelle::tcp::{NacelleTcpConfig, TcpRequestContext, TcpResponse, TcpServer};
+use nacelle_reference_protocol::{FRAME_FLAG_END, FRAME_FLAG_ERROR, LengthDelimitedProtocol};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const MEMORY_LIMIT: usize = 64 * 1024;
@@ -30,31 +33,33 @@ async fn main() -> Result<(), NacelleError> {
             .with_max_request_body_bytes(HELD_BODY_BYTES)
             .with_memory_allocation_timeout(Duration::from_millis(100)),
     );
-    let config = NacelleConfig::default()
+    let config = NacelleTcpConfig::default()
         .with_read_buffer_capacity(BUFFER_BYTES)
         .with_response_buffer_capacity(BUFFER_BYTES)
         .with_max_frame_len(HELD_BODY_BYTES + 20);
-    let server = TcpServer::<FrameRequest, ()>::builder()
+    let server = TcpServer::<LengthDelimitedProtocol>::builder()
         .protocol(LengthDelimitedProtocol)
-        .handler(handler_fn(|mut request: NacelleRequest| async move {
-            let mut bytes = 0_usize;
-            while let Some(chunk) = request.body.next_chunk().await {
-                bytes += chunk?.len();
-            }
-            Ok(NacelleResponse::tcp_bytes(format!(
-                "accepted {bytes} bytes\n"
-            )))
-        }))
-        .config(config)
+        .handler(handler_fn(
+            |mut context: TcpRequestContext<LengthDelimitedProtocol>| async move {
+                let mut bytes = 0_usize;
+                while let Some(chunk) = context.request_mut().body.next_chunk().await {
+                    bytes += chunk?.len();
+                }
+                context
+                    .respond(TcpResponse::bytes(format!("accepted {bytes} bytes\n")))
+                    .await
+            },
+        ))
+        .tcp_config(config)
         .runtime_state(runtime_state.clone())
         .build()?;
     let (shutdown, token) = NacelleShutdown::pair();
     let server_task = tokio::spawn(async move {
-        nacelle::runtime::serve_tcp_listener_with_shutdown_deadline(
+        nacelle::advanced::runtime::serve_tcp_listener_with_shutdown_deadline(
             Arc::new(server),
             listener,
             token,
-            nacelle::lifecycle::NacelleDrainDeadline::default(),
+            nacelle::core::lifecycle::NacelleDrainDeadline::default(),
         )
         .await
     });

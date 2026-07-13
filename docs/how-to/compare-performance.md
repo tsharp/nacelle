@@ -22,19 +22,140 @@ Then run:
 ./examples/run-stress-test.sh --config examples/nacelle-stress-server/configs/tcp.toml --connections 256 --pipeline 8 --duration-secs 30 --payload-bytes 256
 ```
 
-More background:
-
-The current `main` branch has been observed around 1.9M RPS on Linux for the TCP benchmark path. This branch should be compared against that baseline on the same host, kernel, CPU governor, allocator settings, and command line.
+Record the tested commit, kernel, CPU model/topology, CPU governor, Rust toolchain,
+allocator, features, configuration, connection count, pipeline depth, payload,
+TLS provider, and client revision with every result. A throughput number without
+that context is not a comparable baseline.
 
 Suggested local benchmark:
 
 ```bash
-cargo bench -p nacelle --features bench,reference_protocol
+cargo bench -p nacelle-examples --features "bench tcp"
 ```
+
+For the codec/TCP integration specifically, run both Criterion targets:
+
+```bash
+cargo bench -p nacelle-codec --bench framed_comparison --all-features
+cargo bench -p nacelle-examples --bench critical_paths --features "bench tcp"
+```
+
+The telemetry group can be run independently:
+
+```bash
+cargo bench -p nacelle-examples --bench critical_paths --features "bench tcp" -- telemetry --noplot
+```
+
+The TCP crate also measures one complete connection plus one request with OTel
+compiled in:
+
+```bash
+cargo bench -p nacelle-tcp --bench telemetry_paths --all-features -- --noplot
+```
+
+Response delivery policies have a separate end-to-end benchmark:
+
+```bash
+cargo bench -p nacelle-tcp --bench response_delivery -- --noplot
+```
+
+The codec target compares direct decoding with `MessageReader::decode_buffered`,
+measures incomplete-header calls, and separates the no-op buffer-rotation check
+from replacing an empty 256 KiB buffer. The TCP target measures per-connection
+decoder construction and compares direct reference-protocol decoding with the
+buffered 64-request head/body drain used by the connection loop. Treat the
+rotation replacement result as allocation cost, not per-request overhead.
 
 The `runtime_limits` benchmark group covers connection/request permit
 acquire/drop and memory allocation overhead. Watch it closely after changes to
 `NacelleRuntimeState`.
+
+## Phase 7 local confidence checks
+
+The following measurements are local confidence checks, not portable release
+claims. They were collected from source checkpoint `9e42adb` under WSL2 kernel
+`6.6.87.2-microsoft-standard-WSL2` on an Intel Xeon Platinum 8370C host
+(8 cores / 16 logical CPUs) with `rustc 1.95.0`, Criterion defaults, the system
+allocator, and features `bench,tcp`. WSL2 did not expose a CPU governor:
+
+- disabled connection telemetry: approximately `0.58-0.62 ns`
+- disabled request-completed telemetry: approximately `1.89-1.91 ns`
+- disabled timeout telemetry: approximately `0.78-0.79 ns`
+- concrete in-memory observation: approximately `60-89 ns` across repeated
+	local runs, dominated by its mutex and event-vector write
+
+Generated-code inspection used monomorphized release modules with ThinLTO
+disabled for readability:
+
+```bash
+cargo rustc -p nacelle-examples --bin echo --release --features tcp -- \
+	-C lto=no -C codegen-units=1 --emit=llvm-ir
+cargo rustc -p nacelle-examples --bin http_echo --release --features http -- \
+	-C lto=no -C codegen-units=1 --emit=llvm-ir
+```
+
+The complete TCP and HTTP modules contained 98 and 221 indirect calls,
+respectively, from the full dependency graph. Inspection found no Nacelle
+dynamic-observer symbols or boxed handler-future symbols. The modules retain
+Nacelle's startup-only listener-installer indirection plus calls from Tokio,
+Hyper, tracing, and allocator internals. These feature sets did not enable TLS
+or OpenTelemetry, so provider/backend indirection requires separate builds.
+No module-wide count should be presented as request-path Nacelle dispatch
+without symbol-level attribution.
+
+`perf`/flamegraph profiling was unavailable for the WSL2 kernel used for these
+checks. Run profile-level validation on the target Linux kernel before making
+throughput, latency, or production-readiness claims.
+
+Matched 30-second saturation profiles were also collected from source
+checkpoint `7eb400f` with 8 server threads, 256 connections, pipeline depth 8,
+256-byte requests, 64-byte responses, byte metrics enabled, and the default
+OpenTelemetry console observer:
+
+| Profile | Requests | Effective RPS | p50 | p95 | p99 | Max |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Plain TCP | 23,521,395 | 783,584 | 2.45 ms | 4.32 ms | 5.75 ms | 24.19 ms |
+| Low-memory TCP | 23,389,425 | 779,230 | 2.48 ms | 4.52 ms | 6.34 ms | 28.30 ms |
+| Self-signed Rustls TCP | 18,868,139 | 628,688 | 3.04 ms | 5.36 ms | 7.36 ms | 37.08 ms |
+
+All three clients completed without reported failures. The low-memory server
+reported 20 MiB of accounted connection memory while 256 connections were
+active and returned to zero after they closed. These are saturation results;
+use pipeline depth 1 for established-connection RTT measurements. They are not
+a substitute for a matched pre-migration baseline or target-hardware load test.
+
+## Disabled-policy specialization
+
+A matched local comparison used the `telemetry_paths` benchmark at checkpoint
+`0bce7f0` and after caching the effective TCP telemetry plan once per connection.
+Both builds used the same WSL2 host/toolchain and all TCP features:
+
+| Path | Before | After | Local delta |
+| --- | ---: | ---: | ---: |
+| Metrics disabled | 5.72-5.76 us | 5.03-5.07 us | approximately 12% lower |
+| Metrics enabled | 7.00-7.04 us | 7.02-7.08 us | no material change |
+
+The optimized path does not construct `NacelleMetricsContext` or OTel attribute
+arrays when metrics are disabled, and request/phase mode checks are cached in a
+copyable per-connection plan. Connection/request permits and memory accounting
+remain active because they enforce runtime limits and expose operational state;
+disabling telemetry does not disable safety policy.
+
+On the same local WSL2 host, 64 already-buffered one-byte requests producing
+32-byte responses measured. The first two rows use a 2 KiB base response
+buffer; the threshold rows use a 1 KiB base buffer:
+
+| Policy | Time | Recorded writes |
+| --- | ---: | ---: |
+| Immediate | 27.14-27.55 us | 64 |
+| CoalesceBuffered | 20.18-20.40 us | 1 |
+| FlushAtBytes(1024) | 20.22-20.45 us | 2 |
+| FlushAtBytes(2048), grows from 1024 | 20.40-20.63 us | 1 |
+
+This is a synthetic in-memory writer benchmark and demonstrates dispatch/write
+amortization plus one transactional buffer-growth case, not network throughput.
+Keep immediate delivery for latency-first workloads unless a matched workload
+shows a benefit.
 
 Suggested RPS comparison:
 
@@ -70,6 +191,6 @@ Guardrails:
 
 - keep shutdown task tracking at the connection/listener boundary
 - avoid per-request locks in the TCP hot path
-- keep telemetry sinks optional; default operation should not push into in-memory sinks
+- keep telemetry observers optional; the default `NoopObserver` must remain allocation-free
 - preserve single-chunk body fast paths
 - tune TCP buffer sizes for the connection count instead of relying on large defaults

@@ -13,10 +13,10 @@ use std::thread;
 use std::time::Duration;
 
 #[cfg(feature = "tls-self-signed")]
-use nacelle::NacelleTlsConfig;
-use nacelle::{
-    FrameRequest, Handler, LengthDelimitedProtocol, NacelleError, NacelleTelemetry, TcpServer,
-};
+use nacelle::core::NacelleTlsConfig;
+use nacelle::core::{NacelleError, NacelleTelemetry};
+use nacelle::tcp::{TcpHandler, TcpServer};
+use nacelle_reference_protocol::LengthDelimitedProtocol;
 use nacelle_stress_common::make_tcp_socket;
 #[cfg(feature = "otel")]
 use opentelemetry::global;
@@ -71,12 +71,12 @@ fn make_server_socket(
 
 async fn run_server<H>(
     listener: TcpListener,
-    server: TcpServer<FrameRequest, LengthDelimitedProtocol, H>,
+    server: TcpServer<LengthDelimitedProtocol, H>,
     tls_config: Option<StressTlsConfig>,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<(), NacelleError>
 where
-    H: Handler,
+    H: TcpHandler<LengthDelimitedProtocol>,
 {
     loop {
         tokio::select! {
@@ -100,12 +100,12 @@ where
 }
 
 async fn serve_accepted_stream<H>(
-    server: TcpServer<FrameRequest, LengthDelimitedProtocol, H>,
+    server: TcpServer<LengthDelimitedProtocol, H>,
     stream: TcpStream,
     tls_config: Option<StressTlsConfig>,
 ) -> Result<(), NacelleError>
 where
-    H: Handler,
+    H: TcpHandler<LengthDelimitedProtocol>,
 {
     #[cfg(feature = "tls-self-signed")]
     if let Some(tls_config) = tls_config {
@@ -129,12 +129,12 @@ where
 
 fn spawn_server_thread<H>(
     listener: TcpListener,
-    server: TcpServer<FrameRequest, LengthDelimitedProtocol, H>,
+    server: TcpServer<LengthDelimitedProtocol, H>,
     tls_config: Option<StressTlsConfig>,
     shutdown: watch::Receiver<bool>,
 ) -> thread::JoinHandle<Result<(), NacelleError>>
 where
-    H: Handler,
+    H: TcpHandler<LengthDelimitedProtocol>,
 {
     thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()

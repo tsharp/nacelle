@@ -5,13 +5,14 @@ use std::time::Duration;
 use tokio::net::UnixListener;
 
 use crate::options::NacelleUnixSocketOptions;
-use crate::protocol::Protocol;
-use crate::server::NacelleServer;
+use crate::protocol::{SharedProtocol, TcpHandler, TcpOneWayHandler};
+use crate::server::TcpServer;
 use nacelle_core::error::NacelleError;
-use nacelle_core::handler::Handler;
 use nacelle_core::lifecycle::{NacelleDrainDeadline, NacelleShutdownToken};
-use nacelle_core::request::{NacelleConnectionMeta, RequestMetadata};
-use nacelle_core::telemetry::{NacelleTelemetryEventKind, NacelleTransport};
+use nacelle_core::request::NacelleConnectionMeta;
+use nacelle_core::telemetry::{
+    NacelleTelemetryEventKind, NacelleTelemetryObserver, NacelleTransport,
+};
 
 use super::common::{
     connection_rejection_reason, drain_connection_tasks, log_connection_result,
@@ -22,45 +23,48 @@ use super::common::{
 ///
 /// The socket path is passed directly to Tokio. Existing socket files are not
 /// removed automatically.
-pub async fn serve_unix<Req, P, H>(
-    server: Arc<NacelleServer<Req, P, H>>,
+pub async fn serve_unix<P, H, OH, Observer>(
+    server: Arc<TcpServer<P, H, OH, Observer>>,
     path: impl AsRef<Path>,
 ) -> Result<(), NacelleError>
 where
-    Req: RequestMetadata + Send + 'static,
-    P: Protocol<Req> + Send + Sync + 'static,
-    H: Handler,
+    P: SharedProtocol,
+    H: TcpHandler<P>,
+    OH: TcpOneWayHandler<P>,
+    Observer: NacelleTelemetryObserver,
 {
     let (_shutdown, token) = nacelle_core::lifecycle::NacelleShutdown::pair();
     serve_unix_with_shutdown(server, path, token).await
 }
 
 /// Listen on a Unix domain socket until shutdown is requested.
-pub async fn serve_unix_with_shutdown<Req, P, H>(
-    server: Arc<NacelleServer<Req, P, H>>,
+pub async fn serve_unix_with_shutdown<P, H, OH, Observer>(
+    server: Arc<TcpServer<P, H, OH, Observer>>,
     path: impl AsRef<Path>,
     shutdown: NacelleShutdownToken,
 ) -> Result<(), NacelleError>
 where
-    Req: RequestMetadata + Send + 'static,
-    P: Protocol<Req> + Send + Sync + 'static,
-    H: Handler,
+    P: SharedProtocol,
+    H: TcpHandler<P>,
+    OH: TcpOneWayHandler<P>,
+    Observer: NacelleTelemetryObserver,
 {
     serve_unix_with_shutdown_timeout(server, path, shutdown, Duration::from_secs(30)).await
 }
 
 /// Listen on a Unix domain socket until shutdown is requested, then drain or
 /// abort active connection tasks after `drain_timeout`.
-pub async fn serve_unix_with_shutdown_timeout<Req, P, H>(
-    server: Arc<NacelleServer<Req, P, H>>,
+pub async fn serve_unix_with_shutdown_timeout<P, H, OH, Observer>(
+    server: Arc<TcpServer<P, H, OH, Observer>>,
     path: impl AsRef<Path>,
     shutdown: NacelleShutdownToken,
     drain_timeout: Duration,
 ) -> Result<(), NacelleError>
 where
-    Req: RequestMetadata + Send + 'static,
-    P: Protocol<Req> + Send + Sync + 'static,
-    H: Handler,
+    P: SharedProtocol,
+    H: TcpHandler<P>,
+    OH: TcpOneWayHandler<P>,
+    Observer: NacelleTelemetryObserver,
 {
     serve_unix_with_shutdown_deadline(
         server,
@@ -72,15 +76,16 @@ where
 }
 
 /// Listen on a Unix domain socket with explicit socket-file lifecycle options.
-pub async fn serve_unix_with_options<Req, P, H>(
-    server: Arc<NacelleServer<Req, P, H>>,
+pub async fn serve_unix_with_options<P, H, OH, Observer>(
+    server: Arc<TcpServer<P, H, OH, Observer>>,
     path: impl AsRef<Path>,
     unix_options: NacelleUnixSocketOptions,
 ) -> Result<(), NacelleError>
 where
-    Req: RequestMetadata + Send + 'static,
-    P: Protocol<Req> + Send + Sync + 'static,
-    H: Handler,
+    P: SharedProtocol,
+    H: TcpHandler<P>,
+    OH: TcpOneWayHandler<P>,
+    Observer: NacelleTelemetryObserver,
 {
     let (_shutdown, token) = nacelle_core::lifecycle::NacelleShutdown::pair();
     serve_unix_with_options_and_shutdown(server, path, unix_options, token).await
@@ -88,16 +93,17 @@ where
 
 /// Listen on a Unix domain socket with explicit lifecycle options until
 /// shutdown is requested.
-pub async fn serve_unix_with_options_and_shutdown<Req, P, H>(
-    server: Arc<NacelleServer<Req, P, H>>,
+pub async fn serve_unix_with_options_and_shutdown<P, H, OH, Observer>(
+    server: Arc<TcpServer<P, H, OH, Observer>>,
     path: impl AsRef<Path>,
     unix_options: NacelleUnixSocketOptions,
     shutdown: NacelleShutdownToken,
 ) -> Result<(), NacelleError>
 where
-    Req: RequestMetadata + Send + 'static,
-    P: Protocol<Req> + Send + Sync + 'static,
-    H: Handler,
+    P: SharedProtocol,
+    H: TcpHandler<P>,
+    OH: TcpOneWayHandler<P>,
+    Observer: NacelleTelemetryObserver,
 {
     serve_unix_with_options_and_shutdown_timeout(
         server,
@@ -111,17 +117,18 @@ where
 
 /// Listen on a Unix domain socket with explicit lifecycle options, then drain
 /// or abort active connection tasks after `drain_timeout`.
-pub async fn serve_unix_with_options_and_shutdown_timeout<Req, P, H>(
-    server: Arc<NacelleServer<Req, P, H>>,
+pub async fn serve_unix_with_options_and_shutdown_timeout<P, H, OH, Observer>(
+    server: Arc<TcpServer<P, H, OH, Observer>>,
     path: impl AsRef<Path>,
     unix_options: NacelleUnixSocketOptions,
     shutdown: NacelleShutdownToken,
     drain_timeout: Duration,
 ) -> Result<(), NacelleError>
 where
-    Req: RequestMetadata + Send + 'static,
-    P: Protocol<Req> + Send + Sync + 'static,
-    H: Handler,
+    P: SharedProtocol,
+    H: TcpHandler<P>,
+    OH: TcpOneWayHandler<P>,
+    Observer: NacelleTelemetryObserver,
 {
     serve_unix_with_options_and_shutdown_deadline(
         server,
@@ -134,16 +141,17 @@ where
 }
 
 #[doc(hidden)]
-pub async fn serve_unix_with_shutdown_deadline<Req, P, H>(
-    server: Arc<NacelleServer<Req, P, H>>,
+pub async fn serve_unix_with_shutdown_deadline<P, H, OH, Observer>(
+    server: Arc<TcpServer<P, H, OH, Observer>>,
     path: impl AsRef<Path>,
     shutdown: NacelleShutdownToken,
     drain_deadline: NacelleDrainDeadline,
 ) -> Result<(), NacelleError>
 where
-    Req: RequestMetadata + Send + 'static,
-    P: Protocol<Req> + Send + Sync + 'static,
-    H: Handler,
+    P: SharedProtocol,
+    H: TcpHandler<P>,
+    OH: TcpOneWayHandler<P>,
+    Observer: NacelleTelemetryObserver,
 {
     serve_unix_with_options_and_shutdown_deadline(
         server,
@@ -156,17 +164,18 @@ where
 }
 
 #[doc(hidden)]
-pub async fn serve_unix_with_options_and_shutdown_deadline<Req, P, H>(
-    server: Arc<NacelleServer<Req, P, H>>,
+pub async fn serve_unix_with_options_and_shutdown_deadline<P, H, OH, Observer>(
+    server: Arc<TcpServer<P, H, OH, Observer>>,
     path: impl AsRef<Path>,
     unix_options: NacelleUnixSocketOptions,
     shutdown: NacelleShutdownToken,
     drain_deadline: NacelleDrainDeadline,
 ) -> Result<(), NacelleError>
 where
-    Req: RequestMetadata + Send + 'static,
-    P: Protocol<Req> + Send + Sync + 'static,
-    H: Handler,
+    P: SharedProtocol,
+    H: TcpHandler<P>,
+    OH: TcpOneWayHandler<P>,
+    Observer: NacelleTelemetryObserver,
 {
     let path = path.as_ref();
     unix_options.prepare_path(path)?;
@@ -183,17 +192,18 @@ where
 }
 
 #[doc(hidden)]
-pub async fn serve_unix_listener_with_shutdown_deadline<Req, P, H>(
-    server: Arc<NacelleServer<Req, P, H>>,
+pub async fn serve_unix_listener_with_shutdown_deadline<P, H, OH, Observer>(
+    server: Arc<TcpServer<P, H, OH, Observer>>,
     listener: UnixListener,
     local_path: Option<PathBuf>,
     mut shutdown: NacelleShutdownToken,
     drain_deadline: NacelleDrainDeadline,
 ) -> Result<(), NacelleError>
 where
-    Req: RequestMetadata + Send + 'static,
-    P: Protocol<Req> + Send + Sync + 'static,
-    H: Handler,
+    P: SharedProtocol,
+    H: TcpHandler<P>,
+    OH: TcpOneWayHandler<P>,
+    Observer: NacelleTelemetryObserver,
 {
     let mut connections = tokio::task::JoinSet::new();
     loop {

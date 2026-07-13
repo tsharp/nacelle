@@ -1,6 +1,6 @@
 [package]
 name = "nacelle-tcp"
-version = "0.2.1"
+version = "0.3.0-beta.1"
 edition = "2024"
 rust-version.workspace = true
 description = "TCP transport and protocol runtime for Nacelle streaming handlers."
@@ -13,6 +13,7 @@ categories = ["asynchronous", "network-programming"]
 
 [features]
 default = []
+buffer-rotation = ["nacelle-codec/buffer-rotation"]
 tls = []
 rustls = ["tls", "dep:rustls", "dep:tokio-rustls", "nacelle-core/rustls"]
 openssl = ["tls", "dep:openssl", "dep:tokio-openssl", "nacelle-core/openssl"]
@@ -22,6 +23,7 @@ otel = ["dep:opentelemetry", "nacelle-core/otel"]
 
 [dependencies]
 bytes = { workspace = true }
+nacelle-codec = { workspace = true }
 nacelle-core = { workspace = true }
 opentelemetry = { workspace = true, optional = true }
 openssl = { workspace = true, optional = true }
@@ -31,3 +33,14 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-mu
 tokio-openssl = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true, features = ["async_tokio"] }
+
+[[bench]]
+name = "telemetry_paths"
+harness = false
+
+[[bench]]
+name = "response_delivery"
+harness = false

@@ -3,13 +3,11 @@ use std::time::Duration;
 use std::sync::Arc;
 #[cfg(feature = "otel")]
 use std::sync::Mutex;
-#[cfg(feature = "otel")]
-use std::sync::atomic::{AtomicBool, Ordering};
 
 mod sink;
 pub use sink::{
-    NacelleInMemoryTelemetrySink, NacelleTelemetryEvent, NacelleTelemetryEventKind,
-    NacelleTelemetrySink, NacelleTransport,
+    CompositeObserver, NacelleInMemoryObserver, NacelleTelemetryEvent, NacelleTelemetryEventKind,
+    NacelleTelemetryObserver, NacelleTransport, NoopObserver,
 };
 
 #[cfg(feature = "otel")]
@@ -21,9 +19,9 @@ use attributes::{
 };
 
 #[derive(Clone)]
-pub struct NacelleTelemetry {
+pub struct NacelleTelemetry<Observer = NoopObserver> {
     config: NacelleTelemetryConfig,
-    sink: Option<Arc<dyn NacelleTelemetrySink>>,
+    observer: Observer,
     #[cfg(feature = "otel")]
     metrics: std::sync::Arc<OtelMetrics>,
 }
@@ -146,39 +144,69 @@ impl NacelleMetricsContext {
     }
 }
 
-impl std::fmt::Debug for NacelleTelemetry {
+impl<Observer> std::fmt::Debug for NacelleTelemetry<Observer> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NacelleTelemetry")
             .field("config", &self.config)
-            .field("has_sink", &self.sink.is_some())
+            .field("observer", &std::any::type_name::<Observer>())
             .finish()
     }
 }
 
-impl Default for NacelleTelemetry {
+impl Default for NacelleTelemetry<NoopObserver> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl NacelleTelemetry {
+impl NacelleTelemetry<NoopObserver> {
     pub fn new() -> Self {
         Self {
             config: NacelleTelemetryConfig::default(),
-            sink: None,
+            observer: NoopObserver,
             #[cfg(feature = "otel")]
             metrics: std::sync::Arc::new(OtelMetrics::new()),
         }
     }
+}
 
+impl<Observer> NacelleTelemetry<Observer>
+where
+    Observer: NacelleTelemetryObserver,
+{
     pub fn with_config(mut self, config: NacelleTelemetryConfig) -> Self {
         self.config = config;
         self
     }
 
-    pub fn with_sink(mut self, sink: Arc<dyn NacelleTelemetrySink>) -> Self {
-        self.sink = Some(sink);
-        self
+    /// Replace the event observer with one concrete observer.
+    pub fn with_observer<Next>(self, observer: Next) -> NacelleTelemetry<Next>
+    where
+        Next: NacelleTelemetryObserver,
+    {
+        NacelleTelemetry {
+            config: self.config,
+            observer,
+            #[cfg(feature = "otel")]
+            metrics: self.metrics,
+        }
+    }
+
+    /// Compose one additional concrete observer.
+    pub fn with_additional_observer<Next>(
+        self,
+        observer: Next,
+    ) -> NacelleTelemetry<CompositeObserver<Observer, Next>>
+    where
+        Next: NacelleTelemetryObserver,
+    {
+        let composite = CompositeObserver::new(self.observer, observer);
+        NacelleTelemetry {
+            config: self.config,
+            observer: composite,
+            #[cfg(feature = "otel")]
+            metrics: self.metrics,
+        }
     }
 
     pub fn with_metrics(mut self, enabled: bool) -> Self {
@@ -234,7 +262,7 @@ impl NacelleTelemetry {
     }
 
     pub fn request_duration_metrics_enabled(&self) -> bool {
-        self.config.request_metrics.duration_ms
+        self.metrics_enabled() && self.config.request_metrics.duration_ms
     }
 
     pub fn phase_duration_metrics_enabled(&self) -> bool {
@@ -242,7 +270,12 @@ impl NacelleTelemetry {
     }
 
     pub fn request_events_enabled(&self) -> bool {
-        self.sink.is_some() || self.metrics_enabled()
+        Observer::ENABLED || self.metrics_enabled()
+    }
+
+    /// Whether a concrete event observer is active independently of metrics.
+    pub const fn observer_enabled(&self) -> bool {
+        Observer::ENABLED
     }
 
     pub fn listener_configured(&self, transport: NacelleTransport, name: &str, addr: &str) {
@@ -443,6 +476,30 @@ impl NacelleTelemetry {
         response_bytes: usize,
         elapsed: Duration,
     ) {
+        self.request_completed_inner(transport, request_bytes, response_bytes, elapsed, true);
+    }
+
+    #[doc(hidden)]
+    pub fn request_completed_without_metrics(
+        &self,
+        transport: NacelleTransport,
+        request_bytes: usize,
+        response_bytes: usize,
+        elapsed: Duration,
+    ) {
+        self.request_completed_inner(transport, request_bytes, response_bytes, elapsed, false);
+    }
+
+    fn request_completed_inner(
+        &self,
+        transport: NacelleTransport,
+        request_bytes: usize,
+        response_bytes: usize,
+        elapsed: Duration,
+        emit_metrics: bool,
+    ) {
+        #[cfg(not(feature = "otel"))]
+        let _ = emit_metrics;
         tracing::debug!(
             target: "nacelle",
             transport = transport.as_str(),
@@ -464,15 +521,15 @@ impl NacelleTelemetry {
                 transport.as_str(),
             )];
             let request_metrics = self.config.request_metrics;
-            if self.config.metrics && request_metrics.completed {
+            if emit_metrics && self.config.metrics && request_metrics.completed {
                 self.metrics.request_count.add(1, &attributes);
             }
-            if self.config.metrics && request_metrics.duration_ms {
+            if emit_metrics && self.config.metrics && request_metrics.duration_ms {
                 self.metrics
                     .request_duration_ms
                     .record(elapsed.as_secs_f64() * 1_000.0, &attributes);
             }
-            if self.config.metrics && request_metrics.byte_counts {
+            if emit_metrics && self.config.metrics && request_metrics.byte_counts {
                 self.metrics
                     .request_bytes
                     .add(request_bytes as u64, &attributes);
@@ -489,6 +546,28 @@ impl NacelleTelemetry {
         elapsed: Duration,
         error: &crate::error::NacelleError,
     ) {
+        self.request_failed_inner(transport, elapsed, error, true);
+    }
+
+    #[doc(hidden)]
+    pub fn request_failed_without_metrics(
+        &self,
+        transport: NacelleTransport,
+        elapsed: Duration,
+        error: &crate::error::NacelleError,
+    ) {
+        self.request_failed_inner(transport, elapsed, error, false);
+    }
+
+    fn request_failed_inner(
+        &self,
+        transport: NacelleTransport,
+        elapsed: Duration,
+        error: &crate::error::NacelleError,
+        emit_metrics: bool,
+    ) {
+        #[cfg(not(feature = "otel"))]
+        let _ = emit_metrics;
         tracing::warn!(
             target: "nacelle",
             transport = transport.as_str(),
@@ -508,10 +587,10 @@ impl NacelleTelemetry {
                 "transport",
                 transport.as_str(),
             )];
-            if self.config.metrics {
+            if emit_metrics && self.config.metrics {
                 self.metrics.request_error_count.add(1, &attributes);
             }
-            if self.config.metrics && self.config.request_metrics.duration_ms {
+            if emit_metrics && self.config.metrics && self.config.request_metrics.duration_ms {
                 self.metrics
                     .request_duration_ms
                     .record(elapsed.as_secs_f64() * 1_000.0, &attributes);
@@ -662,9 +741,7 @@ impl NacelleTelemetry {
     }
 
     fn record(&self, event: NacelleTelemetryEvent) {
-        if let Some(sink) = &self.sink {
-            sink.record(event);
-        }
+        self.observer.record(event);
     }
 }
 
@@ -687,7 +764,7 @@ fn error_reason(error: &crate::error::NacelleError) -> Option<&'static str> {
 #[cfg(feature = "otel")]
 #[derive(Debug)]
 struct OtelMetrics {
-    runtime_state_registered: AtomicBool,
+    runtime_states: Arc<Mutex<Vec<crate::limits::NacelleRuntimeState>>>,
     runtime_state_gauges: Mutex<Vec<opentelemetry::metrics::ObservableGauge<u64>>>,
     connection_active: opentelemetry::metrics::UpDownCounter<i64>,
     connection_accepted: opentelemetry::metrics::Counter<u64>,
@@ -714,7 +791,7 @@ impl OtelMetrics {
     fn new() -> Self {
         let meter = opentelemetry::global::meter("nacelle");
         Self {
-            runtime_state_registered: AtomicBool::new(false),
+            runtime_states: Arc::new(Mutex::new(Vec::new())),
             runtime_state_gauges: Mutex::new(Vec::new()),
             connection_active: meter
                 .i64_up_down_counter("nacelle.connections.in_flight")
@@ -744,38 +821,82 @@ impl OtelMetrics {
     }
 
     fn register_runtime_state(&self, state: crate::limits::NacelleRuntimeState) {
-        if self.runtime_state_registered.swap(true, Ordering::AcqRel) {
+        let mut states = self
+            .runtime_states
+            .lock()
+            .expect("otel runtime state registry poisoned");
+        if states
+            .iter()
+            .any(|registered| registered.shares_counters_with(&state))
+        {
             return;
         }
+        states.push(state);
+        if states.len() != 1 {
+            return;
+        }
+        drop(states);
 
         let meter = opentelemetry::global::meter("nacelle");
-        let connections = state.clone();
-        let requests = state.clone();
-        let streaming = state.clone();
-        let memory = state;
+        let connections = self.runtime_states.clone();
+        let requests = self.runtime_states.clone();
+        let streaming = self.runtime_states.clone();
+        let memory = self.runtime_states.clone();
         let gauges = vec![
             meter
                 .u64_observable_gauge("nacelle.connections.active")
                 .with_callback(move |observer| {
-                    observer.observe(connections.active_connections() as u64, &[])
+                    let total = connections
+                        .lock()
+                        .expect("otel runtime state registry poisoned")
+                        .iter()
+                        .map(crate::limits::NacelleRuntimeState::active_connections)
+                        .sum::<usize>();
+                    observer.observe(total as u64, &[])
                 })
                 .build(),
             meter
                 .u64_observable_gauge("nacelle.requests.active")
                 .with_callback(move |observer| {
-                    observer.observe(requests.active_requests() as u64, &[])
+                    let total = requests
+                        .lock()
+                        .expect("otel runtime state registry poisoned")
+                        .iter()
+                        .map(crate::limits::NacelleRuntimeState::active_requests)
+                        .sum::<usize>();
+                    observer.observe(total as u64, &[])
                 })
                 .build(),
             meter
                 .u64_observable_gauge("nacelle.streaming_tasks.active")
                 .with_callback(move |observer| {
-                    observer.observe(streaming.active_streaming_tasks() as u64, &[])
+                    let total = streaming
+                        .lock()
+                        .expect("otel runtime state registry poisoned")
+                        .iter()
+                        .map(crate::limits::NacelleRuntimeState::active_streaming_tasks)
+                        .sum::<usize>();
+                    observer.observe(total as u64, &[])
                 })
                 .build(),
             meter
                 .u64_observable_gauge("nacelle.memory.used_bytes")
                 .with_callback(move |observer| {
-                    observer.observe(memory.memory_used_bytes() as u64, &[])
+                    let states = memory.lock().expect("otel runtime state registry poisoned");
+                    let mut identities = Vec::with_capacity(states.len());
+                    let total = states
+                        .iter()
+                        .filter_map(|state| {
+                            let identity = state.memory_identity();
+                            if identities.contains(&identity) {
+                                None
+                            } else {
+                                identities.push(identity);
+                                Some(state.memory_used_bytes())
+                            }
+                        })
+                        .sum::<usize>();
+                    observer.observe(total as u64, &[])
                 })
                 .build(),
         ];
@@ -784,16 +905,58 @@ impl OtelMetrics {
             .expect("otel gauge registry poisoned")
             .extend(gauges);
     }
+
+    #[cfg(test)]
+    fn registered_runtime_state_count(&self) -> usize {
+        self.runtime_states
+            .lock()
+            .expect("otel runtime state registry poisoned")
+            .len()
+    }
+
+    #[cfg(test)]
+    fn registered_memory_budget_count(&self) -> usize {
+        let states = self
+            .runtime_states
+            .lock()
+            .expect("otel runtime state registry poisoned");
+        let mut identities = Vec::new();
+        for state in states.iter() {
+            let identity = state.memory_identity();
+            if !identities.contains(&identity) {
+                identities.push(identity);
+            }
+        }
+        identities.len()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(feature = "otel")]
     #[test]
-    fn in_memory_sink_records_rejection_timeout_and_shutdown_events() {
-        let sink = Arc::new(NacelleInMemoryTelemetrySink::new());
-        let telemetry = NacelleTelemetry::new().with_sink(sink.clone());
+    fn telemetry_aggregates_worker_states_without_double_counting_memory() {
+        let states = crate::limits::NacelleRuntimeState::partitioned([
+            crate::limits::NacelleLimits::default().with_max_memory_bytes(10),
+            crate::limits::NacelleLimits::default().with_max_memory_bytes(10),
+        ])
+        .expect("partitioned states should build");
+        let telemetry = NacelleTelemetry::default();
+
+        telemetry.register_runtime_state(states[0].clone());
+        telemetry.register_runtime_state(states[1].clone());
+        telemetry.register_runtime_state(states[0].clone());
+
+        assert_eq!(telemetry.metrics.registered_runtime_state_count(), 2);
+        assert_eq!(telemetry.metrics.registered_memory_budget_count(), 1);
+    }
+
+    #[test]
+    fn in_memory_observer_records_rejection_timeout_and_shutdown_events() {
+        let observer = NacelleInMemoryObserver::new();
+        let telemetry = NacelleTelemetry::new().with_observer(observer.clone());
 
         telemetry.connection_rejected(NacelleTransport::new("tcp"), "connections");
         telemetry.request_rejected(NacelleTransport::new("http"), "host");
@@ -804,7 +967,7 @@ mod tests {
             NacelleTransport::new("tcp"),
         );
 
-        let events = sink.events();
+        let events = observer.events();
         assert_eq!(
             events.iter().map(|event| event.kind).collect::<Vec<_>>(),
             vec![
@@ -819,6 +982,29 @@ mod tests {
         assert_eq!(events[1].reason, Some("host"));
         assert_eq!(events[2].reason, Some("request_body_read"));
         assert_eq!(events[3].transport, None);
+    }
+
+    #[test]
+    fn concrete_and_composite_observers_record_without_dynamic_adapter() {
+        let first = NacelleInMemoryObserver::new();
+        let second = NacelleInMemoryObserver::new();
+        let telemetry = NacelleTelemetry::new()
+            .with_observer(first.clone())
+            .with_additional_observer(second.clone());
+
+        telemetry.timeout(NacelleTransport::new("tcp"), "test");
+
+        assert_eq!(first.events().len(), 1);
+        assert_eq!(second.events().len(), 1);
+        assert!(telemetry.request_events_enabled());
+        const {
+            assert!(!<Arc<NoopObserver> as NacelleTelemetryObserver>::ENABLED);
+        }
+        assert!(
+            !NacelleTelemetry::default()
+                .with_metrics(false)
+                .request_events_enabled()
+        );
     }
 
     #[test]
@@ -848,6 +1034,30 @@ mod tests {
         assert!(telemetry.config().request_metrics.duration_ms);
         assert!(!telemetry.config().request_metrics.byte_counts);
         assert!(telemetry.config().phase_duration_metrics);
-        assert!(telemetry.request_duration_metrics_enabled());
+        assert_eq!(
+            telemetry.request_duration_metrics_enabled(),
+            cfg!(feature = "otel")
+        );
+    }
+
+    #[test]
+    fn request_duration_metrics_require_effective_metrics() {
+        let disabled = NacelleTelemetry::default()
+            .with_metrics(false)
+            .with_request_duration_metrics(true);
+        assert!(!disabled.request_duration_metrics_enabled());
+
+        let duration_disabled = NacelleTelemetry::default()
+            .with_metrics(true)
+            .with_request_duration_metrics(false);
+        assert!(!duration_disabled.request_duration_metrics_enabled());
+
+        let enabled = NacelleTelemetry::default()
+            .with_metrics(true)
+            .with_request_duration_metrics(true);
+        assert_eq!(
+            enabled.request_duration_metrics_enabled(),
+            cfg!(feature = "otel")
+        );
     }
 }

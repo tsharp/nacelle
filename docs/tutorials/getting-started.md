@@ -1,28 +1,34 @@
 # Getting started
 
-This tutorial gets a minimal TCP service running with the reference
+This tutorial gets a minimal TCP service running with the repository's example
 length-delimited protocol.
 
 ## Add nacelle
 
-In this workspace, the umbrella crate is `nacelle`. It re-exports the transport
-crates and owns the reference protocol:
+In this workspace, the umbrella crate is `nacelle`. The unpublished reference
+protocol package is an example consumer of its TCP and codec APIs:
 
 ```rust
-use nacelle::prelude::*;
+use nacelle::core::pipeline::handler_fn;
+use nacelle::core::{NacelleError, NacelleTelemetry};
+use nacelle::tcp::{TcpRequestContext, TcpResponse, TcpServer};
+use nacelle::NacelleApp;
+use nacelle_reference_protocol::LengthDelimitedProtocol;
 ```
 
 ## Build a handler
 
-Handlers receive a `NacelleRequest` and return a `NacelleResponse`.
+TCP handlers receive a protocol-specific `TcpRequestContext` and must complete
+it through its typed responder.
 
 ```rust
-let handler = handler_fn(|mut request: NacelleRequest| async move {
-    while let Some(chunk) = request.body.next_chunk().await {
+let handler = handler_fn(
+    |mut context: TcpRequestContext<LengthDelimitedProtocol>| async move {
+    while let Some(chunk) = context.request_mut().body.next_chunk().await {
         let _ = chunk?;
     }
 
-    Ok(NacelleResponse::tcp_bytes("ok"))
+    context.respond(TcpResponse::bytes("ok")).await
 });
 ```
 
@@ -30,20 +36,22 @@ let handler = handler_fn(|mut request: NacelleRequest| async move {
 
 ```rust
 let addr = "127.0.0.1:8080".parse().map_err(NacelleError::protocol)?;
-let protocols = NacelleProtocols::new()
-    .tcp::<FrameRequest, _>("echo", addr, LengthDelimitedProtocol);
+let server = TcpServer::<LengthDelimitedProtocol>::builder()
+    .protocol(LengthDelimitedProtocol)
+    .handler(handler)
+    .build()?;
 
-NacelleApp::new(handler)
-    .with_telemetry(NacelleTelemetry::default())
+NacelleApp::with_telemetry(NacelleTelemetry::default())
     .with_ctrl_c_shutdown()
-    .serve(protocols)
+    .tcp("echo", addr, server)
+    .run()
     .await?;
 # Ok::<(), NacelleError>(())
 ```
 
 ## Next steps
 
-- Run `cargo run --features reference_protocol --example app_core` to see one
+- Run `cargo run -p nacelle-examples --bin app_core` to see one
   app core served through multiple protocol adapters.
 - Read the [architecture guide](../topics/architecture.md) to understand the request path.
 - Read [runtime limits and backpressure](../topics/runtime-limits.md) before raising connection counts.

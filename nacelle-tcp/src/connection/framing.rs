@@ -1,16 +1,15 @@
 use bytes::BytesMut;
+use nacelle_codec::{MessageDecoder, MessageReadError};
 
-use crate::protocol::{DecodedRequest, Protocol};
-use nacelle_core::config::NacelleConfig;
+use crate::config::NacelleTcpConfig;
 use nacelle_core::error::NacelleError;
 use nacelle_core::limits::{NacelleMemoryAllocation, NacelleRuntimeState};
-use nacelle_core::request::RequestMetadata;
-use nacelle_core::telemetry::{NacelleMetricsContext, NacelleTelemetry};
+use nacelle_core::telemetry::{NacelleMetricsContext, NacelleTelemetry, NacelleTelemetryObserver};
 
-use super::metrics::{finish_tcp_phase, start_tcp_phase};
+use super::metrics::{TcpTelemetryPlan, finish_tcp_phase, start_tcp_phase};
 
 pub(super) fn allocate_connection_buffers(
-    config: &NacelleConfig,
+    config: &NacelleTcpConfig,
     runtime_state: &NacelleRuntimeState,
 ) -> Result<NacelleMemoryAllocation, NacelleError> {
     let bytes = config
@@ -19,22 +18,83 @@ pub(super) fn allocate_connection_buffers(
     runtime_state.allocate_memory(bytes)
 }
 
-pub(super) fn decode_next_request<Req, P>(
-    protocol: &P,
-    read_buf: &mut BytesMut,
-    max_frame_len: usize,
-    telemetry: &NacelleTelemetry,
-    metrics_context: &NacelleMetricsContext,
-) -> Result<Option<DecodedRequest<Req>>, NacelleError>
+pub(super) struct InstrumentedDecoder<'a, D, Observer: NacelleTelemetryObserver> {
+    decoder: D,
+    telemetry: &'a NacelleTelemetry<Observer>,
+    metrics_context: Option<&'a NacelleMetricsContext>,
+    telemetry_plan: TcpTelemetryPlan,
+}
+
+impl<'a, D, Observer> InstrumentedDecoder<'a, D, Observer>
 where
-    Req: RequestMetadata + Send + 'static,
-    P: Protocol<Req> + Send + Sync + 'static,
+    Observer: NacelleTelemetryObserver,
 {
-    let decode_started = start_tcp_phase(telemetry);
-    let result = protocol.decode_head(read_buf, max_frame_len);
-    finish_tcp_phase(telemetry, Some(metrics_context), "decode", decode_started);
-    if let Err(error) = &result {
-        telemetry.operation_error(metrics_context, "decode", error);
+    pub(super) const fn new(
+        decoder: D,
+        telemetry: &'a NacelleTelemetry<Observer>,
+        metrics_context: Option<&'a NacelleMetricsContext>,
+        telemetry_plan: TcpTelemetryPlan,
+    ) -> Self {
+        Self {
+            decoder,
+            telemetry,
+            metrics_context,
+            telemetry_plan,
+        }
     }
-    result
+}
+
+impl<D, Observer> MessageDecoder for InstrumentedDecoder<'_, D, Observer>
+where
+    D: MessageDecoder<Error = NacelleError>,
+    Observer: NacelleTelemetryObserver,
+{
+    type Message = D::Message;
+    type Error = NacelleError;
+
+    fn decode(&mut self, input: &mut BytesMut) -> Result<Option<Self::Message>, Self::Error> {
+        let decode_started = start_tcp_phase(self.telemetry_plan.phase_duration);
+        let result = self.decoder.decode(input);
+        finish_tcp_phase(
+            self.telemetry,
+            self.metrics_context,
+            "decode",
+            decode_started,
+        );
+        if let (Err(error), Some(metrics_context)) = (&result, self.metrics_context) {
+            self.telemetry
+                .operation_error(metrics_context, "decode", error);
+        }
+        result
+    }
+
+    fn decode_eof(&mut self, input: &mut BytesMut) -> Result<Option<Self::Message>, Self::Error> {
+        let decode_started = start_tcp_phase(self.telemetry_plan.phase_duration);
+        let result = self.decoder.decode_eof(input);
+        finish_tcp_phase(
+            self.telemetry,
+            self.metrics_context,
+            "decode",
+            decode_started,
+        );
+        if let (Err(error), Some(metrics_context)) = (&result, self.metrics_context) {
+            self.telemetry
+                .operation_error(metrics_context, "decode", error);
+        }
+        result
+    }
+}
+
+pub(super) fn map_message_read_error(error: MessageReadError<NacelleError>) -> NacelleError {
+    match error {
+        MessageReadError::Io(error) => NacelleError::Io(error),
+        MessageReadError::Decoder(error) => error,
+        MessageReadError::UnexpectedEof { .. } => NacelleError::UnexpectedEof,
+        MessageReadError::MessageWithoutProgress => {
+            NacelleError::InvalidFrame("decoder returned a request without consuming input")
+        }
+        MessageReadError::ConsumedOnNeedMore { .. } => {
+            NacelleError::InvalidFrame("decoder consumed input before requesting more data")
+        }
+    }
 }
