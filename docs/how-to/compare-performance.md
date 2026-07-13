@@ -122,12 +122,72 @@ comparison records the same candidate metadata and Criterion's percentage and
 confidence-interval output. Use `-Force` to replace an existing baseline for
 the same resolved commit.
 
-The codec target compares direct decoding with `MessageReader::decode_buffered`,
-measures incomplete-header calls, and separates the no-op buffer-rotation check
-from replacing an empty 256 KiB buffer. The TCP target measures per-connection
-decoder construction and compares direct reference-protocol decoding with the
-buffered 64-request head/body drain used by the connection loop. Treat the
-rotation replacement result as allocation cost, not per-request overhead.
+## Run native host workloads
+
+On a dedicated Linux host, the native workload harness detects physical cores,
+SMT siblings, sockets, NUMA nodes, memory, and CPU governors. It reserves one
+physical core per NUMA node for the operating system and uses one logical CPU
+per remaining physical core. Review the generated plan without building or
+running workloads:
+
+```powershell
+./scripts/run-native-performance.ps1 -PlanOnly
+```
+
+Run the default capacity matrix with a warm-up before every measured sample:
+
+```powershell
+./scripts/run-native-performance.ps1 `
+	-Runs 3 `
+	-WarmupSecs 15 `
+	-DurationSecs 30
+```
+
+The harness defaults to three 30-second measured runs per workload. The default
+capacity matrix uses 50 persistent connections, pipeline depth 1, worker counts
+of 1, 2, 4, 8, 16, 32, and 36, and response bodies of 0, 1, 10, and 100 KiB.
+Worker counts larger than the isolated server core set detected on the host are
+omitted. Requests use a zero-byte body while retaining the protocol's fixed
+frame overhead; sample banners report request and response body sizes
+separately.
+
+Run plain TCP and TLS as separate result sets:
+
+```powershell
+./scripts/run-native-performance.ps1 `
+	-Config examples/nacelle-stress-server/configs/tcp.toml `
+	-OutputDirectory target/native-performance/plain
+./scripts/run-native-performance.ps1 `
+	-Config examples/nacelle-stress-server/configs/tcp-tls.toml `
+	-OutputDirectory target/native-performance/tls
+```
+
+The earlier diagnostic profiles remain available explicitly. For example:
+
+```powershell
+./scripts/run-native-performance.ps1 -Profile min-rtt,pooled
+```
+
+Use `-Profile all` to run both the capacity matrix and the diagnostic
+minimum-RTT, pooled, pool-saturation, and pipelined-throughput profiles. Override
+the capacity dimensions with `-CapacityWorkerCounts` or
+`-CapacityResponseKiB`.
+
+The harness builds native release binaries once, starts a fresh server for each
+sample, applies process and memory binding with `numactl`, and writes the host
+snapshot, exact workload plan, raw server/client logs, per-run parsed results,
+and median summary JSON under `target/native-performance`. It warns when it
+detects virtualization or a non-performance CPU governor and refuses to reuse
+an occupied bind address. Use `-SkipBuild` only when the release binaries
+already match the current source.
+
+The codec target measures length-delimited encoding, compares direct decoding
+with `MessageReader::decode_buffered`, measures incomplete-header calls, and
+separates the no-op buffer-rotation check from replacing an empty 256 KiB
+buffer. The TCP target measures per-connection decoder construction and
+compares direct reference-protocol decoding with the buffered 64-request
+head/body drain used by the connection loop. Treat the rotation replacement
+result as allocation cost, not per-request overhead.
 
 The `runtime_limits` benchmark group covers connection/request permit
 acquire/drop and memory allocation overhead. Watch it closely after changes to
