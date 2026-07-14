@@ -103,7 +103,8 @@ function Get-NacellePerformanceBenchmarks {
     }
 
     $selected = @($available | Where-Object { $Suite -contains $_.Name })
-    if ($selected.Count -ne $Suite.Count) {
+    $missing = @($Suite | Where-Object { $_ -ne "all" -and $_ -notin $available.Name } | Select-Object -Unique)
+    if ($missing.Count -gt 0) {
         $known = @($available.Name) -join ", "
         throw "One or more requested benchmark suites are unavailable in '$Workspace'. Available suites: $known"
     }
@@ -167,7 +168,7 @@ function Copy-NacelleCriterionBaselines {
     if (Test-Path $destination) {
         Remove-Item $destination -Recurse -Force
     }
-    [System.IO.Directory]::CreateDirectory($DestinationTargetDirectory) | Out-Null
+    [System.IO.Directory]::CreateDirectory($destination) | Out-Null
     Copy-Item $source $destination -Recurse
 }
 
