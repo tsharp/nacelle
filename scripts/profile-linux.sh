@@ -81,6 +81,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+EFFECTIVE_DISABLE_HANDLER_TIMEOUT="$DISABLE_HANDLER_TIMEOUT"
+EFFECTIVE_DISABLE_TCP_TIMEOUTS="$DISABLE_TCP_TIMEOUTS"
+if [[ "$DISABLE_TIMEOUTS" == "true" ]]; then
+    EFFECTIVE_DISABLE_HANDLER_TIMEOUT="true"
+    EFFECTIVE_DISABLE_TCP_TIMEOUTS="true"
+fi
+
 if [[ "$(uname -s)" != "Linux" ]]; then
     echo "profile-linux.sh requires Linux" >&2
     exit 1
@@ -179,8 +186,8 @@ fi
     echo "feature_set=$FEATURE_SET"
     echo "handler_mode=$HANDLER_MODE"
     echo "disable_timeouts=$DISABLE_TIMEOUTS"
-    echo "disable_handler_timeout=$DISABLE_HANDLER_TIMEOUT"
-    echo "disable_tcp_timeouts=$DISABLE_TCP_TIMEOUTS"
+    echo "disable_handler_timeout=$EFFECTIVE_DISABLE_HANDLER_TIMEOUT"
+    echo "disable_tcp_timeouts=$EFFECTIVE_DISABLE_TCP_TIMEOUTS"
     echo "response_write_mode=$RESPONSE_WRITE_MODE"
     echo "tls_insecure=$TLS_INSECURE"
     echo "connections=$CONNECTIONS"

@@ -327,7 +327,6 @@ read timeout.
 
 These results support coalescing for measured plain-TCP pipelined workloads on
 this host. They do not support enabling it for Rustls or pipeline-1 workloads.
-Raw final artifacts are under `target/profiles/20260715-default-final`.
 
 ## Disabled-policy specialization
 

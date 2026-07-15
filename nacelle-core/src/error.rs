@@ -79,7 +79,9 @@ impl NacelleError {
             Self::Timeout("tcp_read") | Self::Timeout("request_body_read") => {
                 Some("raise NacelleTcpLimits::read_timeout or fix slow request readers")
             }
-            Self::Timeout("tcp_write") | Self::Timeout("tcp_final_write") => {
+            Self::Timeout("tcp_write")
+            | Self::Timeout("tcp_final_write")
+            | Self::Timeout("tcp_shutdown") => {
                 Some("raise NacelleTcpLimits::write_timeout or fix slow response readers")
             }
             Self::Timeout("idle") => {
@@ -167,6 +169,16 @@ mod tests {
             Some("raise NacelleLimits::max_request_body_bytes or lower client payload sizes")
         );
         assert!(error.to_string().contains("hint: raise NacelleLimits"));
+    }
+
+    #[test]
+    fn tcp_shutdown_uses_write_timeout_hint() {
+        let error = NacelleError::Timeout("tcp_shutdown");
+
+        assert_eq!(
+            error.hint(),
+            Some("raise NacelleTcpLimits::write_timeout or fix slow response readers")
+        );
     }
 
     #[test]
