@@ -48,7 +48,8 @@ generic telemetry API groups those switches under `request_metrics`; the stress
 server exposes byte accounting as `byte_metrics = true`.
 Use `--no-byte-metrics` for a lower-overhead OTel run, or use
 `--no-default-features` with the plain TCP config when you intentionally want a
-metrics-free peak throughput baseline.
+metrics-free, system-allocator diagnostic. Add `--features mimalloc-allocator`
+when the baseline must keep mimalloc while disabling TLS and OpenTelemetry.
 
 The Tokio stress server default build includes `tls-self-signed` support. The
 checked-in root `config.toml` enables `tls_self_signed = true`, so the local

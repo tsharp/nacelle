@@ -1,6 +1,7 @@
 // Shared service/config logic for the Tokio stress server.
 
 use std::net::SocketAddr;
+#[cfg(feature = "mimalloc-allocator")]
 use std::os::raw::c_long;
 use std::path::Path;
 use std::str::FromStr;
@@ -195,7 +196,9 @@ impl ServerConfig {
 /// Values match the `mi_option_e` enum in mimalloc v2 `mimalloc/types.h`.
 /// These are stable within v2 and `libmimalloc-sys` always compiles v2 unless
 /// the `v3` feature is explicitly enabled.
+#[cfg(feature = "mimalloc-allocator")]
 const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
+#[cfg(feature = "mimalloc-allocator")]
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 
 /// Configures mimalloc for minimal OS memory retention when `low_memory` is
@@ -204,6 +207,7 @@ const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 /// The same effect can be achieved without recompiling by setting environment
 /// variables before launching the server:
 ///   `MIMALLOC_PURGE_DELAY=0 MIMALLOC_ARENA_EAGER_COMMIT=0 ./server`
+#[cfg(feature = "mimalloc-allocator")]
 pub fn configure_allocator(low_memory: bool) {
     if !low_memory {
         return;
@@ -215,6 +219,14 @@ pub fn configure_allocator(low_memory: bool) {
         // Do not pre-commit arena memory up-front; commit only as needed.
         libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0 as c_long);
     }
+}
+
+#[cfg(not(feature = "mimalloc-allocator"))]
+pub fn configure_allocator(low_memory: bool) {
+    assert!(
+        !low_memory,
+        "low-memory mode requires the mimalloc-allocator feature"
+    );
 }
 
 pub fn build_server(
@@ -523,6 +535,13 @@ pub fn print_help(runtime: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(feature = "mimalloc-allocator"))]
+    #[test]
+    #[should_panic(expected = "low-memory mode requires the mimalloc-allocator feature")]
+    fn low_memory_requires_mimalloc_allocator() {
+        configure_allocator(true);
+    }
 
     #[test]
     fn toml_config_applies_limits() {

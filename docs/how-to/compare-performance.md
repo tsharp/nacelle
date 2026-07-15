@@ -193,6 +193,46 @@ The `runtime_limits` benchmark group covers connection/request permit
 acquire/drop and memory allocation overhead. Watch it closely after changes to
 `NacelleRuntimeState`.
 
+## Profile Linux CPU and allocations
+
+Use the Linux profiling helper for repeatable plain-TCP diagnostics:
+
+```bash
+./scripts/profile-linux.sh --tool baseline
+./scripts/profile-linux.sh --tool perf
+./scripts/profile-linux.sh --tool heaptrack
+```
+
+The helper builds the `profiling` Cargo profile with optimization, debug
+information, and frame pointers. It uses `--no-default-features` for the stress
+server, which disables TLS, OpenTelemetry, and mimalloc. The system allocator is
+required because Heaptrack cannot intercept calls made directly to mimalloc.
+Treat this as a diagnostic profile, not as a matched comparison with the default
+mimalloc build.
+
+Pass disjoint CPU lists after reviewing the native harness plan:
+
+```bash
+pwsh -NoProfile -File ./scripts/run-native-performance.ps1 -PlanOnly
+./scripts/profile-linux.sh \
+	--tool perf \
+	--server-cpus 2,4,6,8,10,12,14,16 \
+	--client-cpus 3,5,7,9,11,13,15,17,19,21,23
+```
+
+For user-space profiling of processes owned by the current user, Linux must
+permit performance counters. A value of `2` keeps kernel profiling disabled:
+
+```bash
+sudo sysctl -w kernel.perf_event_paranoid=2
+```
+
+Each run writes metadata, raw logs, and text reports under
+`target/linux-profiles`. The `perf` mode warms the server before attaching and
+records `cycles:u` at 999 Hz with frame-pointer call graphs. Heaptrack launches
+the server directly so allocator interception survives process startup, then
+applies any requested CPU affinity to all server threads.
+
 ## Phase 7 local confidence checks
 
 The following measurements are local confidence checks, not portable release
