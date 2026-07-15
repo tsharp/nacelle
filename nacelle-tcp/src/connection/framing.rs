@@ -1,12 +1,81 @@
 use bytes::BytesMut;
 use nacelle_codec::{MessageDecoder, MessageReadError};
+#[cfg(feature = "phase-timing")]
+use std::pin::Pin;
+#[cfg(feature = "phase-timing")]
+use std::task::{Context, Poll};
+#[cfg(feature = "phase-timing")]
+use tokio::io::{AsyncRead, ReadBuf};
 
 use crate::config::NacelleTcpConfig;
 use nacelle_core::error::NacelleError;
 use nacelle_core::limits::{NacelleMemoryAllocation, NacelleRuntimeState};
 use nacelle_core::telemetry::{NacelleMetricsContext, NacelleTelemetry, NacelleTelemetryObserver};
 
-use super::metrics::{TcpTelemetryPlan, finish_tcp_phase, start_tcp_phase};
+use super::metrics::{finish_tcp_phase, start_tcp_phase};
+
+#[cfg(feature = "phase-timing")]
+pub(super) struct InstrumentedReader<'a, R, Observer: NacelleTelemetryObserver> {
+    reader: R,
+    telemetry: &'a NacelleTelemetry<Observer>,
+    metrics_context: Option<&'a NacelleMetricsContext>,
+    phase_duration_metrics: bool,
+    read_timer: Option<super::metrics::TcpPhaseTimer>,
+}
+
+#[cfg(feature = "phase-timing")]
+impl<'a, R, Observer> InstrumentedReader<'a, R, Observer>
+where
+    Observer: NacelleTelemetryObserver,
+{
+    pub(super) const fn new(
+        reader: R,
+        telemetry: &'a NacelleTelemetry<Observer>,
+        metrics_context: Option<&'a NacelleMetricsContext>,
+        phase_duration_metrics: bool,
+    ) -> Self {
+        Self {
+            reader,
+            telemetry,
+            metrics_context,
+            phase_duration_metrics,
+            read_timer: None,
+        }
+    }
+}
+
+#[cfg(feature = "phase-timing")]
+impl<R, Observer> AsyncRead for InstrumentedReader<'_, R, Observer>
+where
+    R: AsyncRead + Unpin,
+    Observer: NacelleTelemetryObserver,
+{
+    fn poll_read(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if !this.phase_duration_metrics {
+            return Pin::new(&mut this.reader).poll_read(context, buffer);
+        }
+        if this.read_timer.is_none() {
+            this.read_timer = Some(start_tcp_phase(true));
+        }
+        let result = Pin::new(&mut this.reader).poll_read(context, buffer);
+        if result.is_ready() {
+            finish_tcp_phase(
+                this.telemetry,
+                this.metrics_context,
+                "socket_read",
+                this.read_timer
+                    .take()
+                    .expect("ready socket read should have a phase timer"),
+            );
+        }
+        result
+    }
+}
 
 pub(super) fn allocate_connection_buffers(
     config: &NacelleTcpConfig,
@@ -22,7 +91,7 @@ pub(super) struct InstrumentedDecoder<'a, D, Observer: NacelleTelemetryObserver>
     decoder: D,
     telemetry: &'a NacelleTelemetry<Observer>,
     metrics_context: Option<&'a NacelleMetricsContext>,
-    telemetry_plan: TcpTelemetryPlan,
+    phase_duration_metrics: bool,
 }
 
 impl<'a, D, Observer> InstrumentedDecoder<'a, D, Observer>
@@ -33,13 +102,13 @@ where
         decoder: D,
         telemetry: &'a NacelleTelemetry<Observer>,
         metrics_context: Option<&'a NacelleMetricsContext>,
-        telemetry_plan: TcpTelemetryPlan,
+        phase_duration_metrics: bool,
     ) -> Self {
         Self {
             decoder,
             telemetry,
             metrics_context,
-            telemetry_plan,
+            phase_duration_metrics,
         }
     }
 }
@@ -53,7 +122,7 @@ where
     type Error = NacelleError;
 
     fn decode(&mut self, input: &mut BytesMut) -> Result<Option<Self::Message>, Self::Error> {
-        let decode_started = start_tcp_phase(self.telemetry_plan.phase_duration);
+        let decode_started = start_tcp_phase(self.phase_duration_metrics);
         let result = self.decoder.decode(input);
         finish_tcp_phase(
             self.telemetry,
@@ -69,7 +138,7 @@ where
     }
 
     fn decode_eof(&mut self, input: &mut BytesMut) -> Result<Option<Self::Message>, Self::Error> {
-        let decode_started = start_tcp_phase(self.telemetry_plan.phase_duration);
+        let decode_started = start_tcp_phase(self.phase_duration_metrics);
         let result = self.decoder.decode_eof(input);
         finish_tcp_phase(
             self.telemetry,

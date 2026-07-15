@@ -193,59 +193,140 @@ The `runtime_limits` benchmark group covers connection/request permit
 acquire/drop and memory allocation overhead. Watch it closely after changes to
 `NacelleRuntimeState`.
 
-## Phase 7 local confidence checks
+## Profile Linux CPU and allocations
 
-The following measurements are local confidence checks, not portable release
-claims. They were collected from source checkpoint `9e42adb` under WSL2 kernel
-`6.6.87.2-microsoft-standard-WSL2` on an Intel Xeon Platinum 8370C host
-(8 cores / 16 logical CPUs) with `rustc 1.95.0`, Criterion defaults, the system
-allocator, and features `bench,tcp`. WSL2 did not expose a CPU governor:
-
-- disabled connection telemetry: approximately `0.58-0.62 ns`
-- disabled request-completed telemetry: approximately `1.89-1.91 ns`
-- disabled timeout telemetry: approximately `0.78-0.79 ns`
-- concrete in-memory observation: approximately `60-89 ns` across repeated
-	local runs, dominated by its mutex and event-vector write
-
-Generated-code inspection used monomorphized release modules with ThinLTO
-disabled for readability:
+Use the Linux profiling helper for repeatable plain-TCP diagnostics:
 
 ```bash
-cargo rustc -p nacelle-examples --bin echo --release --features tcp -- \
-	-C lto=no -C codegen-units=1 --emit=llvm-ir
-cargo rustc -p nacelle-examples --bin http_echo --release --features http -- \
-	-C lto=no -C codegen-units=1 --emit=llvm-ir
+./scripts/profile-linux.sh --tool baseline
+./scripts/profile-linux.sh --tool perf
+./scripts/profile-linux.sh --tool heaptrack
 ```
 
-The complete TCP and HTTP modules contained 98 and 221 indirect calls,
-respectively, from the full dependency graph. Inspection found no Nacelle
-dynamic-observer symbols or boxed handler-future symbols. The modules retain
-Nacelle's startup-only listener-installer indirection plus calls from Tokio,
-Hyper, tracing, and allocator internals. These feature sets did not enable TLS
-or OpenTelemetry, so provider/backend indirection requires separate builds.
-No module-wide count should be presented as request-path Nacelle dispatch
-without symbol-level attribution.
+The helper builds the `profiling` Cargo profile with optimization, debug
+information, and frame pointers. Its default `--feature-set minimal` uses
+`--no-default-features`, which disables TLS, OpenTelemetry, and mimalloc. The
+system allocator is required because Heaptrack cannot intercept calls made
+directly to mimalloc. Treat this as a diagnostic profile, not as a matched
+comparison with the default mimalloc build.
 
-`perf`/flamegraph profiling was unavailable for the WSL2 kernel used for these
-checks. Run profile-level validation on the target Linux kernel before making
-throughput, latency, or production-readiness claims.
+Use `--feature-set default` to profile the default mimalloc, OpenTelemetry, and
+Rustls-capable binaries. Self-signed Rustls workloads also require a TLS config
+and the explicit local-test trust flag:
 
-Matched 30-second saturation profiles were also collected from source
-checkpoint `7eb400f` with 8 server threads, 256 connections, pipeline depth 8,
-256-byte requests, 64-byte responses, byte metrics enabled, and the default
-OpenTelemetry console observer:
+```bash
+./scripts/profile-linux.sh \
+	--tool perf \
+	--feature-set default \
+	--config examples/nacelle-stress-server/configs/tcp-tls.toml \
+	--tls-insecure
+```
 
-| Profile | Requests | Effective RPS | p50 | p95 | p99 | Max |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Plain TCP | 23,521,395 | 783,584 | 2.45 ms | 4.32 ms | 5.75 ms | 24.19 ms |
-| Low-memory TCP | 23,389,425 | 779,230 | 2.48 ms | 4.52 ms | 6.34 ms | 28.30 ms |
-| Self-signed Rustls TCP | 18,868,139 | 628,688 | 3.04 ms | 5.36 ms | 7.36 ms | 37.08 ms |
+The helper rejects Heaptrack with the default feature set because direct
+mimalloc calls are invisible to Heaptrack. It also rejects `--tls-insecure`
+with the minimal feature set because that client omits Rustls.
 
-All three clients completed without reported failures. The low-memory server
-reported 20 MiB of accounted connection memory while 256 connections were
-active and returned to zero after they closed. These are saturation results;
-use pipeline depth 1 for established-connection RTT measurements. They are not
-a substitute for a matched pre-migration baseline or target-hardware load test.
+Pass disjoint CPU lists after reviewing the native harness plan:
+
+```bash
+pwsh -NoProfile -File ./scripts/run-native-performance.ps1 -PlanOnly
+./scripts/profile-linux.sh \
+	--tool perf \
+	--server-cpus 2,4,6,8,10,12,14,16 \
+	--client-cpus 3,5,7,9,11,13,15,17,19,21,23
+```
+
+For user-space profiling of processes owned by the current user, Linux must
+permit performance counters. A value of `2` keeps kernel profiling disabled:
+
+```bash
+sudo sysctl -w kernel.perf_event_paranoid=2
+```
+
+Each run writes metadata, raw logs, and text reports under
+`target/linux-profiles`. The `perf` mode warms the server before attaching and
+records `cycles:u` at 999 Hz with frame-pointer call graphs. Heaptrack launches
+the server directly so allocator interception survives process startup, then
+applies any requested CPU affinity to all server threads.
+
+The helper can compare handler ownership and response delivery without
+changing their safe defaults:
+
+```bash
+./scripts/profile-linux.sh --tool perf --handler-mode serial
+./scripts/profile-linux.sh \
+	--tool baseline \
+	--response-write-mode coalesce-buffered \
+	--pipeline 8 \
+	--runs 3
+```
+
+### July 2026 Linux response-delivery diagnostic
+
+The following results are local confidence checks from an Intel Xeon Silver
+4214 host with 24 physical cores, Linux 6.8, and Rust 1.95.0. The profiling
+build used the system allocator, no TLS, no OpenTelemetry, eight pinned server
+workers, 256 persistent connections, 256-byte request bodies, 64-byte response
+bodies, and all timeout defaults enabled. Server and client CPU sets were
+disjoint. Each matrix cell used a five-second warm-up and three measured
+ten-second runs; pipeline depths 1 and 8 also received ABBA interleaved checks.
+
+| Pipeline | Immediate median | Coalesced median | Local delta |
+| ---: | ---: | ---: | ---: |
+| 1 | 614,661 req/s | 624,258 req/s | inconclusive; ABBA was -1.0% |
+| 8 | 763,646 req/s | 1,081,277 req/s | +41.6% |
+| 32 | 724,094 req/s | 1,256,126 req/s | +73.5% |
+
+All clients completed without reported failures. The pipeline-8 ABBA check
+measured 764,854-774,894 req/s for immediate delivery and
+1,072,662-1,075,516 req/s for coalesced delivery. Matched perf captures lost no
+samples; coalescing reduced `write_all_tracked_with_timeout` self share from
+4.33% to 1.39%, `ResponseDelivery::write_pending` from 4.14% to 1.68%, and TCP
+write polling from 1.59% to 0.46%. The connection loop always flushes after it
+drains the requests already decoded from the current read buffer and before it
+awaits another socket read.
+
+These loopback saturation results support coalescing as an explicit option for
+highly pipelined workloads, not as a universal default. Pipeline-1 performance
+showed no repeatable benefit, and target-network latency, response sizes,
+backpressure, TLS, and telemetry require separate measurements.
+
+### Default-feature plain TCP and Rustls diagnostic
+
+A follow-up on the same host used the default stress-server feature set:
+mimalloc, OpenTelemetry with byte metrics, and self-signed Rustls support. The
+workload, CPU sets, timeout defaults, warm-up, sample duration, and three-run
+cell size matched the preceding matrix. Plain TCP and Rustls were measured as
+separate transport profiles.
+
+| Transport | Pipeline | Immediate median | Coalesced median | Local delta |
+| --- | ---: | ---: | ---: | ---: |
+| Plain TCP | 1 | 537,566 req/s | 536,274 req/s | -0.2% |
+| Plain TCP | 8 | 619,749 req/s | 1,168,411 req/s | +88.5% |
+| Plain TCP | 32 | 608,519 req/s | 1,329,735 req/s | +118.5% |
+| Rustls | 1 | 478,062 req/s | 471,512 req/s | -1.4% |
+| Rustls | 8 | 524,887 req/s | 529,998 req/s | +1.0% |
+| Rustls | 32 | 547,103 req/s | 546,342 req/s | -0.1% |
+
+All 36 measured client runs completed without reported failures; all cells had
+at most 1.1% min-to-max spread. At pipeline depth 8, matched perf captures lost
+no samples. Plain coalescing reduced tracked write-loop self share from 2.10%
+to 0.47%, pending-write self share from 1.78% to 0.42%, `send` from 0.62% to
+0.12%, and TCP write polling from 0.53% to 0.09%. The equivalent Rustls pair
+was throughput-neutral: tracked write-loop self share remained approximately
+1.01%, while encryption, TLS buffering, and OpenTelemetry aggregation remained
+material costs.
+
+Deep-pipeline Rustls testing also exposed two stress-path correctness gaps.
+The client now flushes buffered TLS requests before reading responses, and the
+TCP connection driver flushes the underlying transport before another request
+read and performs a write-timeout-bounded shutdown. This delivers terminal TLS
+records promptly and emits `close_notify`. Final pipeline-32 Rustls samples all
+completed in approximately 10.02 seconds instead of waiting for the 30-second
+read timeout.
+
+These results support coalescing for measured plain-TCP pipelined workloads on
+this host. They do not support enabling it for Rustls or pipeline-1 workloads.
 
 ## Disabled-policy specialization
 

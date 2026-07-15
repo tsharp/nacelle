@@ -48,21 +48,32 @@ where
     )
 }
 
-pub(super) fn start_tcp_phase(enabled: bool) -> Option<Instant> {
-    enabled.then(Instant::now)
+pub(super) struct TcpPhaseTimer {
+    #[cfg(feature = "phase-timing")]
+    started: Option<Instant>,
+}
+
+pub(super) fn start_tcp_phase(_enabled: bool) -> TcpPhaseTimer {
+    TcpPhaseTimer {
+        #[cfg(feature = "phase-timing")]
+        started: _enabled.then(Instant::now),
+    }
 }
 
 pub(super) fn finish_tcp_phase<Observer>(
     telemetry: &NacelleTelemetry<Observer>,
     metrics_context: Option<&NacelleMetricsContext>,
     phase: &'static str,
-    started: Option<Instant>,
+    timer: TcpPhaseTimer,
 ) where
     Observer: NacelleTelemetryObserver,
 {
-    if let (Some(started), Some(metrics_context)) = (started, metrics_context) {
+    #[cfg(feature = "phase-timing")]
+    if let (Some(started), Some(metrics_context)) = (timer.started, metrics_context) {
         telemetry.phase_duration(metrics_context, phase, started.elapsed());
     }
+    #[cfg(not(feature = "phase-timing"))]
+    let _ = (telemetry, metrics_context, phase, timer);
 }
 
 pub(super) fn record_tcp_error<Observer>(
@@ -255,5 +266,25 @@ mod tests {
 
         assert_eq!(plan.metrics, cfg!(feature = "otel"));
         assert_eq!(plan.request_metrics, cfg!(feature = "otel"));
+    }
+
+    #[test]
+    fn phase_plan_requires_compile_time_and_runtime_opt_in() {
+        let configured = NacelleTelemetry::default().with_phase_duration_metrics(true);
+        assert_eq!(
+            TcpTelemetryPlan::new(&configured).phase_duration,
+            cfg!(feature = "phase-timing")
+        );
+
+        let runtime_disabled = configured.with_phase_duration_metrics(false);
+        assert!(!TcpTelemetryPlan::new(&runtime_disabled).phase_duration);
+    }
+
+    #[test]
+    fn phase_timer_storage_is_compiled_out_when_disabled() {
+        #[cfg(feature = "phase-timing")]
+        assert_ne!(std::mem::size_of::<TcpPhaseTimer>(), 0);
+        #[cfg(not(feature = "phase-timing"))]
+        assert_eq!(std::mem::size_of::<TcpPhaseTimer>(), 0);
     }
 }

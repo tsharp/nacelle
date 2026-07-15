@@ -16,6 +16,7 @@ default = []
 error-hints = []
 tls = []
 otel = ["dep:opentelemetry"]
+phase-timing = ["otel"]
 
 [dependencies]
 bytes = { workspace = true }

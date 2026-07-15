@@ -67,6 +67,9 @@ Retained costs are scoped by ownership:
 TCP computes effective telemetry modes once per connection. When metrics are
 disabled it skips `NacelleMetricsContext` and OTel attribute construction while
 retaining connection/request permits, memory accounting, and configured limits.
+Diagnostic TCP phase timers are compiled only with the non-default
+`phase-timing` feature and remain runtime-disabled until explicitly enabled on
+`NacelleTelemetry`.
 
 Enable the `buffer-rotation` feature for long-lived TCP connections that may
 occasionally receive large requests. Once an oversized cumulative input buffer

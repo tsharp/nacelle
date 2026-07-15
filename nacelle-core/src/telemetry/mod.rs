@@ -12,10 +12,12 @@ pub use sink::{
 
 #[cfg(feature = "otel")]
 mod attributes;
+#[cfg(feature = "phase-timing")]
+use attributes::phase_attributes;
 #[cfg(feature = "otel")]
 use attributes::{
-    attributes_with_key_value, connection_attributes, error_attributes, phase_attributes,
-    request_attributes, shutdown_stage,
+    attributes_with_key_value, connection_attributes, error_attributes, request_attributes,
+    shutdown_stage,
 };
 
 #[derive(Clone)]
@@ -244,6 +246,11 @@ where
         self
     }
 
+    /// Enable diagnostic transport phase histograms at runtime.
+    ///
+    /// This switch has an effect only when the `phase-timing` Cargo feature is
+    /// compiled. The feature is intentionally disabled by default because its
+    /// timers and metric writes touch request and connection hot paths.
     pub fn with_phase_duration_metrics(mut self, enabled: bool) -> Self {
         self.config.phase_duration_metrics = enabled;
         self
@@ -266,7 +273,9 @@ where
     }
 
     pub fn phase_duration_metrics_enabled(&self) -> bool {
-        self.metrics_enabled() && self.config.phase_duration_metrics
+        cfg!(feature = "phase-timing")
+            && self.metrics_enabled()
+            && self.config.phase_duration_metrics
     }
 
     pub fn request_events_enabled(&self) -> bool {
@@ -605,7 +614,7 @@ where
         elapsed: Duration,
     ) {
         let _ = (context, phase, elapsed);
-        #[cfg(feature = "otel")]
+        #[cfg(feature = "phase-timing")]
         if self.phase_duration_metrics_enabled() {
             self.metrics.phase_duration_ms.record(
                 elapsed.as_secs_f64() * 1_000.0,
@@ -781,6 +790,7 @@ struct OtelMetrics {
     request_bytes: opentelemetry::metrics::Counter<u64>,
     response_bytes: opentelemetry::metrics::Counter<u64>,
     request_duration_ms: opentelemetry::metrics::Histogram<f64>,
+    #[cfg(feature = "phase-timing")]
     phase_duration_ms: opentelemetry::metrics::Histogram<f64>,
     errors: opentelemetry::metrics::Counter<u64>,
     resource_limit_rejections: opentelemetry::metrics::Counter<u64>,
@@ -812,6 +822,7 @@ impl OtelMetrics {
             request_bytes: meter.u64_counter("nacelle.request.bytes").build(),
             response_bytes: meter.u64_counter("nacelle.response.bytes").build(),
             request_duration_ms: meter.f64_histogram("nacelle.request.duration_ms").build(),
+            #[cfg(feature = "phase-timing")]
             phase_duration_ms: meter.f64_histogram("nacelle.phase.duration_ms").build(),
             errors: meter.u64_counter("nacelle.errors").build(),
             resource_limit_rejections: meter
@@ -1037,6 +1048,10 @@ mod tests {
         assert_eq!(
             telemetry.request_duration_metrics_enabled(),
             cfg!(feature = "otel")
+        );
+        assert_eq!(
+            telemetry.phase_duration_metrics_enabled(),
+            cfg!(feature = "phase-timing")
         );
     }
 

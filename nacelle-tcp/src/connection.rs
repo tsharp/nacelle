@@ -29,9 +29,8 @@ mod tests;
 
 use framing::{InstrumentedDecoder, allocate_connection_buffers, map_message_read_error};
 use io::read_message_with_timeout;
-use metrics::{
-    TcpTelemetryPlan, finish_tcp_phase, start_tcp_phase, tcp_close_reason, tcp_metrics_context,
-};
+use io::shutdown_with_timeout;
+use metrics::{TcpTelemetryPlan, record_tcp_error, tcp_close_reason, tcp_metrics_context};
 use request::{
     LocalOneWayDispatch, LocalRequestDispatch, LocalSerialOneWayDispatch,
     LocalSerialRequestDispatch, OneWayDispatch, RequestDispatch, SerialOneWayDispatch,
@@ -210,11 +209,18 @@ where
     let connection_metrics = telemetry_plan
         .metrics
         .then(|| tcp_metrics_context(protocol.deref(), &connection));
+    #[cfg(feature = "phase-timing")]
+    let reader = framing::InstrumentedReader::new(
+        reader,
+        &telemetry,
+        connection_metrics.as_ref(),
+        telemetry_plan.phase_duration,
+    );
     let decoder = InstrumentedDecoder::new(
         protocol.decoder(config.max_frame_len),
         &telemetry,
         connection_metrics.as_ref(),
-        telemetry_plan,
+        telemetry_plan.phase_duration,
     );
     let mut request_reader =
         MessageReader::with_capacity(reader, decoder, config.read_buffer_capacity);
@@ -228,15 +234,7 @@ where
             #[cfg(feature = "buffer-rotation")]
             request_reader.rotate_empty_buffer(config.read_buffer_capacity);
 
-            let read_started = start_tcp_phase(telemetry_plan.phase_duration);
-            let read_result =
-                read_message_with_timeout(&mut request_reader, &tcp_limits, "tcp_read").await;
-            finish_tcp_phase(
-                &telemetry,
-                connection_metrics.as_ref(),
-                "socket_read",
-                read_started,
-            );
+            let read_result = read_message_with_timeout(&mut request_reader, &tcp_limits).await;
             let decoded = match read_result {
                 Ok(Some(decoded)) => decoded,
                 Ok(None) => break 'conn,
@@ -304,7 +302,7 @@ where
                     &tcp_limits,
                     &telemetry,
                     connection_metrics.as_ref(),
-                    telemetry_plan,
+                    telemetry_plan.phase_duration,
                 )
                 .await
                 .map_err(|error| error.error)?;
@@ -320,12 +318,27 @@ where
             &tcp_limits,
             &telemetry,
             connection_metrics.as_ref(),
-            telemetry_plan,
+            telemetry_plan.phase_duration,
         )
         .await
     {
         Ok(_) => result,
         Err(error) => Err(error.error),
+    };
+    let result = match result {
+        Ok(()) => {
+            let shutdown_result = shutdown_with_timeout(&mut writer, &tcp_limits).await;
+            if let Err(error) = &shutdown_result {
+                record_tcp_error(
+                    &telemetry,
+                    connection_metrics.as_ref(),
+                    "socket_shutdown",
+                    error,
+                );
+            }
+            shutdown_result
+        }
+        Err(error) => Err(error),
     };
     if let Some(connection_metrics) = &connection_metrics {
         telemetry.connection_closed(connection_metrics, tcp_close_reason(&result));

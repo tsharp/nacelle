@@ -277,11 +277,12 @@ impl NacelleRuntimeState {
     }
 
     pub fn acquire_connection_tracked(&self) -> Result<TrackedPermit, NacelleError> {
-        acquire_counter(
+        if !try_acquire_counter(
             &self.inner.active_connections,
             self.inner.limits.max_connections,
-            "connections",
-        )?;
+        ) {
+            return Err(NacelleError::ResourceLimit("connections"));
+        }
         Ok(TrackedPermit::new(
             self.clone(),
             PermitKind::Connection { peer: None },
@@ -289,11 +290,12 @@ impl NacelleRuntimeState {
     }
 
     pub fn acquire_connection_for_peer(&self, peer: IpAddr) -> Result<TrackedPermit, NacelleError> {
-        acquire_counter(
+        if !try_acquire_counter(
             &self.inner.active_connections,
             self.inner.limits.max_connections,
-            "connections",
-        )?;
+        ) {
+            return Err(NacelleError::ResourceLimit("connections"));
+        }
         if let Err(error) = self.acquire_peer_connection(peer) {
             self.inner
                 .active_connections
@@ -318,11 +320,12 @@ impl NacelleRuntimeState {
     }
 
     pub fn acquire_request_tracked(&self) -> Result<TrackedPermit, NacelleError> {
-        acquire_counter(
+        if !try_acquire_counter(
             &self.inner.active_requests,
             self.inner.limits.max_in_flight_requests,
-            "in_flight_requests",
-        )?;
+        ) {
+            return Err(NacelleError::ResourceLimit("in_flight_requests"));
+        }
         Ok(TrackedPermit::new(self.clone(), PermitKind::Request))
     }
 
@@ -331,11 +334,12 @@ impl NacelleRuntimeState {
     }
 
     pub fn acquire_streaming_task_tracked(&self) -> Result<TrackedPermit, NacelleError> {
-        acquire_counter(
+        if !try_acquire_counter(
             &self.inner.active_streaming_tasks,
             self.inner.limits.max_streaming_tasks,
-            "streaming_tasks",
-        )?;
+        ) {
+            return Err(NacelleError::ResourceLimit("streaming_tasks"));
+        }
         Ok(TrackedPermit::new(self.clone(), PermitKind::StreamingTask))
     }
 
@@ -733,21 +737,17 @@ impl NacelleMemoryBudget {
     }
 }
 
-fn acquire_counter(
-    counter: &AtomicUsize,
-    limit: usize,
-    name: &'static str,
-) -> Result<(), NacelleError> {
+fn try_acquire_counter(counter: &AtomicUsize, limit: usize) -> bool {
     let mut current = counter.load(Ordering::Relaxed);
     loop {
         if current >= limit {
-            return Err(NacelleError::ResourceLimit(name));
+            return false;
         }
         let Some(next) = current.checked_add(1) else {
-            return Err(NacelleError::ResourceLimit(name));
+            return false;
         };
         match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => return Ok(()),
+            Ok(_) => return true,
             Err(observed) => current = observed,
         }
     }
