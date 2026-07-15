@@ -6,6 +6,8 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod shared;
 use shared::{StressServer, build_server, configure_allocator, parse_args, print_config};
 
+#[cfg(feature = "otel")]
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 #[cfg(feature = "otel")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -306,6 +308,30 @@ struct StressOtelSnapshot {
     resource_limit_rejections: u64,
     request_bytes: u64,
     response_bytes: u64,
+    phase_durations: BTreeMap<String, PhaseDurationSnapshot>,
+}
+
+#[cfg(feature = "otel")]
+#[derive(Debug, Default)]
+struct PhaseDurationSnapshot {
+    count: u64,
+    sum_ms: f64,
+    min_ms: Option<f64>,
+    max_ms: Option<f64>,
+}
+
+#[cfg(feature = "otel")]
+impl PhaseDurationSnapshot {
+    fn add(&mut self, count: u64, sum_ms: f64, min_ms: Option<f64>, max_ms: Option<f64>) {
+        self.count = self.count.saturating_add(count);
+        self.sum_ms += sum_ms;
+        if let Some(min_ms) = min_ms {
+            self.min_ms = Some(self.min_ms.map_or(min_ms, |current| current.min(min_ms)));
+        }
+        if let Some(max_ms) = max_ms {
+            self.max_ms = Some(self.max_ms.map_or(max_ms, |current| current.max(max_ms)));
+        }
+    }
 }
 
 #[cfg(feature = "otel")]
@@ -358,6 +384,9 @@ impl StressOtelSnapshot {
                     "nacelle.response.bytes" => {
                         snapshot.response_bytes += sum_u64(metric.data());
                     }
+                    "nacelle.phase.duration_ms" => {
+                        collect_phase_durations(metric.data(), &mut snapshot.phase_durations);
+                    }
                     _ => {}
                 }
             }
@@ -408,6 +437,44 @@ fn print_otel_snapshot(snapshot: StressOtelSnapshot, byte_metrics: StressOtelByt
         snapshot.active_streaming_tasks,
         format_bytes(snapshot.memory_used_bytes),
     );
+    for (phase, duration) in snapshot.phase_durations {
+        let mean_ms = if duration.count == 0 {
+            0.0
+        } else {
+            duration.sum_ms / duration.count as f64
+        };
+        println!(
+            "  phase        name={phase} count={} mean_ms={mean_ms:.6} min_ms={:.6} max_ms={:.6}",
+            duration.count,
+            duration.min_ms.unwrap_or_default(),
+            duration.max_ms.unwrap_or_default(),
+        );
+    }
+}
+
+#[cfg(feature = "otel")]
+fn collect_phase_durations(
+    metrics: &AggregatedMetrics,
+    durations: &mut BTreeMap<String, PhaseDurationSnapshot>,
+) {
+    let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = metrics else {
+        return;
+    };
+    for point in histogram.data_points() {
+        let Some(phase) = point
+            .attributes()
+            .find(|attribute| attribute.key.as_str() == "phase")
+            .map(|attribute| attribute.value.as_str().into_owned())
+        else {
+            continue;
+        };
+        durations.entry(phase).or_default().add(
+            point.count(),
+            point.sum(),
+            point.min(),
+            point.max(),
+        );
+    }
 }
 
 #[cfg(feature = "otel")]
@@ -499,7 +566,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(not(feature = "otel"))]
     let meter_provider = init_otel_console_exporter(&config);
 
-    let telemetry = NacelleTelemetry::default().with_byte_count_metrics(config.byte_metrics);
+    let telemetry = NacelleTelemetry::default()
+        .with_byte_count_metrics(config.byte_metrics)
+        .with_phase_duration_metrics(config.phase_duration_metrics);
     let server = build_server(&config)?.with_telemetry(telemetry);
     let tls_config = build_tls_config(&config)?;
 

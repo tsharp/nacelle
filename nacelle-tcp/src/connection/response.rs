@@ -197,6 +197,7 @@ impl ResponseDelivery {
         let mut growth = self
             .prepare_growth(required_len, runtime_state)
             .map_err(ResponseDeliveryError::before_delivery)?;
+        let encode_started = start_tcp_phase(phase_duration_metrics);
         let encode_result = {
             let pending = match &mut growth {
                 Some(growth) => &mut growth.pending,
@@ -205,6 +206,12 @@ impl ResponseDelivery {
             let mut frame = FrameBuffer::append_to(pending, frame_capacity);
             encode(&mut frame)
         };
+        finish_tcp_phase(
+            telemetry,
+            metrics_context,
+            "response_encode",
+            encode_started,
+        );
         if let Err(error) = encode_result {
             if growth.is_none() {
                 self.pending.truncate(frame_start);
@@ -269,16 +276,17 @@ impl ResponseDelivery {
                 kind: ResponseDeliveryErrorKind::Write,
             })?
         };
-        flush_with_timeout(writer, tcp_limits)
-            .await
-            .map_err(|error| {
-                record_tcp_error(telemetry, metrics_context, "socket_write", &error);
-                ResponseDeliveryError {
-                    error,
-                    delivered_bytes,
-                    kind: ResponseDeliveryErrorKind::Write,
-                }
-            })?;
+        let flush_started = start_tcp_phase(phase_duration_metrics);
+        let flush_result = flush_with_timeout(writer, tcp_limits).await;
+        finish_tcp_phase(telemetry, metrics_context, "socket_write", flush_started);
+        flush_result.map_err(|error| {
+            record_tcp_error(telemetry, metrics_context, "socket_write", &error);
+            ResponseDeliveryError {
+                error,
+                delivered_bytes,
+                kind: ResponseDeliveryErrorKind::Write,
+            }
+        })?;
         Ok(delivered_bytes)
     }
 

@@ -133,6 +133,9 @@ nacelle = { version = "0.3", default-features = false, features = ["http"] }
 # TCP + HTTP + OpenTelemetry metrics
 nacelle = { version = "0.3", features = ["http", "otel"] }
 
+# TCP diagnostic phase histograms; still requires runtime activation
+nacelle = { version = "0.3", features = ["phase-timing"] }
+
 # Include setup hints in NacelleError Display output
 nacelle = { version = "0.3", features = ["error-hints"] }
 
@@ -154,6 +157,7 @@ nacelle = { version = "0.3", default-features = false, features = ["tcp", "opens
 | `openssl-vendored` | Build OpenSSL from source when native OpenSSL is unavailable. |
 | `tls-self-signed` | Generate ephemeral Rustls self-signed certificates for local tests. |
 | `otel` | OpenTelemetry metrics API integration through `NacelleTelemetry`. |
+| `phase-timing` | Compile TCP read, decode, handler, encode, and write phase timers. Implies `otel`; disabled by default. |
 
 OpenSSL builds need native OpenSSL development files unless you enable
 `openssl-vendored`. Vendored OpenSSL also needs Perl on Windows.

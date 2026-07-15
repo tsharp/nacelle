@@ -537,7 +537,6 @@ where
 
     match outcome {
         Ok(completion) => {
-            let encode_started = start_tcp_phase(telemetry_plan.phase_duration);
             let encode_result = encode_response_body::<P, W, Observer>(
                 protocol,
                 completion.into_inner(),
@@ -550,12 +549,6 @@ where
                 telemetry_plan.phase_duration,
             )
             .await;
-            finish_tcp_phase(
-                telemetry,
-                metrics_context,
-                "response_encode",
-                encode_started,
-            );
             let response_bytes = match encode_result {
                 Ok(response_bytes) => response_bytes,
                 Err(delivery_error) => {
@@ -794,7 +787,7 @@ where
     D: RequestDispatch<P>,
     Observer: NacelleTelemetryObserver,
 {
-    let handler_started = metrics_context.and_then(|_| start_tcp_phase(phase_duration_metrics));
+    let handler_started = start_tcp_phase(phase_duration_metrics && metrics_context.is_some());
     let result = execute_handler(
         handler,
         request,

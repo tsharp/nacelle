@@ -72,12 +72,47 @@ and memory approaching the configured budget.
 The default OpenTelemetry profile keeps lifecycle metrics on. Request metrics
 are grouped under `NacelleTelemetryConfig::request_metrics`: `started`,
 `completed`, and `byte_counts` are on by default, while `in_flight`,
-`duration_ms`, and phase histograms are opt-in. The stress server's default OTel
-build prints a compact console snapshot every 5 seconds.
+and `duration_ms` are opt-in. TCP phase histograms require the non-default
+`phase-timing` Cargo feature and explicit runtime activation. The stress
+server's default OTel build prints a compact console snapshot every 5 seconds.
 
 Request duration metrics remain opt-in through `NacelleTelemetryConfig`. With
 the default config, core/HTTP request paths avoid request timer work unless HTTP
 access logging is enabled.
+
+Compile and activate TCP phase timing only for a diagnostic build:
+
+```toml
+[dependencies]
+nacelle = { version = "0.3", features = ["phase-timing"] }
+```
+
+```rust
+let telemetry = NacelleTelemetry::default()
+	.with_phase_duration_metrics(true);
+```
+
+The `nacelle.phase.duration_ms` histogram uses a low-cardinality `phase` label:
+
+| Phase | Boundary |
+| --- | --- |
+| `socket_read` | One completed transport read, including asynchronous wait but excluding decode. |
+| `decode` | One protocol decoder invocation; a request may require more than one invocation. |
+| `request_body_read` | Request-body assembly or remaining streaming-body drain. May include `socket_read` operations. |
+| `handler` | The awaited application handler, including application body consumption and response construction. |
+| `response_encode` | One synchronous protocol response-frame encoder invocation. |
+| `socket_write` | One response write batch or explicit transport flush, including asynchronous wait. |
+
+These are operation histograms, not a per-request trace. Do not add their
+percentiles to infer round-trip latency: pipelining can decode several requests
+from one read, streaming overlaps body reads with the handler, and response
+coalescing can write several completed requests in one batch. Use
+`nacelle.request.duration_ms` for server request processing and client-side
+latency for actual round-trip time.
+
+The server cannot measure TCP handshake duration because the kernel completes
+it before `accept()` returns. Connection accepted, active, and closed metrics
+remain available; TLS handshake timing is not currently emitted as a phase.
 
 Canonical OpenTelemetry metric names are resource-first. Instrument type is
 documented here rather than embedded in the metric name:
@@ -97,7 +132,7 @@ documented here rather than embedded in the metric name:
 | `nacelle.request.bytes` | Counter | Request bytes accounted by the transport/protocol path. |
 | `nacelle.response.bytes` | Counter | Response bytes accounted by the transport/protocol path. |
 | `nacelle.request.duration_ms` | Histogram | Request duration, opt-in. |
-| `nacelle.phase.duration_ms` | Histogram | Internal phase duration, opt-in. |
+| `nacelle.phase.duration_ms` | Histogram | TCP operation duration; requires compile-time and runtime opt-in. |
 
 Run microbenchmarks before and after hot-path changes:
 

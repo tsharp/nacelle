@@ -152,8 +152,10 @@ a `NacelleMetricsContext` with listener, protocol, transport, and TLS labels.
 
 Request metric switches live under `NacelleTelemetryConfig::request_metrics`.
 Started/completed counters and byte counters are on by default; in-flight
-counters, duration histograms, and phase histograms are disabled by default.
-Enable them deliberately with `NacelleTelemetry::default()` builder methods on
-the server or app when you need diagnostic detail and can afford the extra
-per-request metric writes. Core/HTTP request paths do not start a request timer
-unless duration metrics or HTTP access logging are enabled.
+counters and duration histograms are disabled by default. TCP phase histograms
+additionally require the non-default `phase-timing` Cargo feature. Enable them
+deliberately with `NacelleTelemetry::default()` builder methods on the server or
+app when you need diagnostic detail and can afford the extra timers and metric
+writes. Without `phase-timing`, TCP phase timer storage and `Instant` calls are
+not compiled. Core/HTTP request paths do not start a request timer unless
+duration metrics or HTTP access logging are enabled.

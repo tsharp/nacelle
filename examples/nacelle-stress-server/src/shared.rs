@@ -96,6 +96,7 @@ pub struct ServerConfig {
     pub request_body_channel_capacity: usize,
     pub low_memory: bool,
     pub byte_metrics: bool,
+    pub phase_duration_metrics: bool,
     pub tls_self_signed: bool,
     pub limits: NacelleLimits,
     pub tcp_limits: NacelleTcpLimits,
@@ -121,6 +122,7 @@ impl Default for ServerConfig {
             request_body_channel_capacity: 8,
             low_memory: false,
             byte_metrics: true,
+            phase_duration_metrics: false,
             tls_self_signed: false,
             limits: NacelleLimits::default(),
             tcp_limits: NacelleTcpLimits::default(),
@@ -142,6 +144,7 @@ struct ServerConfigFile {
     request_body_channel_capacity: Option<usize>,
     low_memory: Option<bool>,
     byte_metrics: Option<bool>,
+    phase_duration_metrics: Option<bool>,
     tls_self_signed: Option<bool>,
     limits: Option<LimitsConfigFile>,
     tcp_limits: Option<TcpLimitsConfigFile>,
@@ -215,6 +218,9 @@ impl ServerConfig {
         }
         if let Some(byte_metrics) = file.byte_metrics {
             self.byte_metrics = byte_metrics;
+        }
+        if let Some(phase_duration_metrics) = file.phase_duration_metrics {
+            self.phase_duration_metrics = phase_duration_metrics;
         }
         if let Some(tls_self_signed) = file.tls_self_signed {
             self.tls_self_signed = tls_self_signed;
@@ -541,6 +547,9 @@ fn parse_args_with_default_config(
             "--no-byte-metrics" => {
                 config.byte_metrics = false;
             }
+            "--phase-duration-metrics" => {
+                config.phase_duration_metrics = true;
+            }
             "--tls-self-signed" => {
                 config.tls_self_signed = true;
             }
@@ -552,6 +561,11 @@ fn parse_args_with_default_config(
 
     if config.server_threads == 0 {
         return Err("--server-threads must be greater than zero".into());
+    }
+    if config.phase_duration_metrics && !cfg!(feature = "phase-timing") {
+        return Err(
+            "phase duration metrics require the nacelle-stress-server phase-timing feature".into(),
+        );
     }
 
     if cli_overrides {
@@ -595,6 +609,10 @@ pub fn print_config(config: &ServerConfig, runtime: &str, actual_server_threads:
     );
     println!("  low_memory: {}", config.low_memory);
     println!("  byte_metrics: {}", config.byte_metrics);
+    println!(
+        "  phase_duration_metrics: {}",
+        config.phase_duration_metrics
+    );
     println!("  tls_self_signed: {}", config.tls_self_signed);
     println!("  limits:");
     println!("    max_connections: {}", config.limits.max_connections);
@@ -746,6 +764,8 @@ pub fn print_help(runtime: &str) {
                                                        MIMALLOC_ARENA_EAGER_COMMIT=0\n\
            --byte-metrics                            Enable OTel request/response byte counters.\n\
            --no-byte-metrics                         Disable OTel request/response byte counters.\n\
+           --phase-duration-metrics                  Enable diagnostic TCP phase histograms; requires\n\
+                                                     the phase-timing Cargo feature.\n\
            --tls-self-signed                         Serve TCP over TLS with an ephemeral\n\
                                                      self-signed certificate. The stress server\n\
                                                      default build includes this capability, but\n\
@@ -784,6 +804,7 @@ request_body_chunk_size = 1024
 request_body_channel_capacity = 2
 low_memory = true
 byte_metrics = true
+phase_duration_metrics = false
 tls_self_signed = true
 
 [limits]
@@ -820,6 +841,7 @@ idle_timeout_ms = 120000
         assert_eq!(config.request_body_channel_capacity, 2);
         assert!(config.low_memory);
         assert!(config.byte_metrics);
+        assert!(!config.phase_duration_metrics);
         assert!(config.tls_self_signed);
         assert_eq!(config.limits.max_connections, 128_000);
         assert_eq!(config.limits.max_connections_per_peer, Some(4_096));
@@ -874,6 +896,25 @@ idle_timeout_ms = 120000
         assert_eq!(
             config.response_write_mode,
             ResponseWriteMode::CoalesceBuffered
+        );
+    }
+
+    #[test]
+    fn phase_duration_metrics_require_compile_time_support() {
+        let result = parse_args_with_default_config(
+            ["--phase-duration-metrics".to_string()],
+            "tokio",
+            Path::new("missing-default-config.toml"),
+        );
+
+        #[cfg(feature = "phase-timing")]
+        assert!(result.unwrap().phase_duration_metrics);
+        #[cfg(not(feature = "phase-timing"))]
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("phase-timing feature")
         );
     }
 

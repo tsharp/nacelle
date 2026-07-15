@@ -51,6 +51,21 @@ Use `--no-byte-metrics` for a lower-overhead OTel run, or use
 metrics-free, system-allocator diagnostic. Add `--features mimalloc-allocator`
 when the baseline must keep mimalloc while disabling TLS and OpenTelemetry.
 
+TCP phase timing is excluded from the default build. Compile and activate it
+only for a diagnostic run:
+
+```bash
+cargo run --release -p nacelle-stress-server --features phase-timing -- \
+  --config examples/nacelle-stress-server/configs/tcp.toml \
+  --phase-duration-metrics
+```
+
+The five-second OTel snapshot then prints count, mean, minimum, and maximum for
+each observed phase. Use an external metrics backend for percentiles and longer
+retention. The phase timers and histogram writes affect the measured hot path,
+so do not compare this run directly with a phase-timing-free throughput
+baseline.
+
 The Tokio stress server default build includes `tls-self-signed` support. The
 checked-in root `config.toml` enables `tls_self_signed = true`, so the local
 stress client should use `--tls-insecure` with that default config. Use
