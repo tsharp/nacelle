@@ -9,7 +9,9 @@ use nacelle_core::limits::{NacelleMemoryAllocation, NacelleRuntimeState};
 use nacelle_core::telemetry::{NacelleMetricsContext, NacelleTelemetry, NacelleTelemetryObserver};
 
 use super::io::{flush_with_timeout, write_all_tracked_with_timeout};
-use super::metrics::{TcpTelemetryPlan, finish_tcp_phase, record_tcp_error, start_tcp_phase};
+#[cfg(test)]
+use super::metrics::TcpTelemetryPlan;
+use super::metrics::{finish_tcp_phase, record_tcp_error, start_tcp_phase};
 
 #[derive(Debug)]
 pub(super) struct ResponseDeliveryError {
@@ -178,7 +180,7 @@ impl ResponseDelivery {
         runtime_state: &NacelleRuntimeState,
         telemetry: &NacelleTelemetry<Observer>,
         metrics_context: Option<&NacelleMetricsContext>,
-        telemetry_plan: TcpTelemetryPlan,
+        phase_duration_metrics: bool,
         encode: E,
     ) -> Result<FrameDelivery, ResponseDeliveryError>
     where
@@ -223,7 +225,7 @@ impl ResponseDelivery {
                 tcp_limits,
                 telemetry,
                 metrics_context,
-                telemetry_plan,
+                phase_duration_metrics,
                 frame_start,
                 frame_len,
             )
@@ -243,7 +245,7 @@ impl ResponseDelivery {
         tcp_limits: &NacelleTcpLimits,
         telemetry: &NacelleTelemetry<Observer>,
         metrics_context: Option<&NacelleMetricsContext>,
-        telemetry_plan: TcpTelemetryPlan,
+        phase_duration_metrics: bool,
     ) -> Result<usize, ResponseDeliveryError>
     where
         W: AsyncWrite + Unpin,
@@ -258,7 +260,7 @@ impl ResponseDelivery {
                 tcp_limits,
                 telemetry,
                 metrics_context,
-                telemetry_plan,
+                phase_duration_metrics,
             )
             .await
             .map_err(|(error, written)| ResponseDeliveryError {
@@ -287,7 +289,7 @@ impl ResponseDelivery {
         tcp_limits: &NacelleTcpLimits,
         telemetry: &NacelleTelemetry<Observer>,
         metrics_context: Option<&NacelleMetricsContext>,
-        telemetry_plan: TcpTelemetryPlan,
+        phase_duration_metrics: bool,
         previous_bytes: usize,
         frame_len: usize,
     ) -> Result<usize, ResponseDeliveryError>
@@ -300,7 +302,7 @@ impl ResponseDelivery {
             tcp_limits,
             telemetry,
             metrics_context,
-            telemetry_plan,
+            phase_duration_metrics,
         )
         .await
         .map(|_| frame_len)
@@ -317,13 +319,13 @@ impl ResponseDelivery {
         tcp_limits: &NacelleTcpLimits,
         telemetry: &NacelleTelemetry<Observer>,
         metrics_context: Option<&NacelleMetricsContext>,
-        telemetry_plan: TcpTelemetryPlan,
+        phase_duration_metrics: bool,
     ) -> Result<usize, (NacelleError, usize)>
     where
         W: AsyncWrite + Unpin,
         Observer: NacelleTelemetryObserver,
     {
-        let write_started = start_tcp_phase(telemetry_plan.phase_duration);
+        let write_started = start_tcp_phase(phase_duration_metrics);
         let result = write_all_tracked_with_timeout(writer, &self.pending, tcp_limits).await;
         finish_tcp_phase(telemetry, metrics_context, "socket_write", write_started);
         if let Err((error, _)) = &result {
@@ -344,7 +346,7 @@ pub(super) async fn encode_response_body<P, W, Observer>(
     runtime_state: &NacelleRuntimeState,
     telemetry: &NacelleTelemetry<Observer>,
     metrics_context: Option<&NacelleMetricsContext>,
-    telemetry_plan: TcpTelemetryPlan,
+    phase_duration_metrics: bool,
 ) -> Result<usize, ResponseDeliveryError>
 where
     P: Protocol,
@@ -373,7 +375,7 @@ where
                     runtime_state,
                     telemetry,
                     metrics_context,
-                    telemetry_plan,
+                    phase_duration_metrics,
                     |dst| {
                         protocol.encode_response_terminal_chunk(&mut response_context, chunk, dst)
                     },
@@ -390,7 +392,7 @@ where
                     runtime_state,
                     telemetry,
                     metrics_context,
-                    telemetry_plan,
+                    phase_duration_metrics,
                     |dst| protocol.encode_response_end(&mut response_context, dst),
                 )
                 .await
@@ -405,7 +407,7 @@ where
             tcp_limits,
             telemetry,
             metrics_context,
-            telemetry_plan,
+            phase_duration_metrics,
         )
         .await
         .map_err(|error| ResponseDeliveryError {
@@ -422,7 +424,7 @@ where
                 tcp_limits,
                 telemetry,
                 metrics_context,
-                telemetry_plan,
+                phase_duration_metrics,
             )
             .await
         {
@@ -468,7 +470,7 @@ where
                 runtime_state,
                 telemetry,
                 metrics_context,
-                telemetry_plan,
+                phase_duration_metrics,
                 |dst| protocol.encode_response_chunk(&mut response_context, chunk, dst),
             )
             .await
@@ -485,7 +487,7 @@ where
             runtime_state,
             telemetry,
             metrics_context,
-            telemetry_plan,
+            phase_duration_metrics,
             |dst| protocol.encode_response_end(&mut response_context, dst),
         )
         .await
@@ -505,7 +507,7 @@ pub(super) async fn write_error<P, W, Observer>(
     runtime_state: &NacelleRuntimeState,
     telemetry: &NacelleTelemetry<Observer>,
     metrics_context: Option<&NacelleMetricsContext>,
-    telemetry_plan: TcpTelemetryPlan,
+    phase_duration_metrics: bool,
 ) -> Result<usize, ResponseDeliveryError>
 where
     P: Protocol,
@@ -520,7 +522,7 @@ where
             runtime_state,
             telemetry,
             metrics_context,
-            telemetry_plan,
+            phase_duration_metrics,
             move |dst| protocol.encode_error(context.as_ref(), error, dst),
         )
         .await
@@ -690,7 +692,7 @@ mod tests {
                 &runtime_state,
                 &telemetry,
                 None,
-                TcpTelemetryPlan::new(&telemetry),
+                TcpTelemetryPlan::new(&telemetry).phase_duration,
                 |frame| {
                     encoded.set(true);
                     frame.extend_from_slice(b"frame")
@@ -736,7 +738,7 @@ mod tests {
                 &runtime_state,
                 &telemetry,
                 None,
-                TcpTelemetryPlan::new(&telemetry),
+                TcpTelemetryPlan::new(&telemetry).phase_duration,
                 |frame| frame.extend_from_slice(b"123456789"),
             )
             .await
@@ -772,7 +774,7 @@ mod tests {
                 &runtime_state,
                 &telemetry,
                 None,
-                TcpTelemetryPlan::new(&telemetry),
+                TcpTelemetryPlan::new(&telemetry).phase_duration,
                 |frame| frame.extend_from_slice(b"existing"),
             )
             .await
@@ -786,7 +788,7 @@ mod tests {
                 &runtime_state,
                 &telemetry,
                 None,
-                TcpTelemetryPlan::new(&telemetry),
+                TcpTelemetryPlan::new(&telemetry).phase_duration,
                 |frame| {
                     encoded.set(true);
                     frame.extend_from_slice(b"x")
@@ -818,7 +820,7 @@ mod tests {
             .allocate_memory(8)
             .expect("base response buffer should fit");
         let telemetry = NacelleTelemetry::default();
-        let plan = TcpTelemetryPlan::new(&telemetry);
+        let phase_duration_metrics = TcpTelemetryPlan::new(&telemetry).phase_duration;
         let mut writer = sink();
 
         for payload in [b"123456789".as_slice(), b"abcdefghi".as_slice()] {
@@ -830,7 +832,7 @@ mod tests {
                     &runtime_state,
                     &telemetry,
                     None,
-                    plan,
+                    phase_duration_metrics,
                     |frame| frame.extend_from_slice(payload),
                 )
                 .await
@@ -875,7 +877,7 @@ mod tests {
                 &runtime_state,
                 &telemetry,
                 None,
-                TcpTelemetryPlan::new(&telemetry),
+                TcpTelemetryPlan::new(&telemetry).phase_duration,
                 |frame| {
                     frame.extend_from_slice(b"encoded data")?;
                     Err(NacelleError::InvalidFrame("injected encoder failure"))
@@ -904,7 +906,7 @@ mod tests {
             .allocate_memory(8)
             .expect("base response buffer should fit");
         let telemetry = NacelleTelemetry::default();
-        let plan = TcpTelemetryPlan::new(&telemetry);
+        let phase_duration_metrics = TcpTelemetryPlan::new(&telemetry).phase_duration;
         let mut writer = sink();
 
         delivery
@@ -915,7 +917,7 @@ mod tests {
                 &runtime_state,
                 &telemetry,
                 None,
-                plan,
+                phase_duration_metrics,
                 |frame| frame.extend_from_slice(&[0_u8; 16]),
             )
             .await
@@ -928,7 +930,7 @@ mod tests {
                 &NacelleTcpLimits::default(),
                 &telemetry,
                 None,
-                plan,
+                phase_duration_metrics,
             )
             .await
             .expect("pending bytes should flush");
@@ -949,7 +951,7 @@ mod tests {
             .allocate_memory(8)
             .expect("base response buffer should fit");
         let telemetry = NacelleTelemetry::default();
-        let plan = TcpTelemetryPlan::new(&telemetry);
+        let phase_duration_metrics = TcpTelemetryPlan::new(&telemetry).phase_duration;
         let mut writer = sink();
 
         delivery
@@ -960,7 +962,7 @@ mod tests {
                 &runtime_state,
                 &telemetry,
                 None,
-                plan,
+                phase_duration_metrics,
                 |frame| frame.extend_from_slice(&[0_u8; 16]),
             )
             .await
@@ -973,7 +975,7 @@ mod tests {
                 &NacelleTcpLimits::default(),
                 &telemetry,
                 None,
-                plan,
+                phase_duration_metrics,
             )
             .await
             .expect_err("write should fail");
@@ -991,7 +993,7 @@ mod tests {
         let mut delivery = ResponseDelivery::new(&config);
         let runtime_state = NacelleRuntimeState::default();
         let telemetry = NacelleTelemetry::default();
-        let plan = TcpTelemetryPlan::new(&telemetry);
+        let phase_duration_metrics = TcpTelemetryPlan::new(&telemetry).phase_duration;
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let mut writer = RecordingWriter(bytes.clone());
 
@@ -1003,7 +1005,7 @@ mod tests {
                 &runtime_state,
                 &telemetry,
                 None,
-                plan,
+                phase_duration_metrics,
                 |frame| frame.extend_from_slice(b"good"),
             )
             .await
@@ -1016,7 +1018,7 @@ mod tests {
                 &runtime_state,
                 &telemetry,
                 None,
-                plan,
+                phase_duration_metrics,
                 |frame| {
                     frame.extend_from_slice(b"bad")?;
                     Err(NacelleError::InvalidFrame("injected encoder failure"))
@@ -1035,7 +1037,7 @@ mod tests {
                 &NacelleTcpLimits::default(),
                 &telemetry,
                 None,
-                plan,
+                phase_duration_metrics,
             )
             .await
             .expect("prior frame should flush");
@@ -1052,7 +1054,7 @@ mod tests {
         let mut delivery = ResponseDelivery::new(&config);
         let runtime_state = NacelleRuntimeState::default();
         let telemetry = NacelleTelemetry::default();
-        let plan = TcpTelemetryPlan::new(&telemetry);
+        let phase_duration_metrics = TcpTelemetryPlan::new(&telemetry).phase_duration;
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let mut writer = RecordingWriter(bytes.clone());
 
@@ -1065,7 +1067,7 @@ mod tests {
                     &runtime_state,
                     &telemetry,
                     None,
-                    plan,
+                    phase_duration_metrics,
                     |frame| frame.extend_from_slice(payload),
                 )
                 .await
@@ -1077,7 +1079,7 @@ mod tests {
                 &NacelleTcpLimits::default(),
                 &telemetry,
                 None,
-                plan,
+                phase_duration_metrics,
             )
             .await
             .expect("frames should flush");
@@ -1098,7 +1100,7 @@ mod tests {
         let mut delivery = ResponseDelivery::new(&config);
         let runtime_state = NacelleRuntimeState::default();
         let telemetry = NacelleTelemetry::default();
-        let plan = TcpTelemetryPlan::new(&telemetry);
+        let phase_duration_metrics = TcpTelemetryPlan::new(&telemetry).phase_duration;
         let limits = NacelleTcpLimits::default();
         let mut writer = PartialThenFail {
             bytes_before_failure: 6,
@@ -1113,7 +1115,7 @@ mod tests {
                 &runtime_state,
                 &telemetry,
                 None,
-                plan,
+                phase_duration_metrics,
                 |frame| frame.extend_from_slice(b"prev"),
             )
             .await
@@ -1126,7 +1128,7 @@ mod tests {
                 &runtime_state,
                 &telemetry,
                 None,
-                plan,
+                phase_duration_metrics,
                 |frame| frame.extend_from_slice(b"next"),
             )
             .await
@@ -1146,7 +1148,7 @@ mod tests {
         let mut delivery = ResponseDelivery::new(&config);
         let runtime_state = NacelleRuntimeState::default();
         let telemetry = NacelleTelemetry::default();
-        let plan = TcpTelemetryPlan::new(&telemetry);
+        let phase_duration_metrics = TcpTelemetryPlan::new(&telemetry).phase_duration;
         let limits = NacelleTcpLimits::default();
         let encoded = std::cell::Cell::new(false);
 
@@ -1158,7 +1160,7 @@ mod tests {
                 &runtime_state,
                 &telemetry,
                 None,
-                plan,
+                phase_duration_metrics,
                 |frame| frame.extend_from_slice(b"prev"),
             )
             .await
@@ -1171,7 +1173,7 @@ mod tests {
                 &runtime_state,
                 &telemetry,
                 None,
-                plan,
+                phase_duration_metrics,
                 |frame| {
                     encoded.set(true);
                     frame.extend_from_slice(b"current")
@@ -1195,7 +1197,7 @@ mod tests {
         let mut delivery = ResponseDelivery::new(&config);
         let runtime_state = NacelleRuntimeState::default();
         let telemetry = NacelleTelemetry::default();
-        let plan = TcpTelemetryPlan::new(&telemetry);
+        let phase_duration_metrics = TcpTelemetryPlan::new(&telemetry).phase_duration;
         let bytes = Arc::new(Mutex::new(Vec::new()));
         let mut writer = RecordingWriter(bytes.clone());
 
@@ -1207,7 +1209,7 @@ mod tests {
                 &runtime_state,
                 &telemetry,
                 None,
-                plan,
+                phase_duration_metrics,
                 |frame| frame.extend_from_slice(b"first-"),
             )
             .await
@@ -1221,7 +1223,7 @@ mod tests {
                 &runtime_state,
                 &telemetry,
                 None,
-                plan,
+                phase_duration_metrics,
                 |frame| frame.extend_from_slice(b"second"),
             )
             .await

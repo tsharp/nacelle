@@ -216,7 +216,7 @@ where
         protocol.decoder(config.max_frame_len),
         &telemetry,
         connection_metrics.as_ref(),
-        telemetry_plan,
+        telemetry_plan.phase_duration,
     );
     let mut request_reader =
         MessageReader::with_capacity(reader, decoder, config.read_buffer_capacity);
@@ -305,7 +305,7 @@ where
                     &tcp_limits,
                     &telemetry,
                     connection_metrics.as_ref(),
-                    telemetry_plan,
+                    telemetry_plan.phase_duration,
                 )
                 .await
                 .map_err(|error| error.error)?;
@@ -321,7 +321,7 @@ where
             &tcp_limits,
             &telemetry,
             connection_metrics.as_ref(),
-            telemetry_plan,
+            telemetry_plan.phase_duration,
         )
         .await
     {

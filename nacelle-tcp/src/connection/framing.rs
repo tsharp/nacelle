@@ -6,7 +6,7 @@ use nacelle_core::error::NacelleError;
 use nacelle_core::limits::{NacelleMemoryAllocation, NacelleRuntimeState};
 use nacelle_core::telemetry::{NacelleMetricsContext, NacelleTelemetry, NacelleTelemetryObserver};
 
-use super::metrics::{TcpTelemetryPlan, finish_tcp_phase, start_tcp_phase};
+use super::metrics::{finish_tcp_phase, start_tcp_phase};
 
 pub(super) fn allocate_connection_buffers(
     config: &NacelleTcpConfig,
@@ -22,7 +22,7 @@ pub(super) struct InstrumentedDecoder<'a, D, Observer: NacelleTelemetryObserver>
     decoder: D,
     telemetry: &'a NacelleTelemetry<Observer>,
     metrics_context: Option<&'a NacelleMetricsContext>,
-    telemetry_plan: TcpTelemetryPlan,
+    phase_duration_metrics: bool,
 }
 
 impl<'a, D, Observer> InstrumentedDecoder<'a, D, Observer>
@@ -33,13 +33,13 @@ where
         decoder: D,
         telemetry: &'a NacelleTelemetry<Observer>,
         metrics_context: Option<&'a NacelleMetricsContext>,
-        telemetry_plan: TcpTelemetryPlan,
+        phase_duration_metrics: bool,
     ) -> Self {
         Self {
             decoder,
             telemetry,
             metrics_context,
-            telemetry_plan,
+            phase_duration_metrics,
         }
     }
 }
@@ -53,7 +53,7 @@ where
     type Error = NacelleError;
 
     fn decode(&mut self, input: &mut BytesMut) -> Result<Option<Self::Message>, Self::Error> {
-        let decode_started = start_tcp_phase(self.telemetry_plan.phase_duration);
+        let decode_started = start_tcp_phase(self.phase_duration_metrics);
         let result = self.decoder.decode(input);
         finish_tcp_phase(
             self.telemetry,
@@ -69,7 +69,7 @@ where
     }
 
     fn decode_eof(&mut self, input: &mut BytesMut) -> Result<Option<Self::Message>, Self::Error> {
-        let decode_started = start_tcp_phase(self.telemetry_plan.phase_duration);
+        let decode_started = start_tcp_phase(self.phase_duration_metrics);
         let result = self.decoder.decode_eof(input);
         finish_tcp_phase(
             self.telemetry,

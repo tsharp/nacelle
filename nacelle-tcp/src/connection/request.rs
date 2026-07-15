@@ -386,7 +386,7 @@ where
             runtime_state,
             telemetry,
             metrics_context,
-            telemetry_plan,
+            telemetry_plan.phase_duration,
         )
         .await
         {
@@ -422,7 +422,7 @@ where
             connection_context,
             telemetry,
             metrics_context,
-            telemetry_plan,
+            telemetry_plan.phase_duration,
         )
         .await
     } else if config.request_body_mode == TcpRequestBodyMode::Buffered {
@@ -453,7 +453,7 @@ where
             connection_context,
             telemetry,
             metrics_context,
-            telemetry_plan,
+            telemetry_plan.phase_duration,
         )
         .await
     } else {
@@ -483,7 +483,7 @@ where
             connection_context,
             telemetry,
             metrics_context,
-            telemetry_plan,
+            telemetry_plan.phase_duration,
         );
         let pump_future = pump_request_body(
             reader,
@@ -547,7 +547,7 @@ where
                 runtime_state,
                 telemetry,
                 metrics_context,
-                telemetry_plan,
+                telemetry_plan.phase_duration,
             )
             .await;
             finish_tcp_phase(
@@ -602,7 +602,7 @@ where
                 runtime_state,
                 telemetry,
                 metrics_context,
-                telemetry_plan,
+                telemetry_plan.phase_duration,
             )
             .await
             {
@@ -787,15 +787,14 @@ async fn execute_handler_with_metrics<P, D, Observer>(
     connection_context: &mut D::Connection,
     telemetry: &NacelleTelemetry<Observer>,
     metrics_context: Option<&NacelleMetricsContext>,
-    telemetry_plan: TcpTelemetryPlan,
+    phase_duration_metrics: bool,
 ) -> Result<crate::protocol::TcpHandlerCompletion<P>, NacelleError>
 where
     P: Protocol,
     D: RequestDispatch<P>,
     Observer: NacelleTelemetryObserver,
 {
-    let handler_started =
-        metrics_context.and_then(|_| start_tcp_phase(telemetry_plan.phase_duration));
+    let handler_started = metrics_context.and_then(|_| start_tcp_phase(phase_duration_metrics));
     let result = execute_handler(
         handler,
         request,
