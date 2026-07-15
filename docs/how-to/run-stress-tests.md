@@ -88,3 +88,11 @@ serial handler dispatch for controlled diagnostics:
   --pipeline 8 \
   --runs 3
 ```
+
+Add `--feature-set default` for mimalloc plus OpenTelemetry. To measure the
+self-signed Rustls config, also pass
+`--config examples/nacelle-stress-server/configs/tcp-tls.toml` and
+`--tls-insecure`. The latter disables certificate verification and is only for
+the local generated certificate. The stress client flushes each populated
+request window before reading responses so buffered TLS records cannot strand
+deeply pipelined workers.

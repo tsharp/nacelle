@@ -204,11 +204,27 @@ Use the Linux profiling helper for repeatable plain-TCP diagnostics:
 ```
 
 The helper builds the `profiling` Cargo profile with optimization, debug
-information, and frame pointers. It uses `--no-default-features` for the stress
-server, which disables TLS, OpenTelemetry, and mimalloc. The system allocator is
-required because Heaptrack cannot intercept calls made directly to mimalloc.
-Treat this as a diagnostic profile, not as a matched comparison with the default
-mimalloc build.
+information, and frame pointers. Its default `--feature-set minimal` uses
+`--no-default-features`, which disables TLS, OpenTelemetry, and mimalloc. The
+system allocator is required because Heaptrack cannot intercept calls made
+directly to mimalloc. Treat this as a diagnostic profile, not as a matched
+comparison with the default mimalloc build.
+
+Use `--feature-set default` to profile the default mimalloc, OpenTelemetry, and
+Rustls-capable binaries. Self-signed Rustls workloads also require a TLS config
+and the explicit local-test trust flag:
+
+```bash
+./scripts/profile-linux.sh \
+	--tool perf \
+	--feature-set default \
+	--config examples/nacelle-stress-server/configs/tcp-tls.toml \
+	--tls-insecure
+```
+
+The helper rejects Heaptrack with the default feature set because direct
+mimalloc calls are invisible to Heaptrack. It also rejects `--tls-insecure`
+with the minimal feature set because that client omits Rustls.
 
 Pass disjoint CPU lists after reviewing the native harness plan:
 
@@ -275,59 +291,43 @@ highly pipelined workloads, not as a universal default. Pipeline-1 performance
 showed no repeatable benefit, and target-network latency, response sizes,
 backpressure, TLS, and telemetry require separate measurements.
 
-## Phase 7 local confidence checks
+### Default-feature plain TCP and Rustls diagnostic
 
-The following measurements are local confidence checks, not portable release
-claims. They were collected from source checkpoint `9e42adb` under WSL2 kernel
-`6.6.87.2-microsoft-standard-WSL2` on an Intel Xeon Platinum 8370C host
-(8 cores / 16 logical CPUs) with `rustc 1.95.0`, Criterion defaults, the system
-allocator, and features `bench,tcp`. WSL2 did not expose a CPU governor:
+A follow-up on the same host used the default stress-server feature set:
+mimalloc, OpenTelemetry with byte metrics, and self-signed Rustls support. The
+workload, CPU sets, timeout defaults, warm-up, sample duration, and three-run
+cell size matched the preceding matrix. Plain TCP and Rustls were measured as
+separate transport profiles.
 
-- disabled connection telemetry: approximately `0.58-0.62 ns`
-- disabled request-completed telemetry: approximately `1.89-1.91 ns`
-- disabled timeout telemetry: approximately `0.78-0.79 ns`
-- concrete in-memory observation: approximately `60-89 ns` across repeated
-	local runs, dominated by its mutex and event-vector write
+| Transport | Pipeline | Immediate median | Coalesced median | Local delta |
+| --- | ---: | ---: | ---: | ---: |
+| Plain TCP | 1 | 537,566 req/s | 536,274 req/s | -0.2% |
+| Plain TCP | 8 | 619,749 req/s | 1,168,411 req/s | +88.5% |
+| Plain TCP | 32 | 608,519 req/s | 1,329,735 req/s | +118.5% |
+| Rustls | 1 | 478,062 req/s | 471,512 req/s | -1.4% |
+| Rustls | 8 | 524,887 req/s | 529,998 req/s | +1.0% |
+| Rustls | 32 | 547,103 req/s | 546,342 req/s | -0.1% |
 
-Generated-code inspection used monomorphized release modules with ThinLTO
-disabled for readability:
+All 36 measured client runs completed without reported failures; all cells had
+at most 1.1% min-to-max spread. At pipeline depth 8, matched perf captures lost
+no samples. Plain coalescing reduced tracked write-loop self share from 2.10%
+to 0.47%, pending-write self share from 1.78% to 0.42%, `send` from 0.62% to
+0.12%, and TCP write polling from 0.53% to 0.09%. The equivalent Rustls pair
+was throughput-neutral: tracked write-loop self share remained approximately
+1.01%, while encryption, TLS buffering, and OpenTelemetry aggregation remained
+material costs.
 
-```bash
-cargo rustc -p nacelle-examples --bin echo --release --features tcp -- \
-	-C lto=no -C codegen-units=1 --emit=llvm-ir
-cargo rustc -p nacelle-examples --bin http_echo --release --features http -- \
-	-C lto=no -C codegen-units=1 --emit=llvm-ir
-```
+Deep-pipeline Rustls testing also exposed two stress-path correctness gaps.
+The client now flushes buffered TLS requests before reading responses, and the
+TCP connection driver flushes the underlying transport before another request
+read and performs a write-timeout-bounded shutdown. This delivers terminal TLS
+records promptly and emits `close_notify`. Final pipeline-32 Rustls samples all
+completed in approximately 10.02 seconds instead of waiting for the 30-second
+read timeout.
 
-The complete TCP and HTTP modules contained 98 and 221 indirect calls,
-respectively, from the full dependency graph. Inspection found no Nacelle
-dynamic-observer symbols or boxed handler-future symbols. The modules retain
-Nacelle's startup-only listener-installer indirection plus calls from Tokio,
-Hyper, tracing, and allocator internals. These feature sets did not enable TLS
-or OpenTelemetry, so provider/backend indirection requires separate builds.
-No module-wide count should be presented as request-path Nacelle dispatch
-without symbol-level attribution.
-
-`perf`/flamegraph profiling was unavailable for the WSL2 kernel used for these
-checks. Run profile-level validation on the target Linux kernel before making
-throughput, latency, or production-readiness claims.
-
-Matched 30-second saturation profiles were also collected from source
-checkpoint `7eb400f` with 8 server threads, 256 connections, pipeline depth 8,
-256-byte requests, 64-byte responses, byte metrics enabled, and the default
-OpenTelemetry console observer:
-
-| Profile | Requests | Effective RPS | p50 | p95 | p99 | Max |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Plain TCP | 23,521,395 | 783,584 | 2.45 ms | 4.32 ms | 5.75 ms | 24.19 ms |
-| Low-memory TCP | 23,389,425 | 779,230 | 2.48 ms | 4.52 ms | 6.34 ms | 28.30 ms |
-| Self-signed Rustls TCP | 18,868,139 | 628,688 | 3.04 ms | 5.36 ms | 7.36 ms | 37.08 ms |
-
-All three clients completed without reported failures. The low-memory server
-reported 20 MiB of accounted connection memory while 256 connections were
-active and returned to zero after they closed. These are saturation results;
-use pipeline depth 1 for established-connection RTT measurements. They are not
-a substitute for a matched pre-migration baseline or target-hardware load test.
+These results support coalescing for measured plain-TCP pipelined workloads on
+this host. They do not support enabling it for Rustls or pipeline-1 workloads.
+Raw final artifacts are under `target/profiles/20260715-default-final`.
 
 ## Disabled-policy specialization
 

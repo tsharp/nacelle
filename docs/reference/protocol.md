@@ -95,9 +95,13 @@ budget, and writes an explicit end frame after a streaming body reaches EOF.
 `CoalesceBuffered` and `FlushAtBytes` may queue multiple completed frames from
 already-decoded requests, preserving order and rolling back only the current
 frame on encoder failure. The queue drains before another socket read and before
-awaiting another streaming response chunk. Request telemetry records encoded
-response bytes when a request completes; a later batch write failure is reported
-as a connection operation error.
+awaiting another streaming response chunk. At that boundary, the runtime also
+flushes the underlying `AsyncWrite`, which is required for buffered transports
+such as TLS. When the connection ends cleanly, the runtime performs a
+write-timeout-bounded writer shutdown so TLS transports can emit `close_notify`.
+Request telemetry records encoded response bytes when a request completes; a
+later batch write, transport flush, or shutdown failure is reported as a
+connection operation error.
 
 The protocol guarantees:
 
